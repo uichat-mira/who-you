@@ -40,14 +40,20 @@ Reference: [Cloudflare cf first Worker](https://developers.cloudflare.com/cf/get
 - CI: Branch Policy + Repository Contract → `Mira Gate`. Docs-only state is **explicitly not runtime-validated**.
 - `mira-external-worker.yml`: opt-in paid centralized Organization Worker; comment exactly `/worker run` on an approved open Issue, or dispatch with Issue number. It requires the corresponding Org secret to be available to this repository; it cannot run without it. Produces Draft PR into `dev`, no merge or deploy.
 - `opencode-review.yml`: independent advisory AI review only for ready, internal PRs to `dev`. It requires an available `AI_PROVIDER_OPENCODE_GO_KEY`. It is **not** a mandatory approval substitute.
-- Mira Mobile PR activity identifies the delegated developer as GitHub `tzt2026` (the historical `t-zt` alias no longer resolves in GitHub search). This repository currently reports `read` permission for `tzt2026`; an administrator must grant the intended write role before a CODEOWNERS assignment can be effective. No invitation or permission change has been made.
+- Delegated developer: GitHub `tzt2026` (verified as a Mira Organization member and active Mira Mobile contributor). Write access to this repository was granted during the bootstrap.
 
-## Checks still owned by a GitHub administrator
+## Verified GitHub repository settings (2026-11-06)
 
-The available integration cannot mutate repository rulesets, default branch, review-required settings, or collaborators. In repository settings, establish:
-- default branch `dev` for normal development (while `prod` retains production semantics);
-- require PR + `Mira Gate` on `dev`, `test`, `prod`; require approvals (at least one independent human reviewer for protected changes), restrict bypass/force pushes, and review any admin exceptions;
-- confirm GitHub Actions permitted reusable workflows and organization-level secret access for this repo;
-- add the delegated developer's exact GitHub handle with appropriate least privilege.
+- **Default branch:** `dev` (verified from GitHub repository settings).
+- **Delegated maintainer:** `tzt2026` is an active Mira Organization member; this repo now grants **write** (not admin) permission.
+- **Branch protection:** `dev`, `test`, `prod` all require a PR, the `Mira Gate` check, one independent approving human review, current branch status checks, CODEOWNERS review, conversation resolution, and administrator enforcement. Force pushes and deletions are disabled.
+- **CODEOWNERS:** `@dangjingtao` and `@tzt2026` are named for product/engineering review; PR authors cannot approve their own PRs.
+- **Scaffold CI:** confirmed successful on all three initial branch heads (`7abc3e9`); only documentation/governance verification has actually run. No runtime test or deployment was performed.
 
-These settings are **pending**, not declared complete.
+## Pending integration / release controls
+
+- Verify `AI_PROVIDER_OPENCODE_GO_KEY` Organization secret is authorized for this new repository. The external Worker and advisory OpenCode reviewer are configured but **have not executed on an actual Issue/PR**.
+- Agree Who You's intended Cloudflare account, hostname, nonproduction separation, and production release approval. No Worker, OAuth/Email Routing configuration, database, DNS record, or mailbox credential has been created for Who You.
+- Once an approved runtime task exists, initialize `cf` project, pin its dependencies, add real Worker-runtime tests and locked package installation, and validate `cf build` before permitting deployments.
+- No mandatory CodeRabbit/Sonar requirement has been asserted or treated as a replacement for the named human reviewers.
+
