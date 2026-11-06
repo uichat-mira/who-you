@@ -1,5 +1,11 @@
-/AGENTS.md @dangjingtao
-/.github/workflows/ @dangjingtao
-/.github/CODEOWNERS @dangjingtao
-/ai-review/ @dangjingtao
-/cloudflare.config.ts @dangjingtao
+# Independent human reviewers from the two Mira maintainers.
+# GitHub cannot count the PR author's own approval.
+* @dangjingtao @tzt2026
+
+# Engineering-control changes still request both maintainers.
+# Always preserve Mira policy, CI, and security reviews.
+/AGENTS.md @dangjingtao @tzt2026
+/.github/workflows/ @dangjingtao @tzt2026
+/.github/CODEOWNERS @dangjingtao @tzt2026
+/ai-review/ @dangjingtao @tzt2026
+/cloudflare.config.ts @dangjingtao @tzt2026
