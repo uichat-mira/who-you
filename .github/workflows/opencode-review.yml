@@ -1,0 +1,88 @@
+name: OpenCode Review
+
+on:
+  pull_request:
+    branches: [dev]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: opencode-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    if: >-
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    # Bound model exploration and runner spending (a review is not a repository audit).
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Check OpenCode credentials
+        id: credentials
+        shell: bash
+        env:
+          OPENCODE_API_KEY: ${{ secrets.AI_PROVIDER_OPENCODE_GO_KEY }}
+        run: |
+          if [ -n "${OPENCODE_API_KEY}" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::error::AI_PROVIDER_OPENCODE_GO_KEY is not available to this repository."
+            exit 1
+          fi
+
+      - name: Checkout repository
+        if: steps.credentials.outputs.ready == 'true'
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Review pull request with DeepSeek V4.1 Flash
+        id: primary-review
+        if: steps.credentials.outputs.ready == 'true'
+        continue-on-error: true
+        uses: anomalyco/opencode/github@77fc88c8ade8e5a620ebbe1197f3a572d29ae91a
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OPENCODE_API_KEY: ${{ secrets.AI_PROVIDER_OPENCODE_GO_KEY }}
+          OPENCODE_PERMISSION: '{"bash":"deny","edit":"deny","task":"deny","webfetch":"deny","websearch":"deny","external_directory":"deny"}'
+        with:
+          use_github_token: true
+          share: "false"
+          model: opencode-go/deepseek-v4.1-flash
+          prompt: |
+            Review this pull request as an independent, advisory reviewer only.
+            Follow the Mira organization AI review policy and applicable repository AGENTS.md.
+            Start with the GitHub PR diff. Inspect only changed files and the minimal
+            direct callers/contracts needed to validate high-confidence P0-P2 defects.
+            Do not perform broad repository discovery, unbounded grep, build/test,
+            web browsing, or unrelated security/style audits.
+            Finish with a concise PR comment promptly; do not exhaust the time budget.
+            Explain observations, inferences, impact, and how to verify each material issue.
+            Never modify files, approve or request changes through review state, merge,
+            change task status, or create follow-up Issues.
+            Post advisory PR comments only. Do not equate CI success with product acceptance.
+
+      - name: Retry review with Union Alpha Free
+        if: steps.credentials.outputs.ready == 'true' && steps.primary-review.outcome == 'failure'
+        uses: anomalyco/opencode/github@77fc88c8ade8e5a620ebbe1197f3a572d29ae91a
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OPENCODE_API_KEY: ${{ secrets.AI_PROVIDER_OPENCODE_GO_KEY }}
+          OPENCODE_PERMISSION: '{"bash":"deny","edit":"deny","task":"deny","webfetch":"deny","websearch":"deny","external_directory":"deny"}'
+        with:
+          use_github_token: true
+          share: "false"
+          model: opencode-go/union-alpha
+          prompt: |
+            Retry this pull request review as an independent advisory reviewer.
+            Focus on the current PR diff and only directly related context.
+            Do not perform broad repository discovery, tests, builds or web browsing.
+            Report high-confidence P0-P2 defects only, briefly.
+            Do not modify files, approve, merge, or change task status.

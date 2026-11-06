@@ -1,0 +1,64 @@
+name: Who You CI
+
+on:
+  pull_request:
+    branches: [dev, test, prod]
+  push:
+    branches: [dev, test, prod]
+
+permissions:
+  contents: read
+
+jobs:
+  validation:
+    name: Repository Contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+      - name: Validate repository contract
+        run: bash scripts/check.sh
+
+  branch-policy:
+    name: Branch Policy
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enforce Mira environment flow
+        shell: bash
+        env:
+          HEAD_BRANCH: ${{ github.head_ref }}
+          BASE_BRANCH: ${{ github.base_ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          test "$HEAD_REPO" = "$BASE_REPO" || { echo "Cross-repository PRs require an explicit exception" >&2; exit 1; }
+          case "${HEAD_BRANCH}:${BASE_BRANCH}" in
+            feat/*:dev|fix/*:dev|docs/*:dev|chore/*:dev|refactor/*:dev|test/*:dev|dev:test|test:prod)
+              echo "Allowed: ${HEAD_BRANCH} -> ${BASE_BRANCH}" ;;
+            *) echo "Forbidden: ${HEAD_BRANCH} -> ${BASE_BRANCH}" >&2; exit 1 ;;
+          esac
+
+  mira-gate:
+    name: Mira Gate
+    if: ${{ always() }}
+    needs: [validation, branch-policy]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Aggregate required results
+        shell: bash
+        env:
+          CONTRACT: ${{ needs.validation.result }}
+          BRANCH: ${{ needs.branch-policy.result }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          test "$CONTRACT" = success
+          if test "$EVENT" = pull_request; then
+            test "$BRANCH" = success
+          else
+            test "$BRANCH" = skipped
+          fi
