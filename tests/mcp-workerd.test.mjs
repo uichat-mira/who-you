@@ -200,6 +200,53 @@ test("unauthenticated and insufficient callers see 401 discovery but no tools or
 	});
 });
 
+test("RFC 9728 discovery serves cross-origin browsers while /mcp keeps its same-origin gate", async () => {
+	await withWorker("dist/test-worker.mjs", FIXTURE_BINDINGS, async ({ mf }) => {
+		const metadataUrl = "https://127.0.0.1/.well-known/oauth-protected-resource/mcp";
+		const crossOrigin = { origin: "https://app.example" };
+
+		const document = await mf.dispatchFetch(metadataUrl, { headers: crossOrigin });
+		assert.equal(document.status, 200);
+		assert.equal(document.headers.get("access-control-allow-origin"), "*");
+		assert.deepEqual((await document.json()).authorization_servers, [MCP_TEST_ISSUER]);
+
+		const preflight = await mf.dispatchFetch(metadataUrl, {
+			method: "OPTIONS",
+			headers: {
+				...crossOrigin,
+				"access-control-request-headers": "content-type",
+			},
+		});
+		assert.equal(preflight.status, 204);
+		assert.equal(preflight.headers.get("access-control-allow-origin"), "*");
+
+		const blocked = await mf.dispatchFetch(MCP_TEST_RESOURCE_URL, {
+			method: "POST",
+			headers: {
+				"content-type": "application/json",
+				accept: "application/json, text/event-stream",
+				authorization: "Bearer fixture-consumer-1",
+				...crossOrigin,
+			},
+			body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+		});
+		assert.equal(blocked.status, 403);
+		assert.equal((await blocked.json()).error.code, -32000);
+
+		const sameOrigin = await mf.dispatchFetch(MCP_TEST_RESOURCE_URL, {
+			method: "POST",
+			headers: {
+				"content-type": "application/json",
+				accept: "application/json, text/event-stream",
+				authorization: "Bearer fixture-consumer-1",
+				origin: "https://127.0.0.1",
+			},
+			body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+		});
+		assert.equal(sameOrigin.status, 200);
+	});
+});
+
 test("the deployed Worker has no fixture fallback and stays closed without bindings", async () => {
 	await withWorker("dist/worker.mjs", {}, async ({ mf }) => {
 		const closed = await mf.dispatchFetch(MCP_TEST_RESOURCE_URL, {

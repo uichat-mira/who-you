@@ -144,12 +144,20 @@ export function createWhoYouMcp(
 				return Response.json({ error: "not_found" }, { status: 404 });
 			}
 
-			const rejected =
-				hostHeaderValidationResponse(request, [config.resourceUrl.hostname]) ??
-				originValidationResponse(request, [config.resourceUrl.hostname]);
-			if (rejected) return rejected;
+			const hostRejected = hostHeaderValidationResponse(request, [
+				config.resourceUrl.hostname,
+			]);
+			if (hostRejected) return hostRejected;
 
+			// RFC 9728 discovery is public metadata that browser clients fetch
+			// cross-origin. Host validation still blocks DNS rebinding, but the
+			// same-origin gate below applies only to the agent-facing `/mcp` surface.
 			if (path === metadataPath) return metadataResponse(request, metadata);
+
+			const originRejected = originValidationResponse(request, [
+				config.resourceUrl.hostname,
+			]);
+			if (originRejected) return originRejected;
 
 			const auth = await gate(request);
 			if (auth instanceof Response) return auth;

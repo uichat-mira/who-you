@@ -74,6 +74,7 @@ test("standard space-delimited OAuth scope strings are recognized", async () => 
 test("wrong issuer, audience, expiry, signature or identity is an opaque invalid_token", async () => {
 	const cases = [
 		["wrong issuer", { issuer: "mira:cloud-guanlan" }],
+		["OAuth discovery URL is not the JWT issuer", { issuer: "https://auth.example.com" }],
 		["wrong audience", { audience: "mira:cloud-guanlan" }],
 		["expired", { expiresAt: NOW - 60 }],
 		["missing exp", { expiresAt: undefined }],
@@ -164,6 +165,7 @@ test("a complete binding set resolves the Who You resource boundary", () => {
 	assert.equal(resolved.ok, true);
 	if (!resolved.ok) return;
 	assert.equal(resolved.config.tokenIssuer, CLOUD_AUTH_TOKEN_ISSUER);
+	assert.equal(resolved.config.issuer, "https://auth.example.com");
 	assert.deepEqual(resolved.config.requiredScopes, [WHOYOU_REQUIRED_SCOPE]);
 	assert.equal(resolved.config.consumerClaim, "consumer_id");
 	assert.equal(
