@@ -89,7 +89,8 @@ export function createCloudAuthVerifier(
 				typeof payload[options.consumerClaim] === "string"
 					? (payload[options.consumerClaim] as string)
 					: "";
-			const expiresAt = typeof payload.exp === "number" ? payload.exp : NaN;
+			const expiresAt =
+				typeof payload.exp === "number" ? payload.exp : Number.NaN;
 			if (!accountId || !consumerId || !Number.isFinite(expiresAt)) {
 				throw invalidToken();
 			}

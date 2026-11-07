@@ -107,7 +107,7 @@ test("the SDK auth pass-through preserves verifier identity and rejects malforme
 	assert.equal(restored.accountId, principal.accountId);
 	assert.equal(restored.consumerId, principal.consumerId);
 	assert.deepEqual(restored.scopes, principal.scopes);
-	assert.rejects(async () => principalFromAuthInfo(undefined));
+	await assert.rejects(async () => principalFromAuthInfo(undefined));
 });
 
 test("missing or malformed configuration stays closed", () => {
