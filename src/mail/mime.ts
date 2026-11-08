@@ -84,20 +84,27 @@ const normalizeVerdict = (value: string | undefined): string => {
 };
 
 /**
- * Parses `Authentication-Results` only as a recorded verdict. The actual
- * platform header source is still P0 (product design §10 #4); an absent header
- * is recorded as `unknown`, never treated as a pass.
+ * Only the first Cloudflare-inserted Authentication-Results header exposed by
+ * ForwardableEmailMessage.headers is eligible for an authentication verdict.
+ * Never pass raw MIME headers here: the sender can forge those. Cloudflare
+ * documents the first header as its own, with authserv-id mx.cloudflare.net.
+ * A missing, foreign or malformed first header remains unknown, not pass.
  */
 export function parseAuthVerdict(headers: { key: string; value: string }[]): AuthVerdict {
 	const verdicts = new Map<string, string>();
-	for (const header of headers) {
-		if (header.key.toLowerCase() !== "authentication-results") continue;
+	const firstHeader = headers.find(
+		(header) => header.key.toLowerCase() === "authentication-results",
+	);
+	// Fetch Headers may combine repeated Authentication-Results values with
+	// commas; never read later, sender-controlled headers.
+	const firstValue = firstHeader?.value.split(",")[0]?.trim() ?? "";
+	if (/^mx\.cloudflare\.net\s*;/i.test(firstValue)) {
 		AUTH_METHOD.lastIndex = 0;
-		let match = AUTH_METHOD.exec(header.value);
+		let match = AUTH_METHOD.exec(firstValue);
 		while (match) {
 			const method = match[1].toLowerCase();
 			verdicts.set(method, normalizeVerdict(match[2]));
-			match = AUTH_METHOD.exec(header.value);
+			match = AUTH_METHOD.exec(firstValue);
 		}
 	}
 	const spf = verdicts.get("spf") ?? "none";
@@ -151,7 +158,8 @@ const toParsedMail = (parsed: RawMime, limits: MailLimits): ParsedMail => {
 		text: parsed.text,
 		html: parsed.html ? sanitizeHtml(parsed.html) : null,
 		attachments,
-		auth: parseAuthVerdict(parsed.headers),
+		// MIME-supplied Authentication-Results are sender-controlled.
+		auth: parseAuthVerdict([]),
 	};
 };
 
