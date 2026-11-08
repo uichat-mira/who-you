@@ -1,5 +1,10 @@
 import { OAuthError, OAuthErrorCode } from "@modelcontextprotocol/server";
 import type { WhoYouPrincipal, WhoYouTokenVerifier } from "../src/mcp/auth";
+import {
+	ConfirmationCredentialError,
+	type WhoYouConfirmationVerifier,
+} from "../src/mail/confirmation";
+import type { MailSender } from "../src/mail/send";
 
 /**
  * Deterministic MCP contract fixtures. Every address, account and consumer here
@@ -11,6 +16,7 @@ export const MCP_TEST_TOKEN_ISSUER = "mira:cloud-auth"; // Signed Cloud Auth cre
 export const MCP_TEST_JWKS_URL = "https://auth.example.com/.well-known/jwks.json";
 export const MCP_TEST_AUDIENCE = "mira:who-you";
 export const MCP_TEST_SCOPE = "whoyou.read";
+export const MCP_TEST_WRITE_SCOPE = "whoyou.mail.write";
 export const MCP_TEST_FUTURE_EXP = 4_102_444_800; // 2100-01-01T00:00:00Z
 
 const base = (): WhoYouPrincipal => ({
@@ -36,6 +42,17 @@ export const FIXTURE_TOKENS: Record<string, WhoYouPrincipal> = {
 	"fixture-expired": { ...base(), expiresAt: 1 },
 	"fixture-missing-consumer": { ...base(), consumerId: "" },
 	"fixture-wrong-scope": { ...base(), scopes: ["whoyou.ledger.write"] },
+	// Read + draft-write principal used by the S2 draft/send surface.
+	"fixture-mail-writer": {
+		...base(),
+		scopes: [MCP_TEST_SCOPE, MCP_TEST_WRITE_SCOPE],
+	},
+	"fixture-account-b-writer": {
+		...base(),
+		accountId: "account-b",
+		consumerId: "consumer-3",
+		scopes: [MCP_TEST_SCOPE, MCP_TEST_WRITE_SCOPE],
+	},
 };
 
 const invalidToken = (): OAuthError =>
@@ -62,6 +79,125 @@ export function createFixtureVerifier(expected: {
 			if (!principal.accountId || !principal.consumerId) throw invalidToken();
 			if (principal.expiresAt <= Date.now() / 1000) throw invalidToken();
 			return { ...principal, scopes: [...principal.scopes] };
+		},
+	};
+}
+
+export type FixtureConfirmation = {
+	accountId: string;
+	actor: "user";
+	draftId: string;
+	draftVersion: number;
+	contentHash: string;
+	nonce: string;
+};
+
+const FIXTURE_CONFIRMATION_PREFIX = "fixture-confirmation.";
+
+const base64UrlEncode = (value: string): string =>
+	btoa(value).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+
+const base64UrlDecode = (value: string): string => {
+	const padded = value.replace(/-/g, "+").replace(/_/g, "/");
+	return atob(padded.padEnd(Math.ceil(padded.length / 4) * 4, "="));
+};
+
+/** Builds a synthetic send credential; the test worker verifies it locally. */
+export function encodeFixtureConfirmation(payload: FixtureConfirmation): string {
+	return `${FIXTURE_CONFIRMATION_PREFIX}${base64UrlEncode(JSON.stringify(payload))}`;
+}
+
+/**
+ * Test-only confirmation verifier. It mirrors the production invariants (actor,
+ * version, 64-hex hash, nonce shape) without a JWKS, so the send pipeline can be
+ * exercised end to end while the real verifier is covered by its own unit test.
+ */
+export function createFixtureConfirmationVerifier(): WhoYouConfirmationVerifier {
+	return {
+		async verifyConfirmation(token: string) {
+			if (!token.startsWith(FIXTURE_CONFIRMATION_PREFIX)) {
+				throw new ConfirmationCredentialError();
+			}
+			let parsed: Record<string, unknown>;
+			try {
+				const raw = JSON.parse(base64UrlDecode(token.slice(FIXTURE_CONFIRMATION_PREFIX.length)));
+				if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+					throw new ConfirmationCredentialError();
+				}
+				parsed = raw as Record<string, unknown>;
+			} catch {
+				throw new ConfirmationCredentialError();
+			}
+			if (typeof parsed.accountId !== "string" || !parsed.accountId) {
+				throw new ConfirmationCredentialError();
+			}
+			if (parsed.actor !== "user") throw new ConfirmationCredentialError();
+			if (typeof parsed.draftId !== "string" || !parsed.draftId) {
+				throw new ConfirmationCredentialError();
+			}
+			if (
+				typeof parsed.draftVersion !== "number" ||
+				!Number.isInteger(parsed.draftVersion) ||
+				parsed.draftVersion < 1
+			) {
+				throw new ConfirmationCredentialError();
+			}
+			if (
+				typeof parsed.contentHash !== "string" ||
+				!/^[a-f0-9]{64}$/.test(parsed.contentHash)
+			) {
+				throw new ConfirmationCredentialError();
+			}
+			if (typeof parsed.nonce !== "string" || parsed.nonce.length < 16) {
+				throw new ConfirmationCredentialError();
+			}
+			return {
+				accountId: parsed.accountId,
+				confirmation: {
+					actor: "user",
+					draftId: parsed.draftId,
+					draftVersion: parsed.draftVersion,
+					contentHash: parsed.contentHash,
+					nonce: parsed.nonce,
+				},
+			};
+		},
+	};
+}
+
+export type FixtureSentMessage = {
+	from: string;
+	to: string[];
+	cc: string[];
+	bcc: string[];
+	subject: string;
+};
+
+const fixtureSent: FixtureSentMessage[] = [];
+
+export function fixtureOutbox(): FixtureSentMessage[] {
+	return fixtureSent.map((message) => ({
+		...message,
+		to: [...message.to],
+		cc: [...message.cc],
+		bcc: [...message.bcc],
+	}));
+}
+
+/** Deterministic outbound fake; `failing` exercises the relay error path. */
+export function createFakeMailSender(options: { failing?: boolean } = {}): MailSender {
+	return {
+		async send(message) {
+			if (options.failing) throw new Error("fixture provider failure");
+			// The fake holds the envelope only; body content is never asserted as PII.
+			fixtureSent.push({
+				from: message.from,
+				to: message.to.map((entry) => entry.address),
+				cc: message.cc.map((entry) => entry.address),
+				bcc: message.bcc.map((entry) => entry.address),
+				subject: message.subject,
+			});
+			return { providerMessageId: `fixture-provider-${fixtureSent.length}` };
 		},
 	};
 }

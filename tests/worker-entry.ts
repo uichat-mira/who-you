@@ -7,7 +7,12 @@ import {
 	MCP_RESOURCE_PATH,
 } from "../src/mcp/config";
 import { createWhoYouRuntime } from "../src/mcp/runtime";
-import { createFixtureVerifier } from "./fixtures";
+import {
+	createFakeMailSender,
+	createFixtureConfirmationVerifier,
+	createFixtureVerifier,
+	fixtureOutbox,
+} from "./fixtures";
 
 /**
  * Test-only Worker entry. It exposes the same production `fetch` and `email`
@@ -51,9 +56,21 @@ function buildEmailMessage(input: InboundRequest): {
 	return { message, rejectedReason: () => rejected };
 }
 
+type TestEnv = WhoYouEnv & {
+	/** Test-only switch for the injected outbound fake. */
+	MAIL_SEND_MODE?: "ok" | "failing" | "missing";
+};
+
 export default {
-	async fetch(request: Request, env: WhoYouEnv): Promise<Response> {
+	async fetch(request: Request, env: TestEnv): Promise<Response> {
 		const path = new URL(request.url).pathname;
+
+		if (path === "/__sent") {
+			if (request.method !== "GET") {
+				return Response.json({ error: "method_not_allowed" }, { status: 405 });
+			}
+			return Response.json({ sent: fixtureOutbox() });
+		}
 
 		if (path === "/__inbound") {
 			if (request.method !== "POST") {
@@ -105,6 +122,11 @@ export default {
 				issuer: CLOUD_AUTH_TOKEN_ISSUER,
 				audience: env.MCP_AUDIENCE ?? "",
 			}),
+			confirmationVerifier: createFixtureConfirmationVerifier(),
+			sender:
+				env.MAIL_SEND_MODE === "missing"
+					? null
+					: createFakeMailSender({ failing: env.MAIL_SEND_MODE === "failing" }),
 		});
 		if (!resolved.ok) {
 			return Response.json(
