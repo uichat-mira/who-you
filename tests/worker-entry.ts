@@ -1,16 +1,102 @@
+import worker from "../src/index";
+import { createMailServices, type WhoYouEnv } from "../src/mail/config";
+import { provisionMailbox } from "../src/mail/store";
 import {
 	CLOUD_AUTH_TOKEN_ISSUER,
 	MCP_METADATA_PATH,
 	MCP_RESOURCE_PATH,
-	type McpEnv,
 } from "../src/mcp/config";
 import { createWhoYouRuntime } from "../src/mcp/runtime";
 import { createFixtureVerifier } from "./fixtures";
 
-/** Test-only Worker entry: deterministic verifier, never selected by deployed env. */
+/**
+ * Test-only Worker entry. It exposes the same production `fetch` and `email`
+ * handlers, but adds a `/__inbound` route because Miniflare has no public API
+ * for dispatching the `email` handler itself. The route constructs the same
+ * ForwardableEmailMessage shape workerd passes to `email()` and invokes the
+ * production handler with the real D1/R2 bindings.
+ */
+type InboundRequest = {
+	from?: string;
+	to: string;
+	raw: string;
+	headers?: Record<string, string>;
+};
+
+function buildEmailMessage(input: InboundRequest): {
+	message: ForwardableEmailMessage;
+	rejectedReason: () => string | null;
+} {
+	const bytes = new TextEncoder().encode(input.raw);
+	let rejected: string | null = null;
+	const message = {
+		from: input.from ?? "sender@example.com",
+		to: input.to,
+		headers: new Headers(input.headers ?? {}),
+		raw: new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(bytes);
+				controller.close();
+			},
+		}),
+		rawSize: bytes.byteLength,
+		setReject(reason: string) {
+			rejected = reason;
+		},
+		async forward() {},
+		async reply() {
+			throw new Error("reply is out of scope for S1");
+		},
+	} as unknown as ForwardableEmailMessage;
+	return { message, rejectedReason: () => rejected };
+}
+
 export default {
-	async fetch(request: Request, env: McpEnv): Promise<Response> {
+	async fetch(request: Request, env: WhoYouEnv): Promise<Response> {
 		const path = new URL(request.url).pathname;
+
+		if (path === "/__inbound") {
+			if (request.method !== "POST") {
+				return Response.json({ error: "method_not_allowed" }, { status: 405 });
+			}
+			let input: InboundRequest;
+			try {
+				input = (await request.json()) as InboundRequest;
+			} catch {
+				return Response.json({ error: "invalid_request" }, { status: 400 });
+			}
+			const { message, rejectedReason } = buildEmailMessage(input);
+			if (!worker.email) throw new Error("test entry requires the production email handler");
+			try {
+				await worker.email(message, env);
+			} catch {
+				return Response.json({ error: "inbound_failed" }, { status: 500 });
+			}
+			return Response.json({ rejected: rejectedReason() });
+		}
+
+		if (path === "/__provision") {
+			if (request.method !== "POST") {
+				return Response.json({ error: "method_not_allowed" }, { status: 405 });
+			}
+			const input = (await request.json()) as { accountId?: string; localPart?: string };
+			if (!input.accountId || !input.localPart) {
+				return Response.json({ error: "invalid_request" }, { status: 400 });
+			}
+			const services = createMailServices(env);
+			if (!services.ok || !services.services.domain) {
+				return Response.json({ error: "mail_not_configured" }, { status: 503 });
+			}
+			const result = await provisionMailbox(services.services.repository, {
+				accountId: input.accountId,
+				localPart: input.localPart,
+				domain: services.services.domain,
+				quotaBytes: services.services.limits.mailboxQuotaBytes,
+				now: 1_795_000_000_000,
+			});
+			return Response.json(result);
+		}
+
 		if (path !== MCP_RESOURCE_PATH && path !== MCP_METADATA_PATH) {
 			return Response.json({ error: "not_found" }, { status: 404 });
 		}
@@ -28,4 +114,4 @@ export default {
 		}
 		return resolved.runtime.fetch(request);
 	},
-} satisfies ExportedHandler<McpEnv>;
+} satisfies ExportedHandler<WhoYouEnv>;

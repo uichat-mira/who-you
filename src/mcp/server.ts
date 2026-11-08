@@ -27,10 +27,15 @@ import {
 	renderWhoamiMarkdown,
 	type WhoamiResult,
 } from "./capabilities";
+import { registerMailTools } from "./mail";
+import type { MailServices } from "../mail/config";
 
 const MAX_REQUEST_BODY_BYTES = 256 * 1024;
 
-function buildMcpServer(authInfo: AuthInfo | undefined): McpServer {
+function buildMcpServer(
+	authInfo: AuthInfo | undefined,
+	services: MailServices,
+): McpServer {
 	const principal = principalFromAuthInfo(authInfo);
 	const server = new McpServer(
 		{ name: WHOYOU_MCP_SERVER_NAME, version: WHOYOU_MCP_SERVER_VERSION },
@@ -57,6 +62,8 @@ function buildMcpServer(authInfo: AuthInfo | undefined): McpServer {
 			};
 		},
 	);
+
+	registerMailTools(server, principal, services);
 
 	return server;
 }
@@ -113,6 +120,7 @@ const metadataResponse = (
 export function createWhoYouMcp(
 	config: McpConfig,
 	verifier: WhoYouTokenVerifier,
+	services: MailServices,
 ): WhoYouMcpRuntime {
 	const tokenVerifier: OAuthTokenVerifier = {
 		async verifyAccessToken(token: string): Promise<AuthInfo> {
@@ -130,7 +138,7 @@ export function createWhoYouMcp(
 		resourceMetadataUrl: config.metadataUrl,
 	});
 	const handler = createMcpHandler(
-		({ authInfo }) => buildMcpServer(authInfo),
+		({ authInfo }) => buildMcpServer(authInfo, services),
 		{ legacy: "stateless", maxRequestBodySize: MAX_REQUEST_BODY_BYTES },
 	);
 	const metadata = buildMcpProtectedResourceMetadata(config);
