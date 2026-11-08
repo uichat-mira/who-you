@@ -272,12 +272,64 @@ test("duplicate Message-ID delivery is idempotent and retains a single object se
 	});
 });
 
+test("concurrent duplicate deliveries never delete accepted R2 objects or inflate counters", async () => {
+	await withWorker({}, async ({ mf, db }) => {
+		await seedTwoAccounts(db);
+		const raw = simpleRaw("racy@example.com", "Race", "one accepted body");
+		const deliveries = await Promise.all(
+			Array.from({ length: 4 }, () => postInbound(mf, { to: "alpha@tomlab.cn", raw })),
+		);
+		assert.ok(deliveries.every((delivery) => delivery.rejected === null));
+		const count = await db.prepare(
+			"SELECT COUNT(*) AS total FROM messages WHERE mailbox_id = 'mbx_a'",
+		).first();
+		assert.equal(count.total, 1);
+		const mailbox = await db.prepare(
+			"SELECT message_count, bytes_used FROM mailboxes WHERE id = 'mbx_a'",
+		).first();
+		assert.equal(mailbox.message_count, 1);
+		assert.equal(mailbox.bytes_used, new TextEncoder().encode(raw).byteLength);
+		const threads = await db.prepare("SELECT message_count FROM threads").first();
+		assert.equal(threads.message_count, 1);
+		const bucket = await mf.getR2Bucket("MAIL_BUCKET");
+		const objects = await bucket.list();
+		assert.equal(objects.objects.length, 2);
+		const message = await db.prepare("SELECT raw_key, text_key FROM messages").first();
+		assert.ok(await bucket.get(message.raw_key));
+		assert.ok(await bucket.get(message.text_key));
+	});
+});
+
+test("forged raw Authentication-Results cannot defeat the Cloudflare transport verdict", async () => {
+	await withWorker({}, async ({ mf, db }) => {
+		await seedTwoAccounts(db);
+		const raw = [
+			"Authentication-Results: attacker.test; dmarc=pass",
+			"From: Spoof <spoof@example.com>",
+			"To: alpha@tomlab.cn",
+			"Subject: spoofed authentication",
+			"Message-ID: <forged@example.com>",
+			"",
+			"Forged header body",
+		].join("\r\n");
+		await postInbound(mf, {
+			to: "alpha@tomlab.cn",
+			raw,
+			headers: { "authentication-results": "mx.cloudflare.net; spf=fail; dmarc=fail" },
+		});
+		const verdict = await db.prepare("SELECT state, dmarc FROM messages").first();
+		assert.equal(verdict.state, "quarantined");
+		assert.equal(verdict.dmarc, "fail");
+	});
+});
+
 test("DMARC failure is quarantined: not searchable and explicitly unreadable", async () => {
 	await withWorker({}, async ({ mf, db }) => {
 		await seedTwoAccounts(db);
 		const inbound = await postInbound(mf, {
 			to: "alpha@tomlab.cn",
 			raw: dmarcFailRaw("spoof@example.com"),
+			headers: { "authentication-results": "mx.cloudflare.net; spf=fail; dkim=fail; dmarc=fail" },
 		});
 		assert.equal(inbound.rejected, null);
 
@@ -381,6 +433,37 @@ test("oversized mail is explicitly rejected with a size code and nothing is writ
 		const big = simpleRaw("big@example.com", "Big", "x".repeat(700));
 		const result = await postInbound(mf, { to: "alpha@tomlab.cn", raw: big });
 		assert.match(result.rejected, /^552 5\.3\.4/);
+		const rows = await db.prepare("SELECT COUNT(*) AS total FROM messages").first();
+		assert.equal(rows.total, 0);
+	});
+});
+
+test("MIME structural ceilings cause explicit 552 rejection, not transient failure", async () => {
+	await withWorker({ MAIL_MAX_PART_COUNT: "2" }, async ({ mf, db }) => {
+		await seedTwoAccounts(db);
+		const multipart = [
+			"From: Alice <alice@example.com>",
+			"To: alpha@tomlab.cn",
+			"Message-ID: <limit@example.com>",
+			'Content-Type: multipart/mixed; boundary="bound"',
+			"",
+			"--bound",
+			"Content-Type: text/plain",
+			"",
+			"one",
+			"--bound",
+			"Content-Type: text/plain",
+			"",
+			"two",
+			"--bound",
+			"Content-Type: text/plain",
+			"",
+			"three",
+			"--bound--",
+			"",
+		].join("\r\n");
+		const result = await postInbound(mf, { to: "alpha@tomlab.cn", raw: multipart });
+		assert.match(result.rejected, /^552 5\\.3\\.4/);
 		const rows = await db.prepare("SELECT COUNT(*) AS total FROM messages").first();
 		assert.equal(rows.total, 0);
 	});
