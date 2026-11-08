@@ -25,12 +25,16 @@ const MAIL_TOOL_NAMES = [
 	"whoyou_mail_thread_get",
 	"whoyou_mail_message_get",
 	"whoyou_mail_attachment_get",
+	"whoyou_mail_flag_set",
 	"whoyou_mail_draft_create",
 	"whoyou_mail_draft_update",
 	"whoyou_mail_draft_discard",
 	"whoyou_mail_draft_get",
 	"whoyou_mail_draft_list",
 	"whoyou_mail_send",
+	"whoyou_mail_export",
+	"whoyou_mail_message_delete",
+	"whoyou_mail_mailbox_delete",
 ];
 
 const READ_ONLY_TOOL_NAMES = new Set([
@@ -42,6 +46,13 @@ const READ_ONLY_TOOL_NAMES = new Set([
 	"whoyou_mail_attachment_get",
 	"whoyou_mail_draft_get",
 	"whoyou_mail_draft_list",
+]);
+
+const DESTRUCTIVE_TOOL_NAMES = new Set([
+	"whoyou_mail_draft_discard",
+	"whoyou_mail_send",
+	"whoyou_mail_message_delete",
+	"whoyou_mail_mailbox_delete",
 ]);
 
 async function withWorker(scriptPath, bindings, run) {
@@ -98,8 +109,7 @@ test("a real workerd modern MCP client lists and calls the read-only whoami tool
 			// Read tools stay non-destructive; write/send tools must not claim read-only.
 			for (const tool of listed.tools) {
 				const readOnly = READ_ONLY_TOOL_NAMES.has(tool.name);
-				const destructive =
-					tool.name === "whoyou_mail_draft_discard" || tool.name === "whoyou_mail_send";
+				const destructive = DESTRUCTIVE_TOOL_NAMES.has(tool.name);
 				assert.equal(tool.annotations?.readOnlyHint, readOnly);
 				assert.equal(tool.annotations?.destructiveHint, destructive);
 			}

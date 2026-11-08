@@ -16,6 +16,8 @@ export type MailLimitEnv = {
 	MAIL_MAILBOX_QUOTA_BYTES?: string;
 	MAIL_BODY_MAX_CHARS?: string;
 	MAIL_ATTACHMENT_INLINE_BYTES?: string;
+	MAIL_EXPORT_MAX_MESSAGES?: string;
+	MAIL_EXPORT_MAX_BYTES?: string;
 };
 
 export type MailLimits = {
@@ -28,6 +30,8 @@ export type MailLimits = {
 	mailboxQuotaBytes: number;
 	bodyMaxChars: number;
 	attachmentInlineBytes: number;
+	exportMaxMessages: number;
+	exportMaxBytes: number;
 };
 
 export const DEFAULT_MAIL_LIMITS: MailLimits = {
@@ -40,6 +44,8 @@ export const DEFAULT_MAIL_LIMITS: MailLimits = {
 	mailboxQuotaBytes: 256 * 1024 * 1024,
 	bodyMaxChars: 200_000,
 	attachmentInlineBytes: 256 * 1024,
+	exportMaxMessages: 1000,
+	exportMaxBytes: 25 * 1024 * 1024,
 };
 
 const positiveInt = (value: string | undefined, fallback: number): number => {
@@ -82,5 +88,10 @@ export function resolveMailLimits(env: MailLimitEnv): MailLimits {
 			env.MAIL_ATTACHMENT_INLINE_BYTES,
 			DEFAULT_MAIL_LIMITS.attachmentInlineBytes,
 		),
+		exportMaxMessages: positiveInt(
+			env.MAIL_EXPORT_MAX_MESSAGES,
+			DEFAULT_MAIL_LIMITS.exportMaxMessages,
+		),
+		exportMaxBytes: positiveInt(env.MAIL_EXPORT_MAX_BYTES, DEFAULT_MAIL_LIMITS.exportMaxBytes),
 	};
 }

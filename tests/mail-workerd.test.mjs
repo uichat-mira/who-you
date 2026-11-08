@@ -11,14 +11,20 @@ import {
 	MCP_TEST_SCOPE,
 } from "../dist/fixtures.mjs";
 
-const MIGRATION = readFileSync("migrations/0001_mail.sql", "utf8")
-	.split("\n")
-	.filter((line) => !line.trimStart().startsWith("--"))
-	.join("\n");
+const migrationStatements = (path) =>
+	readFileSync(path, "utf8")
+		.split("\n")
+		.filter((line) => !line.trimStart().startsWith("--"))
+		.join("\n")
+		.split(";")
+		.map((statement) => statement.trim())
+		.filter(Boolean);
 
-const MIGRATION_STATEMENTS = MIGRATION.split(";")
-	.map((statement) => statement.trim())
-	.filter(Boolean);
+const MIGRATION_STATEMENTS = [
+	...migrationStatements("migrations/0001_mail.sql"),
+	...migrationStatements("migrations/0002_drafts_sends.sql"),
+	...migrationStatements("migrations/0003_s3_state_search_retention.sql"),
+];
 
 const BASE_BINDINGS = {
 	MCP_RESOURCE_URL: MCP_TEST_RESOURCE_URL,

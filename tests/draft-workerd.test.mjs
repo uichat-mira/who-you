@@ -24,6 +24,7 @@ const migrationStatements = (path) =>
 const MIGRATIONS = [
 	...migrationStatements("migrations/0001_mail.sql"),
 	...migrationStatements("migrations/0002_drafts_sends.sql"),
+	...migrationStatements("migrations/0003_s3_state_search_retention.sql"),
 ];
 
 const BASE_BINDINGS = {
@@ -33,6 +34,7 @@ const BASE_BINDINGS = {
 	MCP_AUDIENCE: MCP_TEST_AUDIENCE,
 	MCP_REQUIRED_SCOPES: MCP_TEST_SCOPE,
 	MAIL_DOMAIN: "tomlab.cn",
+	MAIL_SIGNING_KEY: "s3-test-signing-key-0123456789abcdef",
 };
 
 async function withWorker(extraBindings, run) {

@@ -14,6 +14,14 @@ export {
 	parseInboundMail,
 	sanitizeFilename,
 } from "../src/mail/mime";
+export { normalizeSearchQuery } from "../src/mail/search";
+export {
+	SIGNED_DOWNLOAD_TTL_MS,
+	buildDownloadUrl,
+	createDownloadSigner,
+} from "../src/mail/download";
+export { ZipArchive } from "../src/mail/zip";
+export { DEFAULT_RETENTION, resolveRetention, runRetentionSweep } from "../src/mail/retention";
 export { sanitizeHtml } from "../src/mail/sanitize";
 export {
 	buildDraftContent,
