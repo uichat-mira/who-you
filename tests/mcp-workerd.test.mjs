@@ -18,6 +18,15 @@ const FIXTURE_BINDINGS = {
 	MCP_REQUIRED_SCOPES: MCP_TEST_SCOPE,
 };
 
+const MAIL_TOOL_NAMES = [
+	"whoyou_whoami",
+	"whoyou_mailbox_get",
+	"whoyou_mail_search",
+	"whoyou_mail_thread_get",
+	"whoyou_mail_message_get",
+	"whoyou_mail_attachment_get",
+];
+
 async function withWorker(scriptPath, bindings, run) {
 	const mf = new Miniflare({
 		modules: true,
@@ -25,6 +34,9 @@ async function withWorker(scriptPath, bindings, run) {
 		compatibilityDate: "2026-08-06",
 		cf: false,
 		bindings,
+		// S1 requires D1 + R2 for `/mcp`; absent storage must stay fail-closed.
+		d1Databases: ["DB"],
+		r2Buckets: ["MAIL_BUCKET"],
 	});
 	try {
 		await run({ mf });
@@ -65,10 +77,12 @@ test("a real workerd modern MCP client lists and calls the read-only whoami tool
 			assert.equal(transport.sessionId, undefined);
 
 			const listed = await client.listTools();
-			assert.deepEqual(listed.tools.map((tool) => tool.name), ["whoyou_whoami"]);
-			// Mailbox tools do not exist yet; the only tool is a pure identity read.
-			assert.equal(listed.tools[0].annotations?.readOnlyHint, true);
-			assert.equal(listed.tools[0].annotations?.destructiveHint, false);
+			assert.deepEqual(listed.tools.map((tool) => tool.name), MAIL_TOOL_NAMES);
+			// Every registered tool is a read; no send, draft or delete surface exists.
+			for (const tool of listed.tools) {
+				assert.equal(tool.annotations?.readOnlyHint, true);
+				assert.equal(tool.annotations?.destructiveHint, false);
+			}
 
 			const whoami = await client.callTool({ name: "whoyou_whoami", arguments: {} });
 			assert.equal(whoami.isError, undefined);
@@ -101,7 +115,7 @@ test("real 2025-06-18 and 2025-11-25 initialize clients use the stateless legacy
 				assert.equal(client.getNegotiatedProtocolVersion(), version);
 				assert.equal(transport.sessionId, undefined);
 				const listed = await client.listTools();
-				assert.equal(listed.tools.length, 1);
+				assert.equal(listed.tools.length, MAIL_TOOL_NAMES.length);
 				const whoami = await client.callTool({ name: "whoyou_whoami", arguments: {} });
 				assert.equal(whoami.isError, undefined);
 				assert.equal(whoami.structuredContent.consumerId, "consumer-2");
@@ -140,7 +154,7 @@ test("modern raw requests carry no session id and reject a missing Mcp-Method he
 		});
 		assert.equal(ok.status, 200);
 		assert.equal(ok.headers.get("mcp-session-id"), null);
-		assert.equal((await ok.json()).result.tools.length, 1);
+		assert.equal((await ok.json()).result.tools.length, MAIL_TOOL_NAMES.length);
 
 		const missingHeaders = { ...headers };
 		delete missingHeaders["Mcp-Method"];
