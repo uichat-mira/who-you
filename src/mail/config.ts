@@ -5,6 +5,7 @@ import {
 	type MailLimitEnv,
 	type MailLimits,
 } from "./limits";
+import { DraftRepository } from "./draft-store";
 import { MailRepository } from "./store";
 
 /**
@@ -17,10 +18,13 @@ export type WhoYouEnv = McpEnv &
 		DB?: D1Database;
 		MAIL_BUCKET?: R2Bucket;
 		MAIL_DOMAIN?: string;
+		/** Cloudflare Email Service binding; send is closed when it is absent. */
+		MAIL_EMAIL_SEND?: SendEmail;
 	};
 
 export type MailServices = {
 	repository: MailRepository;
+	drafts: DraftRepository;
 	limits: MailLimits;
 	/** `null` when MAIL_DOMAIN is missing or invalid; inbound stays closed. */
 	domain: string | null;
@@ -38,6 +42,7 @@ export function createMailServices(env: WhoYouEnv): MailServicesResult {
 		ok: true,
 		services: {
 			repository: new MailRepository(env.DB, env.MAIL_BUCKET),
+			drafts: new DraftRepository(env.DB),
 			limits: resolveMailLimits(env),
 			domain: normalizeDomain(env.MAIL_DOMAIN ?? ""),
 		},

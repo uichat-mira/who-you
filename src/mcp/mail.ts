@@ -34,19 +34,19 @@ const ISO_DATE = z
 		message: "expected an ISO-8601 date or timestamp",
 	});
 
-type ToolResult = {
+export type ToolResult = {
 	content: { type: "text"; text: string }[];
 	structuredContent?: Record<string, unknown>;
 	isError?: boolean;
 };
 
-const failure = (code: string, detail: string): ToolResult => ({
+export const failure = (code: string, detail: string): ToolResult => ({
 	isError: true,
 	content: [{ type: "text", text: `Error: ${code}\n\n${detail}` }],
 	structuredContent: { error: code },
 });
 
-const success = (markdown: string, structured: Record<string, unknown>): ToolResult => ({
+export const success = (markdown: string, structured: Record<string, unknown>): ToolResult => ({
 	content: [{ type: "text", text: markdown }],
 	structuredContent: structured,
 });

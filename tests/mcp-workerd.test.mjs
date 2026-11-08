@@ -25,7 +25,24 @@ const MAIL_TOOL_NAMES = [
 	"whoyou_mail_thread_get",
 	"whoyou_mail_message_get",
 	"whoyou_mail_attachment_get",
+	"whoyou_mail_draft_create",
+	"whoyou_mail_draft_update",
+	"whoyou_mail_draft_discard",
+	"whoyou_mail_draft_get",
+	"whoyou_mail_draft_list",
+	"whoyou_mail_send",
 ];
+
+const READ_ONLY_TOOL_NAMES = new Set([
+	"whoyou_whoami",
+	"whoyou_mailbox_get",
+	"whoyou_mail_search",
+	"whoyou_mail_thread_get",
+	"whoyou_mail_message_get",
+	"whoyou_mail_attachment_get",
+	"whoyou_mail_draft_get",
+	"whoyou_mail_draft_list",
+]);
 
 async function withWorker(scriptPath, bindings, run) {
 	const mf = new Miniflare({
@@ -78,10 +95,13 @@ test("a real workerd modern MCP client lists and calls the read-only whoami tool
 
 			const listed = await client.listTools();
 			assert.deepEqual(listed.tools.map((tool) => tool.name), MAIL_TOOL_NAMES);
-			// Every registered tool is a read; no send, draft or delete surface exists.
+			// Read tools stay non-destructive; write/send tools must not claim read-only.
 			for (const tool of listed.tools) {
-				assert.equal(tool.annotations?.readOnlyHint, true);
-				assert.equal(tool.annotations?.destructiveHint, false);
+				const readOnly = READ_ONLY_TOOL_NAMES.has(tool.name);
+				const destructive =
+					tool.name === "whoyou_mail_draft_discard" || tool.name === "whoyou_mail_send";
+				assert.equal(tool.annotations?.readOnlyHint, readOnly);
+				assert.equal(tool.annotations?.destructiveHint, destructive);
 			}
 
 			const whoami = await client.callTool({ name: "whoyou_whoami", arguments: {} });

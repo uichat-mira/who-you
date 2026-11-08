@@ -1,6 +1,6 @@
 # Who You — infrastructure handoff (not a product design)
 
-**Status (2026-11-08): repository bootstrap plus an S1 inbound code slice.** No Cloudflare deployment, DNS record, Email Routing rule, D1 database or R2 bucket documented here exists as evidence of an active service.
+**Status (2026-11-08): repository bootstrap plus S1 inbound and S2 draft/send code slices.** No Cloudflare deployment, DNS record, Email Routing rule, D1 database or R2 bucket documented here exists as evidence of an active service.
 
 ## Confirmed starting point
 
@@ -31,6 +31,21 @@ Task card: `docs/task-cards/WHO-S1-inbound-read.md` on `docs/who-you-task-cards-
 - Attachments are inlined as base64 only below `MAIL_ATTACHMENT_INLINE_BYTES`; larger attachments fail explicitly because no signed-download capability is verified.
 
 Evidence boundary: `npm run check` (T1 unit + T3 Miniflare D1/R2 workerd) proves local code behavior only. It is **not** evidence that `tomlab.cn` is in the Cloudflare account, that Email Routing is enabled, that the platform passes `Authentication-Results`, or that any real message was received or sent.
+
+## S2 draft / confirm / send code slice (implemented, not provisioned)
+
+Task card: `docs/task-cards/WHO-S2-draft-confirm-send.md` on `docs/who-you-task-cards-v1`.
+
+- Schema: `migrations/0002_drafts_sends.sql` (`mail_drafts`, `confirmation_nonces`, `send_receipts`).
+- Tools: `whoyou_mail_draft_create`, `_update`, `_discard`, `_get`, `_list` (all require the `whoyou.mail.write` scope) and `whoyou_mail_send` (exactly `draftId`, `confirmationCredential`, `idempotencyKey`). Draft write tools reject unknown arguments, so recipients, sender and body cannot be overridden at send time.
+- Confirmation contract: Cloud Auth issues a standalone `mira:who-you` / `whoyou.mail.send` credential with a strict `confirmation` claim binding `draft_id`, `draft_version`, `content_hash` and a single-use `nonce`. Who You verifies it offline against the same JWKS; it is never an MCP bearer.
+- `contentHash` is SHA-256 over a fixed-order canonical payload (normalized addresses, subject, text, HTML and an empty attachment placeholder). A stale version or hash is rejected; a nonce is consumed atomically before any provider call.
+- Sending uses the Cloudflare Email Service `send_email` binding (`MAIL_EMAIL_SEND`). When the binding or the mailbox sender address is absent, the tool fails with `relay_unavailable` and sends nothing. `cloudflare.config.ts` still declares no bindings: the beta binding schema for D1/R2/Email Sending is unverified, and inventing it would be a false platform claim.
+- Receipts are insert-only and unique per `(account_id, idempotency_key)`. Only successful sends are persisted, so a failed attempt stays retryable with a fresh confirmation; a replayed credential fails with `confirmation_replayed`.
+
+Explicit gaps: attachment upload/display protocol is undefined, so attachment arguments are rejected and only a placeholder participates in the hash; per-day quotas and recipient ceilings are slice-level constants (20 recipients, 200 000 body characters), not approved product policy; a provider failure spends the nonce and leaves delivery unknown; and no real outbound message, SPF/DKIM/DMARC result or `send_email` behaviour has been observed. Real sending requires a separate security authorization and a real integration run.
+
+Evidence boundary: the S2 tests fake the provider and the confirmation issuer. They prove ordering, binding and single-use behaviour inside workerd D1 — not Cloudflare Email Service semantics, deliverability, or Cloud Auth issuance end to end.
 
 ## Cloudflare rollout discipline (reserved names, not created)
 
