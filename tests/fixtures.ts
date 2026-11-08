@@ -25,6 +25,12 @@ const base = (): WhoYouPrincipal => ({
 export const FIXTURE_TOKENS: Record<string, WhoYouPrincipal> = {
 	"fixture-consumer-1": base(),
 	"fixture-consumer-2": { ...base(), consumerId: "consumer-2" },
+	// A second synthetic account used only to prove cross-account isolation.
+	"fixture-account-b": {
+		...base(),
+		accountId: "account-b",
+		consumerId: "consumer-3",
+	},
 	"fixture-wrong-issuer": { ...base(), issuer: "mira:cloud-guanlan" },
 	"fixture-wrong-audience": { ...base(), audience: "mira:cloud-guanlan" },
 	"fixture-expired": { ...base(), expiresAt: 1 },
