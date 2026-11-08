@@ -463,7 +463,7 @@ test("MIME structural ceilings cause explicit 552 rejection, not transient failu
 			"",
 		].join("\r\n");
 		const result = await postInbound(mf, { to: "alpha@tomlab.cn", raw: multipart });
-		assert.match(result.rejected, /^552 5\\.3\\.4/);
+		assert.match(result.rejected, /^552 5[.]3[.]4/);
 		const rows = await db.prepare("SELECT COUNT(*) AS total FROM messages").first();
 		assert.equal(rows.total, 0);
 	});
