@@ -1,5 +1,6 @@
 import type { VerifiedConfirmation, WhoYouConfirmationVerifier } from "./confirmation";
 import { ConfirmationCredentialError } from "./confirmation";
+import type { AbuseMonitor, SendGate } from "./deliverability";
 import { draftContentHash, type DraftAddress } from "./draft";
 import type { DraftRepository, SendReceipt } from "./draft-store";
 import { sha256Hex } from "./hash";
@@ -60,7 +61,9 @@ export type SendFailureCode =
 	| "draft_content_changed"
 	| "confirmation_replayed"
 	| "relay_unavailable"
-	| "idempotency_key_reused";
+	| "idempotency_key_reused"
+	| "recipient_suppressed"
+	| "send_paused";
 
 export type SendDraftResult =
 	| { ok: true; receipt: SendReceipt; alreadySent: boolean }
@@ -72,6 +75,10 @@ export type SendDraftDependencies = {
 	sender: MailSender | null;
 	/** Sender address of the caller's own provisioned mailbox. */
 	from: string | null;
+	/** Suppression / pause gate; consulted before the nonce is spent. */
+	gate: SendGate;
+	/** Post-receipt abuse brake; never runs before a message is durable. */
+	monitor: AbuseMonitor;
 	now: () => number;
 };
 
@@ -162,6 +169,16 @@ export async function sendDraft(
 		};
 	}
 
+	// Gate before the nonce: a paused account or a suppressed recipient must
+	// never spend the credential or reach the relay.
+	const recipients = [...draft.content.to, ...draft.content.cc, ...draft.content.bcc].map(
+		(entry) => entry.address,
+	);
+	const gate = await deps.gate.check(request.accountId, recipients);
+	if (!gate.ok) {
+		return { ok: false, code: gate.code, detail: gate.detail };
+	}
+
 	if (!deps.sender || !deps.from) {
 		return {
 			ok: false,
@@ -204,6 +221,8 @@ export async function sendDraft(
 		};
 	}
 
+	const ownDomain = deps.from.slice(deps.from.lastIndexOf("@") + 1).toLowerCase();
+
 	const receipt: SendReceipt = {
 		id: await receiptId(request.accountId, request.idempotencyKey),
 		accountId: request.accountId,
@@ -214,6 +233,11 @@ export async function sendDraft(
 		status: "sent",
 		errorCode: null,
 		providerMessageId,
+		recipientCount: recipients.length,
+		externalRecipientCount: recipients.filter((address) => {
+			const domain = address.slice(address.lastIndexOf("@") + 1).toLowerCase();
+			return domain !== ownDomain;
+		}).length,
 		createdAt: deps.now(),
 	};
 
@@ -228,6 +252,10 @@ export async function sendDraft(
 			detail: "This idempotency key was concurrently recorded for a different draft.",
 		};
 	}
+
+	// The message is already accepted; a trip wire here can only stop future
+	// sends, never revoke this receipt.
+	await deps.monitor.afterSend(request.accountId, deps.now());
 
 	return { ok: true, receipt, alreadySent: false };
 }

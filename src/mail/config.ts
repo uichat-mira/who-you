@@ -1,6 +1,7 @@
 import type { McpEnv } from "../mcp/config";
 import { resolveMcpConfig } from "../mcp/config";
 import { normalizeDomain } from "./address";
+import { resolveAbusePolicy, type AbuseLimitEnv, type AbusePolicy } from "./abuse";
 import {
 	resolveMailLimits,
 	type MailLimitEnv,
@@ -17,6 +18,7 @@ import { MailRepository } from "./store";
  */
 export type WhoYouEnv = McpEnv &
 	MailLimitEnv &
+	AbuseLimitEnv &
 	RetentionEnv & {
 		DB?: D1Database;
 		MAIL_BUCKET?: R2Bucket;
@@ -28,6 +30,11 @@ export type WhoYouEnv = McpEnv &
 		 * than 32 characters closes the signed-download capability entirely.
 		 */
 		MAIL_SIGNING_KEY?: string;
+		/**
+		 * HMAC key for the internal relay delivery callback. Absent or shorter
+		 * than 32 characters closes the callback entirely (503, fail-closed).
+		 */
+		MAIL_INTERNAL_WEBHOOK_SECRET?: string;
 	};
 
 export type MailServices = {
@@ -39,6 +46,7 @@ export type MailServices = {
 	/** `null` when MAIL_SIGNING_KEY is missing or too short. */
 	signingKey: string | null;
 	retention: RetentionPolicy;
+	abuse: AbusePolicy;
 	/** Public resource URL used as the origin of signed download links. */
 	resourceUrl: URL | null;
 };
@@ -62,6 +70,7 @@ export function createMailServices(env: WhoYouEnv): MailServicesResult {
 			domain: normalizeDomain(env.MAIL_DOMAIN ?? ""),
 			signingKey: signingKey.length >= 32 ? signingKey : null,
 			retention: resolveRetention(env),
+			abuse: resolveAbusePolicy(env),
 			resourceUrl: mcpConfig.ok ? mcpConfig.config.resourceUrl : null,
 		},
 	};

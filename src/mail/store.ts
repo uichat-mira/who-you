@@ -13,6 +13,9 @@ export type MailboxRecord = {
 	bytesUsed: number;
 	messageCount: number;
 	quarantineCount: number;
+	/** Automatic deliverability/abuse pause; receiving stays enabled. */
+	sendPausedAt: number | null;
+	sendPausedReason: string | null;
 	createdAt: number;
 };
 
@@ -96,6 +99,72 @@ export type NewAuditEntry = {
 	detail: string;
 	createdAt: number;
 };
+
+export type DeliveryEventType =
+	| "delivered"
+	| "soft_bounce"
+	| "hard_bounce"
+	| "complaint"
+	| "dsn";
+
+export type NewDeliveryEvent = {
+	id: string;
+	accountId: string;
+	sendReceiptId: string | null;
+	providerMessageId: string | null;
+	type: DeliveryEventType;
+	/** SHA-256 of the normalized recipient; the address itself is not stored. */
+	recipientHash: string;
+	recipientDomain: string;
+	status: string | null;
+	diagnosticCode: string | null;
+	occurredAt: number;
+	createdAt: number;
+};
+
+export type SuppressionReason = "hard_bounce" | "complaint";
+
+export type NewSuppression = {
+	accountId: string;
+	recipient: string;
+	reason: SuppressionReason;
+	sourceEventId: string | null;
+	createdAt: number;
+};
+
+export type SendPause = { pausedAt: number; reason: string | null };
+
+export type AbuseWindowCounts = {
+	sends: number;
+	hardBounces: number;
+	complaints: number;
+	externalRecipients: number;
+};
+
+export type DeliverabilityAlertKind =
+	| "hard_bounce_rate"
+	| "complaint_rate"
+	| "external_volume"
+	| "send_paused";
+
+export type NewDeliverabilityAlert = {
+	id: string;
+	accountId: string;
+	kind: DeliverabilityAlertKind;
+	detail: string;
+	createdAt: number;
+};
+
+export type DeliverabilityTotals = {
+	sends: number;
+	externalRecipients: number;
+	delivered: number;
+	softBounces: number;
+	hardBounces: number;
+	complaints: number;
+};
+
+export type ReceiptLookup = { id: string; accountId: string };
 
 export type AttachmentRecord = {
 	id: string;
@@ -212,6 +281,8 @@ type MailboxRow = {
 	bytes_used: number;
 	message_count: number;
 	quarantine_count: number;
+	send_paused_at: number | null;
+	send_paused_reason: string | null;
 	created_at: number;
 };
 
@@ -269,6 +340,8 @@ const toMailbox = (row: MailboxRow): MailboxRecord => ({
 	bytesUsed: row.bytes_used,
 	messageCount: row.message_count,
 	quarantineCount: row.quarantine_count,
+	sendPausedAt: row.send_paused_at,
+	sendPausedReason: row.send_paused_reason,
 	createdAt: row.created_at,
 });
 
@@ -383,7 +456,8 @@ export class MailRepository {
 		const row = await this.db
 			.prepare(
 				`SELECT id, account_id, address, local_part, status, quota_bytes, bytes_used,
-				 message_count, quarantine_count, created_at
+				 message_count, quarantine_count, send_paused_at, send_paused_reason,
+				 created_at
 				 FROM mailboxes WHERE address = ? LIMIT 1`,
 			)
 			.bind(address)
@@ -395,7 +469,8 @@ export class MailRepository {
 		const row = await this.db
 			.prepare(
 				`SELECT id, account_id, address, local_part, status, quota_bytes, bytes_used,
-				 message_count, quarantine_count, created_at
+				 message_count, quarantine_count, send_paused_at, send_paused_reason,
+				 created_at
 				 FROM mailboxes WHERE account_id = ? LIMIT 1`,
 			)
 			.bind(accountId)
@@ -988,9 +1063,224 @@ export class MailRepository {
 			this.db.prepare("DELETE FROM mail_drafts WHERE mailbox_id = ?").bind(mailboxId),
 			this.db.prepare("DELETE FROM confirmation_nonces WHERE account_id = ?").bind(accountId),
 			this.db.prepare("DELETE FROM send_receipts WHERE account_id = ?").bind(accountId),
+			this.db.prepare("DELETE FROM delivery_events WHERE account_id = ?").bind(accountId),
+			this.db.prepare("DELETE FROM suppressions WHERE account_id = ?").bind(accountId),
+			this.db.prepare("DELETE FROM deliverability_alerts WHERE account_id = ?").bind(accountId),
 			this.db.prepare("DELETE FROM mail_audit_log WHERE account_id = ?").bind(accountId),
 			this.db.prepare("DELETE FROM mailboxes WHERE id = ?").bind(mailboxId),
 		]);
+	}
+
+	async insertDeliveryEvent(event: NewDeliveryEvent): Promise<boolean> {
+		const result = await this.db
+			.prepare(
+				`INSERT INTO delivery_events (
+				 id, account_id, send_receipt_id, provider_message_id, type,
+				 recipient_hash, recipient_domain, status, diagnostic_code,
+				 occurred_at, created_at
+				 ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+				 ON CONFLICT (id) DO NOTHING`,
+			)
+			.bind(
+				event.id,
+				event.accountId,
+				event.sendReceiptId,
+				event.providerMessageId,
+				event.type,
+				event.recipientHash,
+				event.recipientDomain,
+				event.status,
+				event.diagnosticCode,
+				event.occurredAt,
+				event.createdAt,
+			)
+			.run();
+		return (result.meta.changes ?? 0) > 0;
+	}
+
+	/** `false` means the recipient was already suppressed. */
+	async insertSuppression(suppression: NewSuppression): Promise<boolean> {
+		const result = await this.db
+			.prepare(
+				`INSERT INTO suppressions (
+				 account_id, recipient, reason, source_event_id, created_at
+				 ) VALUES (?,?,?,?,?)
+				 ON CONFLICT (account_id, recipient) DO NOTHING`,
+			)
+			.bind(
+				suppression.accountId,
+				suppression.recipient,
+				suppression.reason,
+				suppression.sourceEventId,
+				suppression.createdAt,
+			)
+			.run();
+		return (result.meta.changes ?? 0) > 0;
+	}
+
+	async findSuppressedRecipients(
+		accountId: string,
+		recipients: string[],
+	): Promise<string[]> {
+		if (!recipients.length) return [];
+		const unique = [...new Set(recipients)];
+		const placeholders = unique.map(() => "?").join(",");
+		const rows = await this.db
+			.prepare(
+				`SELECT recipient FROM suppressions
+				 WHERE account_id = ? AND recipient IN (${placeholders})`,
+			)
+			.bind(accountId, ...unique)
+			.all<{ recipient: string }>();
+		return (rows.results ?? []).map((row) => row.recipient);
+	}
+
+	async findSendPause(accountId: string): Promise<SendPause | null> {
+		const row = await this.db
+			.prepare(
+				`SELECT send_paused_at, send_paused_reason FROM mailboxes
+				 WHERE account_id = ? LIMIT 1`,
+			)
+			.bind(accountId)
+			.first<{ send_paused_at: number | null; send_paused_reason: string | null }>();
+		if (!row || row.send_paused_at === null) return null;
+		return { pausedAt: row.send_paused_at, reason: row.send_paused_reason };
+	}
+
+	/** Only the first trip wire pauses; repeat signals keep the original reason. */
+	async pauseSend(accountId: string, reason: string, now: number): Promise<boolean> {
+		const result = await this.db
+			.prepare(
+				`UPDATE mailboxes
+				 SET send_paused_at = ?, send_paused_reason = ?, updated_at = ?
+				 WHERE account_id = ? AND send_paused_at IS NULL`,
+			)
+			.bind(now, reason, now, accountId)
+			.run();
+		return (result.meta.changes ?? 0) > 0;
+	}
+
+	async insertDeliverabilityAlert(alert: NewDeliverabilityAlert): Promise<void> {
+		await this.db
+			.prepare(
+				`INSERT INTO deliverability_alerts (id, account_id, kind, detail, created_at)
+				 VALUES (?,?,?,?,?)
+				 ON CONFLICT (id) DO NOTHING`,
+			)
+			.bind(alert.id, alert.accountId, alert.kind, alert.detail, alert.createdAt)
+			.run();
+	}
+
+	async abuseWindow(accountId: string, since: number): Promise<AbuseWindowCounts> {
+		const row = await this.db
+			.prepare(
+				`SELECT
+				 (SELECT COUNT(*) FROM send_receipts WHERE account_id = ? AND created_at >= ?) AS sends,
+				 (SELECT COUNT(*) FROM delivery_events
+				  WHERE account_id = ? AND type = 'hard_bounce' AND occurred_at >= ?) AS hard_bounces,
+				 (SELECT COUNT(*) FROM delivery_events
+				  WHERE account_id = ? AND type = 'complaint' AND occurred_at >= ?) AS complaints,
+				 (SELECT COALESCE(SUM(external_recipient_count), 0) FROM send_receipts
+				  WHERE account_id = ? AND created_at >= ?) AS external_recipients`,
+			)
+			.bind(accountId, since, accountId, since, accountId, since, accountId, since)
+			.first<{
+				sends: number;
+				hard_bounces: number;
+				complaints: number;
+				external_recipients: number;
+			}>();
+		return {
+			sends: row?.sends ?? 0,
+			hardBounces: row?.hard_bounces ?? 0,
+			complaints: row?.complaints ?? 0,
+			externalRecipients: row?.external_recipients ?? 0,
+		};
+	}
+
+	async findReceiptByProviderMessageId(
+		providerMessageId: string,
+	): Promise<ReceiptLookup | null> {
+		const row = await this.db
+			.prepare(
+				`SELECT id, account_id FROM send_receipts
+				 WHERE provider_message_id = ? LIMIT 1`,
+			)
+			.bind(providerMessageId)
+			.first<{ id: string; account_id: string }>();
+		return row ? { id: row.id, accountId: row.account_id } : null;
+	}
+
+	async deliverabilityTotals(since: number): Promise<DeliverabilityTotals> {
+		const row = await this.db
+			.prepare(
+				`SELECT
+				 (SELECT COUNT(*) FROM send_receipts WHERE created_at >= ?) AS sends,
+				 (SELECT COALESCE(SUM(external_recipient_count), 0) FROM send_receipts
+				  WHERE created_at >= ?) AS external_recipients,
+				 (SELECT COUNT(*) FROM delivery_events WHERE type = 'delivered' AND occurred_at >= ?) AS delivered,
+				 (SELECT COUNT(*) FROM delivery_events WHERE type = 'soft_bounce' AND occurred_at >= ?) AS soft_bounces,
+				 (SELECT COUNT(*) FROM delivery_events WHERE type = 'hard_bounce' AND occurred_at >= ?) AS hard_bounces,
+				 (SELECT COUNT(*) FROM delivery_events WHERE type = 'complaint' AND occurred_at >= ?) AS complaints`,
+			)
+			.bind(since, since, since, since, since, since)
+			.first<{
+				sends: number;
+				external_recipients: number;
+				delivered: number;
+				soft_bounces: number;
+				hard_bounces: number;
+				complaints: number;
+			}>();
+		return {
+			sends: row?.sends ?? 0,
+			externalRecipients: row?.external_recipients ?? 0,
+			delivered: row?.delivered ?? 0,
+			softBounces: row?.soft_bounces ?? 0,
+			hardBounces: row?.hard_bounces ?? 0,
+			complaints: row?.complaints ?? 0,
+		};
+	}
+
+	async countSuppressions(): Promise<number> {
+		const row = await this.db
+			.prepare("SELECT COUNT(*) AS total FROM suppressions")
+			.first<{ total: number }>();
+		return row?.total ?? 0;
+	}
+
+	async countPausedAccounts(): Promise<number> {
+		const row = await this.db
+			.prepare("SELECT COUNT(*) AS total FROM mailboxes WHERE send_paused_at IS NOT NULL")
+			.first<{ total: number }>();
+		return row?.total ?? 0;
+	}
+
+	async insertWebhookNonce(nonce: string, now: number): Promise<boolean> {
+		const result = await this.db
+			.prepare(
+				`INSERT INTO internal_webhook_nonces (nonce, created_at) VALUES (?,?)
+				 ON CONFLICT (nonce) DO NOTHING`,
+			)
+			.bind(nonce, now)
+			.run();
+		return (result.meta.changes ?? 0) > 0;
+	}
+
+	async deleteWebhookNoncesBefore(cutoff: number): Promise<number> {
+		const result = await this.db
+			.prepare("DELETE FROM internal_webhook_nonces WHERE created_at < ?")
+			.bind(cutoff)
+			.run();
+		return result.meta.changes ?? 0;
+	}
+
+	async deleteDeliveryEventsBefore(cutoff: number): Promise<number> {
+		const result = await this.db
+			.prepare("DELETE FROM delivery_events WHERE occurred_at < ?")
+			.bind(cutoff)
+			.run();
+		return result.meta.changes ?? 0;
 	}
 }
 
@@ -1049,6 +1339,8 @@ export async function provisionMailbox(
 					bytesUsed: 0,
 					messageCount: 0,
 					quarantineCount: 0,
+					sendPausedAt: null,
+					sendPausedReason: null,
 					createdAt: options.now,
 				},
 			};

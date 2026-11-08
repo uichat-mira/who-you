@@ -1,11 +1,13 @@
 import { handleInboundEmail } from "./mail/inbound";
 import { createMailServices, type WhoYouEnv } from "./mail/config";
+import { runDeliverabilityReport } from "./mail/deliverability";
 import {
 	createDownloadVerifier,
 	handleSignedDownload,
 	MAIL_DOWNLOAD_PATH,
 } from "./mail/download";
 import { runRetentionSweep } from "./mail/retention";
+import { DELIVERY_WEBHOOK_PATH, handleDeliveryWebhook } from "./mail/webhook";
 import { MCP_METADATA_PATH, MCP_RESOURCE_PATH } from "./mcp/config";
 import { createWhoYouRuntime } from "./mcp/runtime";
 
@@ -14,6 +16,11 @@ const notFound = (): Response => Response.json({ error: "not_found" }, { status:
 export default {
 	async fetch(request: Request, env: WhoYouEnv): Promise<Response> {
 		const path = new URL(request.url).pathname;
+		// The relay callback is machine-to-machine only: it authenticates with an
+		// independent HMAC secret and never with an agent's MCP credential.
+		if (path === DELIVERY_WEBHOOK_PATH) {
+			return handleDeliveryWebhook(request, env);
+		}
 		// `/mcp` plus its RFC 9728 discovery document is the only agent-facing API.
 		// `/mail/download` is not an API for agents to call freely: it serves one
 		// signed, bearer-bound object per short-lived link issued by a mail tool.
@@ -71,7 +78,15 @@ export default {
 			JSON.stringify({
 				event: "whoyou_mail_retention_sweep",
 				deletedAuditEntries: result.deletedAuditEntries,
+				deletedDeliveryEvents: result.deletedDeliveryEvents,
+				deletedWebhookNonces: result.deletedWebhookNonces,
 			}),
 		);
+		const report = await runDeliverabilityReport(
+			services.services.repository,
+			Date.now(),
+		);
+		// Counters only: the daily reputation metric never names an address.
+		console.log(JSON.stringify({ event: "whoyou_delivery_reputation", ...report }));
 	},
 } satisfies ExportedHandler<WhoYouEnv>;
