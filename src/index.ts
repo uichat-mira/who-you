@@ -1,14 +1,12 @@
-import {
-	MCP_METADATA_PATH,
-	MCP_RESOURCE_PATH,
-	type McpEnv,
-} from "./mcp/config";
+import { handleInboundEmail } from "./mail/inbound";
+import type { WhoYouEnv } from "./mail/config";
+import { MCP_METADATA_PATH, MCP_RESOURCE_PATH } from "./mcp/config";
 import { createWhoYouRuntime } from "./mcp/runtime";
 
 const notFound = (): Response => Response.json({ error: "not_found" }, { status: 404 });
 
 export default {
-	async fetch(request: Request, env: McpEnv): Promise<Response> {
+	async fetch(request: Request, env: WhoYouEnv): Promise<Response> {
 		const path = new URL(request.url).pathname;
 		// There is deliberately one agent-facing surface: `/mcp` plus its RFC 9728
 		// discovery document. No parallel REST Agent API exists in this slice.
@@ -25,4 +23,12 @@ export default {
 		}
 		return resolved.runtime.fetch(request);
 	},
-} satisfies ExportedHandler<McpEnv>;
+
+	/**
+	 * Cloudflare Email Routing entry. S1 only receives, validates, stores and
+	 * quarantines; it never sends, copies or forwards.
+	 */
+	async email(message: ForwardableEmailMessage, env: WhoYouEnv): Promise<void> {
+		await handleInboundEmail(message, env);
+	},
+} satisfies ExportedHandler<WhoYouEnv>;

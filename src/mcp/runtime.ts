@@ -1,5 +1,6 @@
+import { createMailServices, type WhoYouEnv } from "../mail/config";
 import { createCloudAuthVerifier, type WhoYouTokenVerifier } from "./auth";
-import { resolveMcpConfig, type McpEnv } from "./config";
+import { resolveMcpConfig } from "./config";
 import { createWhoYouMcp, type WhoYouMcpRuntime } from "./server";
 
 export type McpRuntimeOptions = {
@@ -36,11 +37,14 @@ const runtimeCacheKey = (config: {
  * deterministic verifier through their own worker entry, not through env.
  */
 export function createWhoYouRuntime(
-	env: McpEnv,
+	env: WhoYouEnv,
 	options: McpRuntimeOptions = {},
 ): McpRuntimeResult {
 	const resolved = resolveMcpConfig(env);
 	if (!resolved.ok) return resolved;
+
+	const mail = createMailServices(env);
+	if (!mail.ok) return mail;
 
 	const { config } = resolved;
 	const verifier =
@@ -53,7 +57,10 @@ export function createWhoYouRuntime(
 		});
 
 	if (options.verifier) {
-		return { ok: true, runtime: createWhoYouMcp(config, verifier) };
+		return {
+			ok: true,
+			runtime: createWhoYouMcp(config, verifier, mail.services),
+		};
 	}
 
 	// The deployed Worker reuses one runtime per isolate and configuration set;
@@ -69,7 +76,7 @@ export function createWhoYouRuntime(
 
 	const result: McpRuntimeResult = {
 		ok: true,
-		runtime: createWhoYouMcp(config, verifier),
+		runtime: createWhoYouMcp(config, verifier, mail.services),
 	};
 	byKey.set(key, result);
 	return result;
