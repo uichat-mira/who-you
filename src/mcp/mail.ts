@@ -13,6 +13,7 @@ import type {
 	MessageFlags,
 	MessageSummary,
 } from "../mail/store";
+import { messageFields } from "../mail/store";
 import type { WhoYouPrincipal } from "./auth";
 import { WHOYOU_MAIL_WRITE_SCOPE } from "./config";
 
@@ -141,17 +142,7 @@ const mailboxJson = (mailbox: MailboxRecord): Record<string, unknown> => ({
 });
 
 const messageJson = (message: MessageSummary): Record<string, unknown> => ({
-	id: message.id,
-	threadId: message.threadId,
-	direction: message.direction,
-	internetMessageId: message.internetMessageId,
-	from: message.from,
-	to: message.to,
-	cc: message.cc,
-	subject: message.subject,
-	sentAt: message.sentAt,
-	receivedAt: message.receivedAt,
-	sizeBytes: message.sizeBytes,
+	...messageFields(message),
 	snippet: message.snippet,
 	attachmentCount: message.attachmentCount,
 	authResults: message.authResults,

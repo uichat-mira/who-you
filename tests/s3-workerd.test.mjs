@@ -1,85 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { Miniflare } from "miniflare";
-import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
-import {
-	MCP_TEST_AUDIENCE,
-	MCP_TEST_ISSUER,
-	MCP_TEST_JWKS_URL,
-	MCP_TEST_RESOURCE_URL,
-	MCP_TEST_SCOPE,
-} from "../dist/fixtures.mjs";
+import { MCP_TEST_RESOURCE_URL } from "../dist/fixtures.mjs";
 import { buildDownloadUrl, createDownloadSigner, SIGNED_DOWNLOAD_TTL_MS } from "../dist/unit.mjs";
+import { DAY_MS, NOW, connect, seedTwoAccounts, withWorker } from "./workerd-harness.mjs";
 
 const SIGNING_KEY = "s3-test-signing-key-0123456789abcdef";
-const DAY_MS = 24 * 60 * 60 * 1000;
-const NOW = 1_795_000_000_000;
-
-const migrationStatements = (path) =>
-	readFileSync(path, "utf8")
-		.split("\n")
-		.filter((line) => !line.trimStart().startsWith("--"))
-		.join("\n")
-		.split(";")
-		.map((statement) => statement.trim())
-		.filter(Boolean);
-
-const MIGRATIONS = [
-	...migrationStatements("migrations/0001_mail.sql"),
-	...migrationStatements("migrations/0002_drafts_sends.sql"),
-	...migrationStatements("migrations/0003_s3_state_search_retention.sql"),
-];
-
-const BASE_BINDINGS = {
-	MCP_RESOURCE_URL: MCP_TEST_RESOURCE_URL,
-	CLOUD_AUTH_ISSUER: MCP_TEST_ISSUER,
-	CLOUD_AUTH_JWKS_URL: MCP_TEST_JWKS_URL,
-	MCP_AUDIENCE: MCP_TEST_AUDIENCE,
-	MCP_REQUIRED_SCOPES: MCP_TEST_SCOPE,
-	MAIL_DOMAIN: "tomlab.cn",
-	MAIL_SIGNING_KEY: SIGNING_KEY,
-};
-
-async function withWorker(run) {
-	const mf = new Miniflare({
-		modules: true,
-		scriptPath: "dist/test-worker.mjs",
-		compatibilityDate: "2026-08-06",
-		cf: false,
-		bindings: BASE_BINDINGS,
-		d1Databases: ["DB"],
-		r2Buckets: ["MAIL_BUCKET"],
-	});
-	try {
-		const db = await mf.getD1Database("DB");
-		await db.batch(MIGRATIONS.map((statement) => db.prepare(statement)));
-		await run({ mf, db });
-	} finally {
-		await mf.dispose();
-	}
-}
-
-async function seedMailbox(db, options) {
-	await db
-		.prepare(
-			`INSERT INTO mailboxes (
-			 id, account_id, address, local_part, status, quota_bytes,
-			 bytes_used, message_count, quarantine_count, created_at, updated_at
-			 ) VALUES (?,?,?,?,?,?,0,0,0,?,?)`,
-		)
-		.bind(
-			options.id,
-			options.accountId,
-			options.address,
-			options.localPart,
-			options.status ?? "active",
-			options.quotaBytes ?? 1024 * 1024,
-			NOW,
-			NOW,
-		)
-		.run();
-}
 
 const rawKey = (accountId, mailboxId, messageId) =>
 	`accounts/${accountId}/mailboxes/${mailboxId}/messages/${messageId}/raw.eml`;
@@ -153,37 +78,6 @@ async function seedAttachment(db, options) {
 		)
 		.run();
 }
-
-async function connect(mf, token) {
-	const transport = new StreamableHTTPClientTransport(new URL(MCP_TEST_RESOURCE_URL), {
-		requestInit: { headers: { authorization: `Bearer ${token}` } },
-		fetch: async (input, init) => {
-			const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-			return mf.dispatchFetch(url, init);
-		},
-	});
-	const client = new Client(
-		{ name: "who-s3-test", version: "1.0.0" },
-		{ versionNegotiation: { mode: { pin: "2026-07-28" } } },
-	);
-	await client.connect(transport);
-	return client;
-}
-
-const seedTwoAccounts = async (db) => {
-	await seedMailbox(db, {
-		id: "mbx_a",
-		accountId: "account-a",
-		address: "alpha@tomlab.cn",
-		localPart: "alpha",
-	});
-	await seedMailbox(db, {
-		id: "mbx_b",
-		accountId: "account-b",
-		address: "beta@tomlab.cn",
-		localPart: "beta",
-	});
-};
 
 test("flag writes are idempotent, versioned and conflict-safe", async () => {
 	await withWorker(async ({ mf, db }) => {

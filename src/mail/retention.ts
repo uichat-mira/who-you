@@ -1,3 +1,4 @@
+import { positiveInt } from "./limits";
 import type { MailRepository } from "./store";
 
 /**
@@ -28,13 +29,6 @@ export const DEFAULT_RETENTION: RetentionPolicy = {
 };
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-
-const positiveInt = (value: string | undefined, fallback: number): number => {
-	if (!value) return fallback;
-	const parsed = Number(value.trim());
-	if (!Number.isInteger(parsed) || parsed <= 0) return fallback;
-	return parsed;
-};
 
 /**
  * An invalid binding falls back to the documented default instead of disabling

@@ -48,7 +48,8 @@ export const DEFAULT_MAIL_LIMITS: MailLimits = {
 	exportMaxBytes: 25 * 1024 * 1024,
 };
 
-const positiveInt = (value: string | undefined, fallback: number): number => {
+/** Reads a strictly positive integer binding, falling back when it is invalid. */
+export const positiveInt = (value: string | undefined, fallback: number): number => {
 	if (!value) return fallback;
 	const parsed = Number(value.trim());
 	if (!Number.isInteger(parsed) || parsed <= 0) return fallback;

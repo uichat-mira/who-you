@@ -31,7 +31,8 @@ const crc32 = (bytes: Uint8Array): number => {
 
 /** Fixed DOS timestamp so the same input always produces the same archive. */
 const DOS_TIME = 0;
-const DOS_DATE = (1980 - 1980) << 9 | (1 << 5) | 1;
+/** 1980-01-01 in DOS date encoding: year 0, month 1, day 1. */
+const DOS_DATE = 0x21;
 
 const writeUint16 = (target: number[], value: number): void => {
 	target.push(value & 0xff, (value >>> 8) & 0xff);
@@ -68,7 +69,10 @@ export class ZipArchive {
 				directories.add(`${parts.slice(0, index).join("/")}/`);
 			}
 		}
-		for (const directory of [...directories].sort()) {
+		const sorted = [...directories].sort((left, right) =>
+			left < right ? -1 : left > right ? 1 : 0,
+		);
+		for (const directory of sorted) {
 			if (this.seen.has(directory)) continue;
 			this.seen.add(directory);
 			this.entries.push({ name: directory, bytes: new Uint8Array(0) });

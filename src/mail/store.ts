@@ -59,6 +59,21 @@ export type MessageRecord = MessageSummary & {
 	htmlKey: string | null;
 };
 
+/** The message fields every outward view shares; callers add their own extras. */
+export const messageFields = (message: MessageSummary): Record<string, unknown> => ({
+	id: message.id,
+	threadId: message.threadId,
+	direction: message.direction,
+	internetMessageId: message.internetMessageId,
+	from: message.from,
+	to: message.to,
+	cc: message.cc,
+	subject: message.subject,
+	sentAt: message.sentAt,
+	receivedAt: message.receivedAt,
+	sizeBytes: message.sizeBytes,
+});
+
 export type ExportRecord = {
 	id: string;
 	accountId: string;

@@ -4,6 +4,7 @@ import type {
 	MessageRecord,
 	NewAuditEntry,
 } from "./store";
+import { messageFields } from "./store";
 import { ZipArchive } from "./zip";
 
 /**
@@ -112,17 +113,7 @@ const manifestMessage = (
 	message: MessageRecord,
 	emlPath: string | null,
 ): Record<string, unknown> => ({
-	id: message.id,
-	threadId: message.threadId,
-	direction: message.direction,
-	internetMessageId: message.internetMessageId,
-	from: message.from,
-	to: message.to,
-	cc: message.cc,
-	subject: message.subject,
-	sentAt: message.sentAt,
-	receivedAt: message.receivedAt,
-	sizeBytes: message.sizeBytes,
+	...messageFields(message),
 	state: message.state,
 	flags: message.flags,
 	eml: emlPath,
