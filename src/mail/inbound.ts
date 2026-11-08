@@ -4,6 +4,7 @@ import { sha256Hex } from "./hash";
 import type { MailLimits } from "./limits";
 import {
 	MailParseError,
+	parseAuthVerdict,
 	parseInboundMail,
 	type ParsedMail,
 	type ParseFailure,
@@ -221,12 +222,30 @@ export async function handleInboundEmail(
 		return;
 	}
 
-	const prepared = await prepareInbound(raw, limits);
+	let prepared: PreparedInbound;
+	try {
+		prepared = await prepareInbound(raw, limits);
+	} catch (error) {
+		if (error instanceof MailParseError && error.failure.kind === "limit") {
+			message.setReject(REJECT_TOO_LARGE);
+			logInbound({
+				event: "whoyou_mail_inbound",
+				outcome: "rejected_too_large",
+				mailboxId: mailbox.id,
+				bytes: raw.byteLength,
+				reason: "mime_structure_limit",
+			});
+			return;
+		}
+		throw error;
+	}
 	const parsed = prepared.parsed;
 	const fallbackId =
 		readHeaderValue(raw, "message-id") ?? `sha256:${await sha256Hex(raw)}`;
 	const internetMessageId = parsed?.internetMessageId ?? fallbackId;
-	const messageId = `msg_${(await sha256Hex(`${mailbox.id}\n${internetMessageId}`)).slice(0, 32)}`;
+	// A unique ID per *attempt* also isolates R2 keys: a losing concurrent
+	// duplicate must never delete the winning message's objects.
+	const messageId = `msg_${crypto.randomUUID().replace(/-/g, "")}`;
 
 	if (await repository.messageExists(mailbox.id, internetMessageId)) {
 		logInbound({
@@ -239,15 +258,21 @@ export async function handleInboundEmail(
 		return;
 	}
 
-	const dmarc = parsed?.auth.dmarc ?? "unknown";
+	// Only Cloudflare's authenticated transport header may inform quarantine.
+	// Authentication-Results embedded in the MIME body are untrusted.
+	const platformAuth = parseAuthVerdict(
+		message.headers.get("authentication-results")
+			? [{ key: "authentication-results", value: message.headers.get("authentication-results") ?? "" }]
+			: [],
+	);
+	const dmarc = platformAuth.dmarc;
 	const quarantineReason = prepared.parseFailure
 		? "parse_failure"
 		: dmarc === "fail"
 			? "dmarc_fail"
 			: null;
 	const state = quarantineReason ? "quarantined" : "visible";
-	const authResults =
-		parsed?.auth.summary ?? "spf=none;dkim=none;dmarc=unknown";
+	const authResults = platformAuth.summary;
 
 	const receivedAt = Date.now();
 	const subject = parsed?.subject ?? "";
