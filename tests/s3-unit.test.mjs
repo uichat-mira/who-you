@@ -77,18 +77,34 @@ test("retention resolves documented defaults and never disables itself", () => {
 	assert.equal(resolveRetention({}).bounceDays, 90);
 });
 
-test("retention sweep delegates one cutoff to the repository", async () => {
+test("retention sweep delegates each policy cutoff to the repository", async () => {
 	const seen = [];
 	const repository = {
 		async deleteAuditBefore(cutoff) {
-			seen.push(cutoff);
+			seen.push(["audit", cutoff]);
 			return 4;
+		},
+		async deleteDeliveryEventsBefore(cutoff) {
+			seen.push(["bounce", cutoff]);
+			return 2;
+		},
+		async deleteWebhookNoncesBefore(cutoff) {
+			seen.push(["nonce", cutoff]);
+			return 3;
 		},
 	};
 	const now = 1_795_000_000_000;
 	const result = await runRetentionSweep(repository, DEFAULT_RETENTION, now);
 	assert.equal(result.deletedAuditEntries, 4);
-	assert.equal(seen[0], now - 180 * 24 * 60 * 60 * 1000);
+	assert.equal(result.deletedDeliveryEvents, 2);
+	assert.equal(result.deletedWebhookNonces, 3);
+	assert.deepEqual(
+		seen.map(([kind]) => kind),
+		["audit", "bounce", "nonce"],
+	);
+	assert.equal(seen[0][1], now - 180 * 24 * 60 * 60 * 1000);
+	assert.equal(seen[1][1], now - 90 * 24 * 60 * 60 * 1000);
+	assert.equal(seen[2][1], now - 24 * 60 * 60 * 1000);
 });
 
 function le16(bytes, offset) {

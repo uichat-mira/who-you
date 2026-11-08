@@ -138,6 +138,8 @@ const mailboxJson = (mailbox: MailboxRecord): Record<string, unknown> => ({
 	bytesUsed: mailbox.bytesUsed,
 	messageCount: mailbox.messageCount,
 	quarantineCount: mailbox.quarantineCount,
+	sendPaused: mailbox.sendPausedAt !== null,
+	sendPausedReason: mailbox.sendPausedReason,
 	createdAt: mailbox.createdAt,
 });
 
@@ -223,6 +225,7 @@ export function registerMailTools(
 					`- messages: ${mailbox.messageCount}`,
 					`- quarantined: ${mailbox.quarantineCount}`,
 					`- storage: ${mailbox.bytesUsed} / ${mailbox.quotaBytes} bytes`,
+					`- send paused: ${mailbox.sendPausedAt === null ? "no" : `yes (${mailbox.sendPausedReason ?? "policy"})`}`,
 				].join("\n"),
 				mailboxJson(mailbox),
 			);

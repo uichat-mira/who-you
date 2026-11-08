@@ -2,13 +2,12 @@ import { positiveInt } from "./limits";
 import type { MailRepository } from "./store";
 
 /**
- * Retention policy for S3.
+ * Retention policy for S3 and S4.
  *
  * User mail (raw MIME, bodies, attachments) has no TTL: it lives until the user
- * deletes it, which is the approved default. The only time-bounded store in this
- * slice is the audit log. The bounce-record window is an approved value, but the
- * bounce store itself belongs to S4 and does not exist yet, so no sweep touches
- * it — this file is the single place S4 must inherit the number from.
+ * deletes it, which is the approved default. Time-bounded stores are the audit
+ * log and S4 delivery evidence. Suppressions are deliberately not swept: a hard
+ * bounce must keep blocking that recipient until a human changes it.
  */
 
 export type RetentionPolicy = {
@@ -43,14 +42,23 @@ export function resolveRetention(env: RetentionEnv): RetentionPolicy {
 
 export type SweepResult = {
 	deletedAuditEntries: number;
+	deletedDeliveryEvents: number;
+	/** Relay nonces only need to outlive the accepted timestamp skew. */
+	deletedWebhookNonces: number;
 };
 
-/** Deletes audit rows older than the policy window. Safe to re-run. */
+/** Deletes time-bounded evidence older than the policy window. Safe to re-run. */
 export async function runRetentionSweep(
 	repository: MailRepository,
 	policy: RetentionPolicy,
 	now: number,
 ): Promise<SweepResult> {
-	const cutoff = now - policy.auditDays * DAY_MS;
-	return { deletedAuditEntries: await repository.deleteAuditBefore(cutoff) };
+	const auditCutoff = now - policy.auditDays * DAY_MS;
+	const bounceCutoff = now - policy.bounceDays * DAY_MS;
+	const nonceCutoff = now - DAY_MS;
+	return {
+		deletedAuditEntries: await repository.deleteAuditBefore(auditCutoff),
+		deletedDeliveryEvents: await repository.deleteDeliveryEventsBefore(bounceCutoff),
+		deletedWebhookNonces: await repository.deleteWebhookNoncesBefore(nonceCutoff),
+	};
 }

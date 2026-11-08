@@ -33,6 +33,7 @@ export const MIGRATIONS = [
 	...migrationStatements("migrations/0001_mail.sql"),
 	...migrationStatements("migrations/0002_drafts_sends.sql"),
 	...migrationStatements("migrations/0003_s3_state_search_retention.sql"),
+	...migrationStatements("migrations/0004_deliverability_abuse.sql"),
 ];
 
 export const BASE_BINDINGS = {
@@ -43,6 +44,7 @@ export const BASE_BINDINGS = {
 	MCP_REQUIRED_SCOPES: MCP_TEST_SCOPE,
 	MAIL_DOMAIN: "tomlab.cn",
 	MAIL_SIGNING_KEY: "s3-test-signing-key-0123456789abcdef",
+	MAIL_INTERNAL_WEBHOOK_SECRET: "s4-test-webhook-secret-0123456789abcdef",
 };
 
 export const mfFetch =

@@ -31,6 +31,17 @@ export {
 export { createCloudAuthConfirmationVerifier } from "../src/mcp/confirmation";
 export { mailObjectKeys } from "../src/mail/store";
 export {
+	DEFAULT_ABUSE_POLICY,
+	evaluateAbuse,
+	resolveAbusePolicy,
+} from "../src/mail/abuse";
+export { normalizeRecipient, parseDeliveryReport } from "../src/mail/dsn";
+export {
+	computeWebhookSignature,
+	verifyWebhookSignature,
+	webhookSigningPayload,
+} from "../src/mail/webhook";
+export {
 	authInfoFromPrincipal,
 	createCloudAuthVerifier,
 	principalFromAuthInfo,

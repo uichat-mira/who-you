@@ -13,6 +13,7 @@ import {
 } from "../mail/draft";
 import type { DraftCursor, DraftRecord, SendReceipt } from "../mail/draft-store";
 import type { WhoYouConfirmationVerifier } from "../mail/confirmation";
+import { createAbuseMonitor, createSendGate } from "../mail/deliverability";
 import { sendDraft, type MailSender } from "../mail/send";
 import type { WhoYouPrincipal } from "./auth";
 import { WHOYOU_MAIL_WRITE_SCOPE } from "./config";
@@ -177,8 +178,10 @@ export function registerDraftTools(
 	services: MailServices,
 	dependencies: DraftToolDependencies,
 ): void {
-	const { repository, drafts } = services;
+	const { repository, drafts, abuse } = services;
 	const accountId = principal.accountId;
+	const sendGate = createSendGate(repository);
+	const abuseMonitor = createAbuseMonitor(repository, abuse);
 
 	server.registerTool(
 		DRAFT_CREATE_TOOL,
@@ -427,6 +430,8 @@ export function registerDraftTools(
 					confirmations: dependencies.confirmations,
 					sender: dependencies.sender,
 					from: mailbox?.address ?? null,
+					gate: sendGate,
+					monitor: abuseMonitor,
 					now: () => Date.now(),
 				},
 				{

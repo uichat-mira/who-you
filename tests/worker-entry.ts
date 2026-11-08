@@ -3,6 +3,7 @@ import { createMailServices, type WhoYouEnv } from "../src/mail/config";
 import { MAIL_DOWNLOAD_PATH, handleSignedDownload } from "../src/mail/download";
 import { runRetentionSweep } from "../src/mail/retention";
 import { provisionMailbox } from "../src/mail/store";
+import { DELIVERY_WEBHOOK_PATH } from "../src/mail/webhook";
 import {
 	CLOUD_AUTH_TOKEN_ISSUER,
 	MCP_METADATA_PATH,
@@ -131,6 +132,12 @@ export default {
 				input.now ?? Date.now(),
 			);
 			return Response.json(result);
+		}
+
+		if (path === DELIVERY_WEBHOOK_PATH) {
+			// The production handler is self-contained: it needs only the HMAC
+			// secret and the real D1 binding, so the fixture entry can delegate.
+			return worker.fetch(request, env);
 		}
 
 		if (path === MAIL_DOWNLOAD_PATH) {
