@@ -18,6 +18,16 @@ export type MailboxRecord = {
 
 export type MailAddressJson = { name: string; address: string };
 
+export type MessageFlags = {
+	read: boolean;
+	starred: boolean;
+	archived: boolean;
+	trashed: boolean;
+};
+
+/** Which mailbox view a search covers. `all` ignores the folder split. */
+export type MessageFolder = "inbox" | "archive" | "trash" | "all";
+
 export type MessageSummary = {
 	id: string;
 	threadId: string;
@@ -36,14 +46,55 @@ export type MessageSummary = {
 	dmarc: string;
 	state: "visible" | "quarantined";
 	quarantineReason: string | null;
+	flags: MessageFlags;
+	flagVersion: number;
 };
 
 export type MessageRecord = MessageSummary & {
 	mailboxId: string;
 	envelopeFrom: string | null;
 	envelopeTo: string;
+	rawKey: string;
 	textKey: string | null;
 	htmlKey: string | null;
+};
+
+/** The message fields every outward view shares; callers add their own extras. */
+export const messageFields = (message: MessageSummary): Record<string, unknown> => ({
+	id: message.id,
+	threadId: message.threadId,
+	direction: message.direction,
+	internetMessageId: message.internetMessageId,
+	from: message.from,
+	to: message.to,
+	cc: message.cc,
+	subject: message.subject,
+	sentAt: message.sentAt,
+	receivedAt: message.receivedAt,
+	sizeBytes: message.sizeBytes,
+});
+
+export type ExportRecord = {
+	id: string;
+	accountId: string;
+	mailboxId: string;
+	exportDay: string;
+	messageCount: number;
+	skippedCount: number;
+	byteSize: number;
+	r2Key: string;
+	createdAt: number;
+};
+
+export type AuditAction = "export" | "delete_message" | "delete_mailbox";
+
+export type NewAuditEntry = {
+	id: string;
+	accountId: string;
+	action: AuditAction;
+	targetId: string | null;
+	detail: string;
+	createdAt: number;
 };
 
 export type AttachmentRecord = {
@@ -112,6 +163,9 @@ export type SearchFilters = {
 	until?: number;
 	hasAttachments?: boolean;
 	threadId?: string;
+	folder?: MessageFolder;
+	unreadOnly?: boolean;
+	starredOnly?: boolean;
 	limit: number;
 	cursor?: { receivedAt: number; id: string };
 };
@@ -182,8 +236,14 @@ type MessageRow = {
 	dmarc: string;
 	state: "visible" | "quarantined";
 	quarantine_reason: string | null;
+	raw_key: string;
 	text_key: string | null;
 	html_key: string | null;
+	is_read: number;
+	is_starred: number;
+	is_archived: number;
+	is_trashed: number;
+	flag_version: number;
 };
 
 type AttachmentRow = {
@@ -230,6 +290,13 @@ const toMessageSummary = (row: MessageRow): MessageSummary => ({
 	dmarc: row.dmarc,
 	state: row.state,
 	quarantineReason: row.quarantine_reason,
+	flags: {
+		read: row.is_read === 1,
+		starred: row.is_starred === 1,
+		archived: row.is_archived === 1,
+		trashed: row.is_trashed === 1,
+	},
+	flagVersion: row.flag_version,
 });
 
 const toMessageRecord = (row: MessageRow): MessageRecord => ({
@@ -237,6 +304,7 @@ const toMessageRecord = (row: MessageRow): MessageRecord => ({
 	mailboxId: row.mailbox_id,
 	envelopeFrom: row.envelope_from,
 	envelopeTo: row.envelope_to,
+	rawKey: row.raw_key,
 	textKey: row.text_key,
 	htmlKey: row.html_key,
 });
@@ -259,7 +327,48 @@ const MESSAGE_COLUMNS = `
 	m.envelope_from, m.envelope_to, m.from_json, m.to_json, m.cc_json,
 	m.subject, m.sent_at, m.received_at, m.size_bytes, m.snippet,
 	m.attachment_count, m.auth_results, m.dmarc, m.state, m.quarantine_reason,
-	m.text_key, m.html_key`;
+	m.raw_key, m.text_key, m.html_key,
+	m.is_read, m.is_starred, m.is_archived, m.is_trashed, m.flag_version`;
+
+type ExportRow = {
+	id: string;
+	account_id: string;
+	mailbox_id: string;
+	export_day: string;
+	message_count: number;
+	skipped_count: number;
+	byte_size: number;
+	r2_key: string;
+	created_at: number;
+};
+
+const toExport = (row: ExportRow): ExportRecord => ({
+	id: row.id,
+	accountId: row.account_id,
+	mailboxId: row.mailbox_id,
+	exportDay: row.export_day,
+	messageCount: row.message_count,
+	skippedCount: row.skipped_count,
+	byteSize: row.byte_size,
+	r2Key: row.r2_key,
+	createdAt: row.created_at,
+});
+
+const flagInt = (value: boolean): number => (value ? 1 : 0);
+
+const flagsEqual = (left: MessageFlags, right: MessageFlags): boolean =>
+	left.read === right.read &&
+	left.starred === right.starred &&
+	left.archived === right.archived &&
+	left.trashed === right.trashed;
+
+export type FlagUpdateResult =
+	| { ok: true; message: MessageSummary; changed: boolean }
+	| {
+			ok: false;
+			reason: "message_not_found" | "message_quarantined" | "flag_version_conflict";
+			currentVersion?: number;
+	  };
 
 export class MailRepository {
 	private readonly db: D1Database;
@@ -446,8 +555,25 @@ export class MailRepository {
 	}
 
 	async search(accountId: string, filters: SearchFilters): Promise<MessageSummary[]> {
+		const folder = filters.folder ?? "inbox";
 		const clauses = ["b.account_id = ?", "m.state = 'visible'"];
 		const bindings: (string | number)[] = [accountId];
+		// Trash is its own view: a normal search must not resurface deleted mail.
+		// Quarantine stays excluded everywhere because those messages are not
+		// visible to the account until an operator releases them.
+		if (folder === "inbox") {
+			clauses.push("m.is_trashed = 0", "m.is_archived = 0");
+		} else if (folder === "archive") {
+			clauses.push("m.is_trashed = 0", "m.is_archived = 1");
+		} else if (folder === "trash") {
+			clauses.push("m.is_trashed = 1");
+		}
+		if (filters.unreadOnly) {
+			clauses.push("m.is_read = 0");
+		}
+		if (filters.starredOnly) {
+			clauses.push("m.is_starred = 1");
+		}
 		if (filters.direction) {
 			clauses.push("m.direction = ?");
 			bindings.push(filters.direction);
@@ -562,6 +688,309 @@ export class MailRepository {
 			.bind(accountId, messageId, attachmentId)
 			.first<AttachmentRow>();
 		return row ? toAttachment(row) : null;
+	}
+
+	/**
+	 * Attachment lookup for signed download. Unlike `listAttachments` it also
+	 * returns quarantined messages, because the route must fail explicitly
+	 * (`message_quarantined`) instead of pretending the object never existed.
+	 */
+	async findAttachmentForDownload(
+		accountId: string,
+		messageId: string,
+		attachmentId: string,
+	): Promise<{ attachment: AttachmentRecord; state: "visible" | "quarantined" } | null> {
+		const row = await this.db
+			.prepare(
+				`SELECT a.id, a.message_id, a.mailbox_id, a.part_path, a.filename, a.mime_type,
+				 a.size_bytes, a.disposition, a.content_id, a.r2_key, m.state
+				 FROM attachments a
+				 JOIN messages m ON m.id = a.message_id
+				 JOIN mailboxes b ON b.id = m.mailbox_id
+				 WHERE b.account_id = ? AND m.id = ? AND a.id = ?
+				 LIMIT 1`,
+			)
+			.bind(accountId, messageId, attachmentId)
+			.first<AttachmentRow & { state: "visible" | "quarantined" }>();
+		if (!row) return null;
+		return { attachment: toAttachment(row), state: row.state };
+	}
+
+	async readObject(key: string): Promise<{ body: ReadableStream; size: number } | null> {
+		const object = await this.bucket.get(key);
+		if (!object) return null;
+		return { body: object.body, size: object.size };
+	}
+
+	/**
+	 * Optimistic, idempotent flag write.
+	 *
+	 * A repeated identical write returns the current message without bumping the
+	 * version, and a concurrent identical write that loses the CAS re-reads and
+	 * reports `changed: false` instead of a spurious conflict.
+	 */
+	async updateFlags(
+		accountId: string,
+		messageId: string,
+		patch: Partial<MessageFlags>,
+		expectedVersion: number | undefined,
+		now: number,
+	): Promise<FlagUpdateResult> {
+		const lookup = async (): Promise<MessageRow | null> =>
+			this.db
+				.prepare(
+					`SELECT ${MESSAGE_COLUMNS}
+					 FROM messages m
+					 JOIN mailboxes b ON b.id = m.mailbox_id
+					 WHERE b.account_id = ? AND m.id = ?
+					 LIMIT 1`,
+				)
+				.bind(accountId, messageId)
+				.first<MessageRow>();
+
+		const row = await lookup();
+		if (!row) return { ok: false, reason: "message_not_found" };
+		if (row.state === "quarantined") return { ok: false, reason: "message_quarantined" };
+
+		const current = toMessageSummary(row);
+		const target: MessageFlags = { ...current.flags, ...patch };
+		const unchanged = flagsEqual(current.flags, target);
+		if (expectedVersion !== undefined && expectedVersion !== current.flagVersion) {
+			return unchanged
+				? { ok: true, message: current, changed: false }
+				: { ok: false, reason: "flag_version_conflict", currentVersion: current.flagVersion };
+		}
+		if (unchanged) return { ok: true, message: current, changed: false };
+
+		const result = await this.db
+			.prepare(
+				`UPDATE messages
+				 SET is_read = ?, is_starred = ?, is_archived = ?, is_trashed = ?,
+				 flag_version = flag_version + 1, flags_updated_at = ?
+				 WHERE id = ? AND mailbox_id = ? AND flag_version = ?`,
+			)
+			.bind(
+				flagInt(target.read),
+				flagInt(target.starred),
+				flagInt(target.archived),
+				flagInt(target.trashed),
+				now,
+				current.id,
+				row.mailbox_id,
+				current.flagVersion,
+			)
+			.run();
+		if ((result.meta.changes ?? 0) === 0) {
+			const latest = await lookup();
+			if (!latest) return { ok: false, reason: "message_not_found" };
+			const latestSummary = toMessageSummary(latest);
+			if (flagsEqual(latestSummary.flags, target)) {
+				return { ok: true, message: latestSummary, changed: false };
+			}
+			return {
+				ok: false,
+				reason: "flag_version_conflict",
+				currentVersion: latestSummary.flagVersion,
+			};
+		}
+
+		const updated = await lookup();
+		return updated
+			? { ok: true, message: toMessageSummary(updated), changed: true }
+			: { ok: false, reason: "message_not_found" };
+	}
+
+	async listExportMessages(accountId: string, limit: number): Promise<MessageRecord[]> {
+		const rows = await this.db
+			.prepare(
+				`SELECT ${MESSAGE_COLUMNS}
+				 FROM messages m
+				 JOIN mailboxes b ON b.id = m.mailbox_id
+				 WHERE b.account_id = ?
+				 ORDER BY m.received_at ASC, m.id ASC
+				 LIMIT ?`,
+			)
+			.bind(accountId, limit)
+			.all<MessageRow>();
+		return (rows.results ?? []).map(toMessageRecord);
+	}
+
+	async findExport(accountId: string, exportId: string): Promise<ExportRecord | null> {
+		const row = await this.db
+			.prepare(
+				`SELECT id, account_id, mailbox_id, export_day, message_count, skipped_count,
+				 byte_size, r2_key, created_at
+				 FROM mail_exports WHERE account_id = ? AND id = ? LIMIT 1`,
+			)
+			.bind(accountId, exportId)
+			.first<ExportRow>();
+		return row ? toExport(row) : null;
+	}
+
+	async findExportForDay(accountId: string, exportDay: string): Promise<ExportRecord | null> {
+		const row = await this.db
+			.prepare(
+				`SELECT id, account_id, mailbox_id, export_day, message_count, skipped_count,
+				 byte_size, r2_key, created_at
+				 FROM mail_exports WHERE account_id = ? AND export_day = ? LIMIT 1`,
+			)
+			.bind(accountId, exportDay)
+			.first<ExportRow>();
+		return row ? toExport(row) : null;
+	}
+
+	/** `false` means the per-account daily slot was already taken. */
+	async insertExport(record: ExportRecord): Promise<boolean> {
+		const result = await this.db
+			.prepare(
+				`INSERT INTO mail_exports (
+				 id, account_id, mailbox_id, export_day, message_count, skipped_count,
+				 byte_size, r2_key, created_at
+				 ) VALUES (?,?,?,?,?,?,?,?,?)
+				 ON CONFLICT (account_id, export_day) DO NOTHING`,
+			)
+			.bind(
+				record.id,
+				record.accountId,
+				record.mailboxId,
+				record.exportDay,
+				record.messageCount,
+				record.skippedCount,
+				record.byteSize,
+				record.r2Key,
+				record.createdAt,
+			)
+			.run();
+		return (result.meta.changes ?? 0) > 0;
+	}
+
+	async insertAudit(entry: NewAuditEntry): Promise<void> {
+		await this.db
+			.prepare(
+				`INSERT INTO mail_audit_log (id, account_id, action, target_id, detail, created_at)
+				 VALUES (?,?,?,?,?,?)`,
+			)
+			.bind(
+				entry.id,
+				entry.accountId,
+				entry.action,
+				entry.targetId,
+				entry.detail,
+				entry.createdAt,
+			)
+			.run();
+	}
+
+	async deleteAuditBefore(cutoff: number): Promise<number> {
+		const result = await this.db
+			.prepare("DELETE FROM mail_audit_log WHERE created_at < ?")
+			.bind(cutoff)
+			.run();
+		return result.meta.changes ?? 0;
+	}
+
+	async listAttachmentKeys(mailboxId: string, messageId: string): Promise<string[]> {
+		const rows = await this.db
+			.prepare("SELECT r2_key FROM attachments WHERE mailbox_id = ? AND message_id = ?")
+			.bind(mailboxId, messageId)
+			.all<{ r2_key: string }>();
+		return (rows.results ?? []).map((row) => row.r2_key);
+	}
+
+	/** Removes one message and its attachments. Must run after R2 deletion. */
+	async deleteMessageRows(options: {
+		mailboxId: string;
+		messageId: string;
+		threadId: string;
+		sizeBytes: number;
+		wasQuarantined: boolean;
+		audit: NewAuditEntry;
+		now: number;
+	}): Promise<number> {
+		const results = await this.db.batch([
+			this.db
+				.prepare("DELETE FROM attachments WHERE mailbox_id = ? AND message_id = ?")
+				.bind(options.mailboxId, options.messageId),
+			this.db
+				.prepare("DELETE FROM messages WHERE mailbox_id = ? AND id = ?")
+				.bind(options.mailboxId, options.messageId),
+			this.db
+				.prepare(
+					`UPDATE mailboxes
+					 SET bytes_used = MAX(0, bytes_used - ?),
+					 message_count = MAX(0, message_count - 1),
+					 quarantine_count = MAX(0, quarantine_count - ?),
+					 updated_at = ?
+					 WHERE id = ?`,
+				)
+				.bind(
+					options.sizeBytes,
+					options.wasQuarantined ? 1 : 0,
+					options.now,
+					options.mailboxId,
+				),
+			this.db
+				.prepare(
+					"UPDATE threads SET message_count = MAX(0, message_count - 1) WHERE id = ? AND mailbox_id = ?",
+				)
+				.bind(options.threadId, options.mailboxId),
+			this.db
+				.prepare(
+					`INSERT INTO mail_audit_log (id, account_id, action, target_id, detail, created_at)
+					 VALUES (?,?,?,?,?,?)`,
+				)
+				.bind(
+					options.audit.id,
+					options.audit.accountId,
+					options.audit.action,
+					options.audit.targetId,
+					options.audit.detail,
+					options.audit.createdAt,
+				),
+		]);
+		const deleted = results[1]?.meta.changes ?? 0;
+		return deleted;
+	}
+
+	async listMailboxObjectKeys(mailboxId: string): Promise<string[]> {
+		const statements = [
+			this.db
+				.prepare(
+					`SELECT raw_key AS key FROM messages WHERE mailbox_id = ?
+					 UNION ALL SELECT text_key AS key FROM messages WHERE mailbox_id = ? AND text_key IS NOT NULL
+					 UNION ALL SELECT html_key AS key FROM messages WHERE mailbox_id = ? AND html_key IS NOT NULL`,
+				)
+				.bind(mailboxId, mailboxId, mailboxId),
+			this.db.prepare("SELECT r2_key AS key FROM attachments WHERE mailbox_id = ?").bind(mailboxId),
+			this.db.prepare("SELECT r2_key AS key FROM mail_exports WHERE mailbox_id = ?").bind(mailboxId),
+		];
+		const results = await this.db.batch(statements);
+		const keys: string[] = [];
+		for (const result of results) {
+			for (const row of (result.results ?? []) as { key: string }[]) {
+				keys.push(row.key);
+			}
+		}
+		return keys;
+	}
+
+	/**
+	 * Removes every row owned by the mailbox. Must run after R2 deletion. The
+	 * audit history for this account is erased too: an account deletion is a
+	 * data-subject erasure, not a retention checkpoint.
+	 */
+	async deleteMailboxRows(mailboxId: string, accountId: string): Promise<void> {
+		await this.db.batch([
+			this.db.prepare("DELETE FROM attachments WHERE mailbox_id = ?").bind(mailboxId),
+			this.db.prepare("DELETE FROM messages WHERE mailbox_id = ?").bind(mailboxId),
+			this.db.prepare("DELETE FROM threads WHERE mailbox_id = ?").bind(mailboxId),
+			this.db.prepare("DELETE FROM mail_exports WHERE mailbox_id = ?").bind(mailboxId),
+			this.db.prepare("DELETE FROM mail_drafts WHERE mailbox_id = ?").bind(mailboxId),
+			this.db.prepare("DELETE FROM confirmation_nonces WHERE account_id = ?").bind(accountId),
+			this.db.prepare("DELETE FROM send_receipts WHERE account_id = ?").bind(accountId),
+			this.db.prepare("DELETE FROM mail_audit_log WHERE account_id = ?").bind(accountId),
+			this.db.prepare("DELETE FROM mailboxes WHERE id = ?").bind(mailboxId),
+		]);
 	}
 }
 

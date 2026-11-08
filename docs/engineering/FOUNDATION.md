@@ -1,6 +1,6 @@
 # Who You — infrastructure handoff (not a product design)
 
-**Status (2026-11-08): repository bootstrap plus S1 inbound and S2 draft/send code slices.** No Cloudflare deployment, DNS record, Email Routing rule, D1 database or R2 bucket documented here exists as evidence of an active service.
+**Status (2026-11-08): repository bootstrap plus S1 inbound, S2 draft/send and S3 state/lifecycle code slices.** No Cloudflare deployment, DNS record, Email Routing rule, D1 database or R2 bucket documented here exists as evidence of an active service.
 
 ## Confirmed starting point
 
@@ -24,11 +24,11 @@ Task card: `docs/task-cards/WHO-S1-inbound-read.md` on `docs/who-you-task-cards-
 
 - Schema: `migrations/0001_mail.sql` (`mailboxes`, `threads`, `messages`, `attachments`). Apply with the D1 migration mechanism owned by the deploy surface; the test harness applies the same file via D1 `batch`.
 - Bindings: D1 `DB`, R2 `MAIL_BUCKET`, string `MAIL_DOMAIN`. `/mcp` is closed with `mail_storage_not_configured` when D1/R2 are absent, and `email()` fails transiently when storage or `MAIL_DOMAIN` is absent. `cloudflare.config.ts` deliberately does **not** declare D1/R2: the `cf` beta binding schema is unverified, and inventing it would be a false platform claim.
-- Limits: `MAIL_MAX_RAW_BYTES`, `MAIL_MAX_PART_COUNT`, `MAIL_MAX_NESTING_DEPTH`, `MAIL_MAX_HEADER_BYTES`, `MAIL_MAX_ATTACHMENTS`, `MAIL_MAX_ATTACHMENT_BYTES`, `MAIL_MAILBOX_QUOTA_BYTES`, `MAIL_BODY_MAX_CHARS`, `MAIL_ATTACHMENT_INLINE_BYTES`. Defaults live in `src/mail/limits.ts`; they are policy ceilings for this slice, not measured Email Routing limits.
+- Limits: `MAIL_MAX_RAW_BYTES`, `MAIL_MAX_PART_COUNT`, `MAIL_MAX_NESTING_DEPTH`, `MAIL_MAX_HEADER_BYTES`, `MAIL_MAX_ATTACHMENTS`, `MAIL_MAX_ATTACHMENT_BYTES`, `MAIL_MAILBOX_QUOTA_BYTES`, `MAIL_BODY_MAX_CHARS`, `MAIL_ATTACHMENT_INLINE_BYTES` (S1), plus `MAIL_EXPORT_MAX_MESSAGES` and `MAIL_EXPORT_MAX_BYTES` (S3). Defaults live in `src/mail/limits.ts`; they are policy ceilings for this slice, not measured Email Routing limits.
 - Inbound MIME is read by `src/mail/raw-mime.ts`, a strict in-repo reader that enforces the caller's header, nesting, part and attachment ceilings and fails explicitly on structure it does not understand. No MIME library dependency is added in this slice; adopting a vetted library remains a separate product decision.
 - MCP read tools: `whoyou_mailbox_get`, `whoyou_mail_search`, `whoyou_mail_thread_get`, `whoyou_mail_message_get`, `whoyou_mail_attachment_get`. All reads are scoped by the token-derived account id; quarantined messages are excluded from search and fail explicitly on direct read. Mail content output carries `UNTRUSTED_EMAIL_CONTENT`.
 - Search uses a normalized `search_text` column with `instr`, not FTS5 (D1 FTS5 support unverified).
-- Attachments are inlined as base64 only below `MAIL_ATTACHMENT_INLINE_BYTES`; larger attachments fail explicitly because no signed-download capability is verified.
+- Attachments are inlined as base64 only below `MAIL_ATTACHMENT_INLINE_BYTES`; larger attachments failed explicitly in S1 and are superseded by the S3 signed-download link (below).
 
 Evidence boundary: `npm run check` (T1 unit + T3 Miniflare D1/R2 workerd) proves local code behavior only. It is **not** evidence that `tomlab.cn` is in the Cloudflare account, that Email Routing is enabled, that the platform passes `Authentication-Results`, or that any real message was received or sent.
 
@@ -46,6 +46,23 @@ Task card: `docs/task-cards/WHO-S2-draft-confirm-send.md` on `docs/who-you-task-
 Explicit gaps: attachment upload/display protocol is undefined, so attachment arguments are rejected and only a placeholder participates in the hash; per-day quotas and recipient ceilings are slice-level constants (20 recipients, 200 000 body characters), not approved product policy; a provider failure spends the nonce and leaves delivery unknown; and no real outbound message, SPF/DKIM/DMARC result or `send_email` behaviour has been observed. Real sending requires a separate security authorization and a real integration run.
 
 Evidence boundary: the S2 tests fake the provider and the confirmation issuer. They prove ordering, binding and single-use behaviour inside workerd D1 — not Cloudflare Email Service semantics, deliverability, or Cloud Auth issuance end to end.
+
+## S3 state, attachments, search, retention and lifecycle code slice (implemented, not provisioned)
+
+Task card: `docs/task-cards/WHO-S3-state-search-retention.md` on `docs/who-you-task-cards-v1`.
+
+- Schema: `migrations/0003_s3_state_search_retention.sql`. Adds mailbox-level flags plus `flag_version` to `messages`, `mail_audit_log`, and `mail_exports` with the `(account_id, export_day)` rate-limit key.
+- Flags: `whoyou_mail_flag_set` writes `read`, `starred`, `archived`, `trashed` and requires `whoyou.mail.write`. `flag_version` advances only when the effective flag set changes, so a repeated identical write is a no-op; `expectedVersion` gives optimistic concurrency, and a concurrent identical write that loses the CAS re-reads and reports `changed: false` instead of a false conflict. Quarantined messages cannot be flagged.
+- Trash is a folder, not a delete: search defaults to `inbox` (untrashed, unarchived), with `folder: archive | trash | all`, plus `unreadOnly` and `starredOnly`. Quarantined messages stay excluded everywhere.
+- Signed downloads: `/mail/download` serves exactly one object per link. The link carries an HMAC-SHA256 over `kind, accountId, id, messageId, exp` using `MAIL_SIGNING_KEY`, expires after 5 minutes, and still requires the caller's Cloud Auth bearer with the read scope. Forwarding the URL grants nothing and the R2 key never appears in the URL or tool output. Missing, quarantined, unowned and deleted objects fail with explicit codes (`attachment_not_found`, `message_quarantined`, `attachment_unavailable`); an absent or short signing key closes the route with `download_signing_not_configured`.
+- Search hardening: query and stored `search_text` share `normalizeSearchQuery` (NFC, case-fold, whitespace collapse, 200-character cap); ordering and cursor stay `(received_at DESC, id DESC)` with `(received_at, id)` tie-breaking, and a 60-message repeated-timestamp page-through is asserted not to duplicate or skip. FTS5 is still **not** used: D1 FTS5 availability remains unverified, so `instr` is the declared backend in both environments.
+- Export: `whoyou_mail_export` builds one store-only ZIP (raw EML per message plus `manifest.json`), one per account per UTC day enforced by the unique key, capped by `MAIL_EXPORT_MAX_MESSAGES` / `MAIL_EXPORT_MAX_BYTES`, delivered through the same 5-minute signed link, and recorded in `mail_audit_log`. The manifest never contains another account's data.
+- Delete: `whoyou_mail_message_delete` requires the message to be trashed, removes R2 objects first and D1 rows second, and is retry-safe (`alreadyDeleted: true`). `whoyou_mail_mailbox_delete` requires `confirm: true` and erases every R2 object and every owned row (messages, threads, drafts, nonces, receipts, exports, audit, mailbox), leaving other accounts untouched.
+- Retention: user mail has **no TTL** — it lives until the user deletes it. Only `mail_audit_log` expires, after `MAIL_RETENTION_AUDIT_DAYS` (default 180). The approved 90-day bounce-record window is recorded in `src/mail/retention.ts`, but S4 owns bounce ingestion and no bounce store exists yet, so nothing sweeps it. The sweep runs from the `scheduled()` handler; a Cron Trigger must point at it in deployment. Deletion takes effect immediately in D1/R2; the ≤ 7-day backup-residue window is a Cloudflare backup property, not something this Worker can verify.
+
+Explicit gaps: the 5-minute signed link must be fetched with the bearer, so it is an agent/client download rather than a browser-clickable link; export is capped at 25 MB / 1000 messages per account per day; a mailbox-wide export includes quarantined messages by design; the Cron Trigger, `MAIL_SIGNING_KEY`, and backup policy are deployment-side and unverified.
+
+Evidence boundary: `npm run check` proves the flag CAS, signed-link verification, export scoping, delete ordering/idempotency and audit sweep inside workerd with Miniflare D1/R2. It does not prove Cloud Auth production issuance, R2 backup residue, or any deployed route.
 
 ## Cloudflare rollout discipline (reserved names, not created)
 

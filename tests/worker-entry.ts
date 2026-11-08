@@ -1,5 +1,7 @@
 import worker from "../src/index";
 import { createMailServices, type WhoYouEnv } from "../src/mail/config";
+import { MAIL_DOWNLOAD_PATH, handleSignedDownload } from "../src/mail/download";
+import { runRetentionSweep } from "../src/mail/retention";
 import { provisionMailbox } from "../src/mail/store";
 import {
 	CLOUD_AUTH_TOKEN_ISSUER,
@@ -112,6 +114,34 @@ export default {
 				now: 1_795_000_000_000,
 			});
 			return Response.json(result);
+		}
+
+		if (path === "/__retention") {
+			if (request.method !== "POST") {
+				return Response.json({ error: "method_not_allowed" }, { status: 405 });
+			}
+			const services = createMailServices(env);
+			if (!services.ok) {
+				return Response.json({ error: "mail_not_configured" }, { status: 503 });
+			}
+			const input = (await request.json()) as { now?: number };
+			const result = await runRetentionSweep(
+				services.services.repository,
+				services.services.retention,
+				input.now ?? Date.now(),
+			);
+			return Response.json(result);
+		}
+
+		if (path === MAIL_DOWNLOAD_PATH) {
+			return handleSignedDownload(
+				request,
+				env,
+				createFixtureVerifier({
+					issuer: CLOUD_AUTH_TOKEN_ISSUER,
+					audience: env.MCP_AUDIENCE ?? "",
+				}),
+			);
 		}
 
 		if (path !== MCP_RESOURCE_PATH && path !== MCP_METADATA_PATH) {
