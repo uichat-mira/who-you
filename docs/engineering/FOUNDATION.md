@@ -1,6 +1,6 @@
 # Who You — infrastructure handoff (not a product design)
 
-**Status (2026-11-06): repository bootstrap only.** Cloudflare and GitHub resources documented here are not evidence of an active deployment.
+**Status (2026-11-08): repository bootstrap plus an S1 inbound code slice.** No Cloudflare deployment, DNS record, Email Routing rule, D1 database or R2 bucket documented here exists as evidence of an active service.
 
 ## Confirmed starting point
 
@@ -15,8 +15,22 @@
 - Cloudflare Workers (Cloud API / edge service) with TypeScript.
 - Node.js 24 for local/CI. Use `cf` CLI for this **new** Workers project; Cloudflare currently marks the CLI beta. Follow the current `cf init` template, with `cloudflare.config.ts`.
 - Typecheck + lint + meaningful T1/T2/T3 checks; use Cloudflare Worker runtime for platform integrations.
-- Introduce Hono only with an actual route surface. Introduce D1, R2, KV, Queues, Workers Email/Email Sending or cron **only** for approved requirements.
+- Introduce Hono only with an actual route surface. Introduce D1, R2, KV, Queues, Workers Email/Email Sending or cron **only** for approved requirements. S1 now introduces D1 (`DB`) and R2 (`MAIL_BUCKET`) for inbound metadata and raw/body/attachment objects.
 - Generate and commit a package lock; deterministic install is part of the first runtime PR.
+
+## S1 inbound code slice (implemented, not provisioned)
+
+Task card: `docs/task-cards/WHO-S1-inbound-read.md` on `docs/who-you-task-cards-v1`; design: `docs/product-design.md` v1.
+
+- Schema: `migrations/0001_mail.sql` (`mailboxes`, `threads`, `messages`, `attachments`). Apply with the D1 migration mechanism owned by the deploy surface; the test harness applies the same file via D1 `batch`.
+- Bindings: D1 `DB`, R2 `MAIL_BUCKET`, string `MAIL_DOMAIN`. `/mcp` is closed with `mail_storage_not_configured` when D1/R2 are absent, and `email()` fails transiently when storage or `MAIL_DOMAIN` is absent. `cloudflare.config.ts` deliberately does **not** declare D1/R2: the `cf` beta binding schema is unverified, and inventing it would be a false platform claim.
+- Limits: `MAIL_MAX_RAW_BYTES`, `MAIL_MAX_PART_COUNT`, `MAIL_MAX_NESTING_DEPTH`, `MAIL_MAX_HEADER_BYTES`, `MAIL_MAX_ATTACHMENTS`, `MAIL_MAX_ATTACHMENT_BYTES`, `MAIL_MAILBOX_QUOTA_BYTES`, `MAIL_BODY_MAX_CHARS`, `MAIL_ATTACHMENT_INLINE_BYTES`. Defaults live in `src/mail/limits.ts`; they are policy ceilings for this slice, not measured Email Routing limits.
+- Inbound MIME is read by `src/mail/raw-mime.ts`, a strict in-repo reader that enforces the caller's header, nesting, part and attachment ceilings and fails explicitly on structure it does not understand. No MIME library dependency is added in this slice; adopting a vetted library remains a separate product decision.
+- MCP read tools: `whoyou_mailbox_get`, `whoyou_mail_search`, `whoyou_mail_thread_get`, `whoyou_mail_message_get`, `whoyou_mail_attachment_get`. All reads are scoped by the token-derived account id; quarantined messages are excluded from search and fail explicitly on direct read. Mail content output carries `UNTRUSTED_EMAIL_CONTENT`.
+- Search uses a normalized `search_text` column with `instr`, not FTS5 (D1 FTS5 support unverified).
+- Attachments are inlined as base64 only below `MAIL_ATTACHMENT_INLINE_BYTES`; larger attachments fail explicitly because no signed-download capability is verified.
+
+Evidence boundary: `npm run check` (T1 unit + T3 Miniflare D1/R2 workerd) proves local code behavior only. It is **not** evidence that `tomlab.cn` is in the Cloudflare account, that Email Routing is enabled, that the platform passes `Authentication-Results`, or that any real message was received or sent.
 
 ## Cloudflare rollout discipline (reserved names, not created)
 
