@@ -1,8 +1,30 @@
 import js from "@eslint/js";
 import tseslint from "typescript-eslint";
 
+const runtimeGlobals = {
+	Buffer: "readonly",
+	console: "readonly",
+	crypto: "readonly",
+	fetch: "readonly",
+	process: "readonly",
+	setInterval: "readonly",
+	clearInterval: "readonly",
+	setTimeout: "readonly",
+	clearTimeout: "readonly",
+	Response: "readonly",
+	Request: "readonly",
+	Headers: "readonly",
+	ReadableStream: "readonly",
+	TextEncoder: "readonly",
+	TextDecoder: "readonly",
+	URL: "readonly",
+	URLSearchParams: "readonly",
+	btoa: "readonly",
+	atob: "readonly",
+};
+
 export default tseslint.config(
-	{ ignores: ["dist/", ".cloudflare/", "node_modules/"] },
+	{ ignores: ["dist/", "node_modules/"] },
 	js.configs.recommended,
 	...tseslint.configs.recommended,
 	{
@@ -10,16 +32,8 @@ export default tseslint.config(
 		languageOptions: {
 			parserOptions: { ecmaVersion: 2024, sourceType: "module" },
 			globals: {
-				console: "readonly",
-				crypto: "readonly",
-				Response: "readonly",
-				Request: "readonly",
-				Headers: "readonly",
-				ReadableStream: "readonly",
-				TextEncoder: "readonly",
-				TextDecoder: "readonly",
-				btoa: "readonly",
-				atob: "readonly",
+				...runtimeGlobals,
+				NodeJS: "readonly",
 			},
 		},
 		rules: {
@@ -31,19 +45,7 @@ export default tseslint.config(
 		languageOptions: {
 			ecmaVersion: 2024,
 			sourceType: "module",
-			globals: {
-				URL: "readonly",
-				console: "readonly",
-				process: "readonly",
-				Response: "readonly",
-				Request: "readonly",
-				Headers: "readonly",
-				ReadableStream: "readonly",
-				TextEncoder: "readonly",
-				TextDecoder: "readonly",
-				btoa: "readonly",
-				atob: "readonly",
-			},
+			globals: runtimeGlobals,
 		},
 	},
 );

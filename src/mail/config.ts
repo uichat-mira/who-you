@@ -8,7 +8,9 @@ import {
 	type MailLimits,
 } from "./limits";
 import { DraftRepository } from "./draft-store";
+import type { MailBucket, SqlDatabase } from "./ports";
 import { resolveRetention, type RetentionEnv, type RetentionPolicy } from "./retention";
+import type { MailSender } from "./send";
 import { MailRepository } from "./store";
 
 /**
@@ -20,11 +22,11 @@ export type WhoYouEnv = McpEnv &
 	MailLimitEnv &
 	AbuseLimitEnv &
 	RetentionEnv & {
-		DB?: D1Database;
-		MAIL_BUCKET?: R2Bucket;
+		DB?: SqlDatabase;
+		MAIL_BUCKET?: MailBucket;
 		MAIL_DOMAIN?: string;
-		/** Cloudflare Email Service binding; send is closed when it is absent. */
-		MAIL_EMAIL_SEND?: SendEmail;
+		/** Outbound port implementation; send is closed when it is absent. */
+		MAIL_SENDER?: MailSender;
 		/**
 		 * HMAC key for short-lived attachment/export links. Absent or shorter
 		 * than 32 characters closes the signed-download capability entirely.

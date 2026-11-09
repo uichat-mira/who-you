@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { connect, seedMailbox, seedTwoAccounts, withWorker } from "./workerd-harness.mjs";
+import { connect, seedMailbox, seedTwoAccounts, withWorker } from "./node-harness.mjs";
 
 const simpleRaw = (messageId, subject, body) =>
 	[

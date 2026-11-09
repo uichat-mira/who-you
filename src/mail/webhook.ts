@@ -1,3 +1,4 @@
+import type { webcrypto } from "node:crypto";
 import { createMailServices, type WhoYouEnv } from "./config";
 import { recordDeliveryEvents } from "./deliverability";
 import { parseDeliveryReport } from "./dsn";
@@ -53,7 +54,7 @@ export function webhookSigningPayload(
 	return `${timestamp}\n${nonce}\n${rawBody}`;
 }
 
-const importHmacKey = async (secret: string): Promise<CryptoKey> =>
+const importHmacKey = async (secret: string): Promise<webcrypto.CryptoKey> =>
 	crypto.subtle.importKey(
 		"raw",
 		encoder.encode(secret),

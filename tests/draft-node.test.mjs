@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { encodeFixtureConfirmation } from "../dist/fixtures.mjs";
-import { connect, seedTwoAccounts, withWorker } from "./workerd-harness.mjs";
+import { connect, seedTwoAccounts, withWorker } from "./node-harness.mjs";
 
 async function sentMessages(mf) {
 	const response = await mf.dispatchFetch("https://127.0.0.1/__sent");

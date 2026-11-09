@@ -14,27 +14,30 @@ This repository is the **cloud-side continuation of Mira Desktop's existing mail
 
 ## Reserved technical direction (not a product specification)
 
-- Cloud entry point: **Cloudflare Workers**, TypeScript, Node.js 24. 
-- Preferred new-project CLI: **Cloudflare `cf`**, using `cloudflare.config.ts` when runtime scaffolding begins. Do not introduce Wrangler alongside it without a documented reason.
-- Test/runtime contract: Mira T1/T2/T3 + `check`; `node:test` with Miniflare/workerd for Worker-specific behavior. Vitest pool-workers is not used because it requires a Wrangler config, which this repository deliberately does not carry.
+- Runtime entry point: a **Node.js 24** long-running process on an Aliyun VPS (`node dist/node.mjs`), TypeScript, bundled with esbuild. Cloudflare Workers, `cf`, Wrangler, D1, R2, Email Service bindings and Cron Triggers are no longer used.
+- Platform edges are ports (`src/mail/ports.ts`): SQLite for metadata, a filesystem object bucket, `nodemailer` for outbound relay and `smtp-server` for inbound. Deploy notes live in `docs/deployment/vps.md`.
+- Test/runtime contract: Mira T1/T2/T3 + `check`; `node:test` integration suites run the same handlers against the Node ports and a temporary data directory.
 - Hono may be adopted for HTTP API routing when routes are actually designed.
-- Do **not** select D1, R2, Queues, cron, an email provider, or cloud storage of message bodies until an explicit task/architecture contract justifies it.
+- Do **not** select a different storage engine, queue, external provider or cloud storage of message bodies until an explicit task/architecture contract justifies it.
 
 Read [engineering foundation](docs/engineering/FOUNDATION.md) before touching infrastructure.
 
 ## Local setup
 
-This is a **docs/governance bootstrap**, not a runnable application.
+Node.js **24+** is required (`node:sqlite`, `smtp-server`).
 
 ```bash
-bash scripts/check.sh
+npm ci
+npm run check     # typecheck + lint + unit + integration
+npm run build     # emits dist/node.mjs
+npm start         # node dist/node.mjs; requires WHOYOU_DB_PATH + WHOYOU_DATA_DIR
 ```
 
-When an approved runtime task begins, run `cf init` (Node >=22.18, Node 24 preferred), commit a package manifest **and frozen lockfile**, and implement `npm run check` or `pnpm check` as the actual verification gate. The script intentionally refuses runtime source without that setup. Never represent the current documentation CI as runtime evidence.
+`bash scripts/check.sh` verifies repository bootstrap contracts; `npm run check` is the runtime verification gate. Never represent local test results as evidence of a deployed service.
 
 ## Runtime scaffold (WHO-001 / WHO-002; not deployed)
 
-- `npm run check` = typecheck + lint + T1 auth tests + T3 workerd/MCP-client tests.
+- `npm run check` = typecheck + lint + T1 auth tests + T3 Node/MCP-client integration tests.
 - One agent-facing surface: stateless Streamable HTTP `/mcp` plus RFC 9728 discovery at `/.well-known/oauth-protected-resource/mcp`.
 - Cloud Auth bearer verification: JWKS, issuer `mira:cloud-auth`, audience `mira:who-you`, required scope `whoyou.read`, consumer claim `consumer_id`. Missing configuration is `503 mcp_not_configured`; there is no anonymous or fixture fallback.
 - The only tool is `whoyou_whoami`. No mailbox, persistence, provider OAuth, or email send exists.
