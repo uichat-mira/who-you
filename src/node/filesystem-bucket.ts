@@ -53,7 +53,7 @@ export function listObjectKeys(dataDir: string, prefix = ""): string[] {
 	};
 
 	walk(root, "");
-	return keys.sort();
+	return keys.sort((a, b) => a.localeCompare(b));
 }
 
 export class FilesystemBucket implements MailBucket {
