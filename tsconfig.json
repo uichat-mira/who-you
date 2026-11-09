@@ -4,7 +4,7 @@
 		"lib": ["es2024"],
 		"module": "preserve",
 		"moduleResolution": "bundler",
-		"types": ["@cloudflare/workers-types"],
+		"types": ["node"],
 		"strict": true,
 		"noEmit": true,
 		"allowImportingTsExtensions": true,
@@ -12,5 +12,5 @@
 		"verbatimModuleSyntax": true,
 		"skipLibCheck": true
 	},
-	"include": ["src", "tests", "cloudflare.config.ts"]
+	"include": ["src", "tests"]
 }

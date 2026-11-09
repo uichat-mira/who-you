@@ -1,6 +1,7 @@
-import worker from "../src/index";
+import { handleEmail, handleRequest } from "../src/app";
 import { createMailServices, type WhoYouEnv } from "../src/mail/config";
 import { MAIL_DOWNLOAD_PATH, handleSignedDownload } from "../src/mail/download";
+import type { InboundEmail } from "../src/mail/ports";
 import { runRetentionSweep } from "../src/mail/retention";
 import { provisionMailbox } from "../src/mail/store";
 import { DELIVERY_WEBHOOK_PATH } from "../src/mail/webhook";
@@ -15,14 +16,17 @@ import {
 	createFixtureConfirmationVerifier,
 	createFixtureVerifier,
 	fixtureOutbox,
+	resetFixtureOutbox,
 } from "./fixtures";
 
+/** Exported so the Node harness can reset the same bundled outbox instance. */
+export { resetFixtureOutbox };
+
 /**
- * Test-only Worker entry. It exposes the same production `fetch` and `email`
- * handlers, but adds a `/__inbound` route because Miniflare has no public API
- * for dispatching the `email` handler itself. The route constructs the same
- * ForwardableEmailMessage shape workerd passes to `email()` and invokes the
- * production handler with the real D1/R2 bindings.
+ * Test-only platform entry. It exposes the same production `handleRequest` and
+ * `handleEmail` functions, but adds fixture-only routes because the test
+ * harness has no public API for dispatching the inbound email handler or for
+ * observing the injected outbox. It uses the same storage ports as production.
  */
 type InboundRequest = {
 	from?: string;
@@ -32,12 +36,12 @@ type InboundRequest = {
 };
 
 function buildEmailMessage(input: InboundRequest): {
-	message: ForwardableEmailMessage;
+	message: InboundEmail;
 	rejectedReason: () => string | null;
 } {
 	const bytes = new TextEncoder().encode(input.raw);
 	let rejected: string | null = null;
-	const message = {
+	const message: InboundEmail = {
 		from: input.from ?? "sender@example.com",
 		to: input.to,
 		headers: new Headers(input.headers ?? {}),
@@ -51,11 +55,7 @@ function buildEmailMessage(input: InboundRequest): {
 		setReject(reason: string) {
 			rejected = reason;
 		},
-		async forward() {},
-		async reply() {
-			throw new Error("reply is out of scope for S1");
-		},
-	} as unknown as ForwardableEmailMessage;
+	};
 	return { message, rejectedReason: () => rejected };
 }
 
@@ -86,9 +86,8 @@ export default {
 				return Response.json({ error: "invalid_request" }, { status: 400 });
 			}
 			const { message, rejectedReason } = buildEmailMessage(input);
-			if (!worker.email) throw new Error("test entry requires the production email handler");
 			try {
-				await worker.email(message, env);
+				await handleEmail(message, env);
 			} catch {
 				return Response.json({ error: "inbound_failed" }, { status: 500 });
 			}
@@ -136,8 +135,8 @@ export default {
 
 		if (path === DELIVERY_WEBHOOK_PATH) {
 			// The production handler is self-contained: it needs only the HMAC
-			// secret and the real D1 binding, so the fixture entry can delegate.
-			return worker.fetch(request, env);
+			// secret and the storage ports, so the fixture entry can delegate.
+			return handleRequest(request, env);
 		}
 
 		if (path === MAIL_DOWNLOAD_PATH) {
@@ -173,4 +172,8 @@ export default {
 		}
 		return resolved.runtime.fetch(request);
 	},
-} satisfies ExportedHandler<WhoYouEnv>;
+
+	async email(message: InboundEmail, env: TestEnv): Promise<void> {
+		await handleEmail(message, env);
+	},
+};

@@ -175,6 +175,11 @@ export type FixtureSentMessage = {
 
 const fixtureSent: FixtureSentMessage[] = [];
 
+/** Each platform instance starts with an empty outbox, matching an isolate. */
+export function resetFixtureOutbox(): void {
+	fixtureSent.length = 0;
+}
+
 export function fixtureOutbox(): FixtureSentMessage[] {
 	return fixtureSent.map((message) => ({
 		...message,

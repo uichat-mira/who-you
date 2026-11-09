@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-for path in AGENTS.md README.md docs/engineering/FOUNDATION.md ai-review/PROFILE.md .github/CODEOWNERS .github/workflows/ci.yml; do
+for path in AGENTS.md README.md docs/engineering/FOUNDATION.md docs/deployment/vps.md ai-review/PROFILE.md .github/CODEOWNERS .github/workflows/ci.yml; do
   test -s "$path" || { echo "::error::Missing bootstrap contract: $path" >&2; exit 1; }
 done
 
 if test ! -f package.json; then
-  for path in src apps packages cloudflare.config.ts wrangler.jsonc wrangler.toml wrangler.json; do
+  for path in src apps packages src/node/main.ts; do
     if test -e "$path"; then
       echo "::error::Runtime source/config exists but package.json is missing: $path" >&2
       exit 1

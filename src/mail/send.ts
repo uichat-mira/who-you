@@ -6,9 +6,9 @@ import type { DraftRepository, SendReceipt } from "./draft-store";
 import { sha256Hex } from "./hash";
 
 /**
- * Outbound port. The deployed adapter wraps the Cloudflare Email Service
- * `send_email` binding; tests inject a deterministic fake. Who You never
- * speaks SMTP or any other provider protocol directly.
+ * Outbound port. The Node adapter wraps a configured SMTP relay; tests inject a
+ * deterministic fake. Who You never speaks SMTP or any other provider protocol
+ * from business code.
  */
 export type OutboundMail = {
 	from: string;
@@ -22,35 +22,6 @@ export type OutboundMail = {
 
 export interface MailSender {
 	send(message: OutboundMail): Promise<{ providerMessageId: string }>;
-}
-
-const toPlatformAddress = (entry: DraftAddress): { name: string; email: string } => ({
-	name: entry.name,
-	email: entry.address,
-});
-
-/**
- * Returns `null` when the binding is absent so the send path reports
- * `relay_unavailable` instead of pretending a message left the Worker.
- */
-export function createCloudflareMailSender(
-	binding: SendEmail | undefined,
-): MailSender | null {
-	if (!binding) return null;
-	return {
-		async send(message: OutboundMail): Promise<{ providerMessageId: string }> {
-			const result = await binding.send({
-				from: message.from,
-				to: message.to.map(toPlatformAddress),
-				cc: message.cc.map(toPlatformAddress),
-				bcc: message.bcc.map(toPlatformAddress),
-				subject: message.subject,
-				text: message.text,
-				...(message.html === null ? {} : { html: message.html }),
-			});
-			return { providerMessageId: result.messageId };
-		},
-	};
 }
 
 export type SendFailureCode =

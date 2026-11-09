@@ -2,6 +2,7 @@ import { resolveRecipient } from "./address";
 import { createMailServices, type WhoYouEnv } from "./config";
 import { sha256Hex } from "./hash";
 import type { MailLimits } from "./limits";
+import type { InboundEmail } from "./ports";
 import {
 	MailParseError,
 	parseInboundMail,
@@ -138,7 +139,7 @@ async function prepareInbound(
  * forwards mail, and it never falls through for an unknown recipient.
  */
 export async function handleInboundEmail(
-	message: ForwardableEmailMessage,
+	message: InboundEmail,
 	env: WhoYouEnv,
 ): Promise<void> {
 	const resolved = createMailServices(env);

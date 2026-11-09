@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { MCP_TEST_RESOURCE_URL } from "../dist/fixtures.mjs";
 import { buildDownloadUrl, createDownloadSigner, SIGNED_DOWNLOAD_TTL_MS } from "../dist/unit.mjs";
-import { DAY_MS, NOW, connect, seedTwoAccounts, withWorker } from "./workerd-harness.mjs";
+import { DAY_MS, NOW, connect, seedTwoAccounts, withWorker } from "./node-harness.mjs";
 
 const SIGNING_KEY = "s3-test-signing-key-0123456789abcdef";
 
@@ -340,7 +340,7 @@ test("export is daily-limited, audited and scoped to the caller's own mail", asy
 	});
 });
 
-test("permanent delete requires trash, removes R2 before rows and is retry-safe", async () => {
+test("permanent delete requires trash, removes objects before rows and is retry-safe", async () => {
 	await withWorker(async ({ mf, db }) => {
 		await seedTwoAccounts(db);
 		await seedMessage(db, { id: "msg_del", accountId: "account-a", sizeBytes: 42 });
