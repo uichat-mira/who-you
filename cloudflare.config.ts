@@ -14,9 +14,9 @@ export default defineConfig({
 			// closes `/mcp` with mail_storage_not_configured rather than opening it.
 			DB: bindings.d1({ name: "who-you-dev" }),
 			MAIL_BUCKET: bindings.r2({ name: "who-you-dev-attachments" }),
-			// Mail domain for this deployment. The zone is in the same account, but no
-			// MX record or Email Routing rule exists yet, so nothing can reach the
-			// inbound handler until those are provisioned.
+			// Mail domain for this deployment. The zone lives in the same account and
+			// has Email Routing enabled (MX, SPF, DKIM); which addresses reach this
+			// Worker is decided by the zone's Email Routing rules, not by this file.
 			MAIL_DOMAIN: bindings.text("tzt2026.xyz"),
 		},
 		// Retention only deletes audit rows, delivery events and webhook nonces.
