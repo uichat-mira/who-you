@@ -124,10 +124,20 @@ test("Authentication-Results parsing records dmarc fail but never invents a pass
 	assert.equal(absent.summary, "spf=none;dkim=none;dmarc=unknown");
 
 	const uppercase = parseAuthVerdict([
-		{ key: "Authentication-Results", value: "DMARC=PASS; SPF=SOFTFAIL" },
+		{ key: "Authentication-Results", value: "MX.CLOUDFLARE.NET; DMARC=PASS; SPF=SOFTFAIL" },
 	]);
 	assert.equal(uppercase.dmarc, "pass");
 	assert.equal(uppercase.spf, "softfail");
+
+	// Auth results not stamped by the Cloudflare receiving hop are hostile.
+	const foreign = parseAuthVerdict([
+		{ key: "Authentication-Results", value: "attacker.test; dmarc=pass" },
+	]);
+	assert.equal(foreign.dmarc, "unknown");
+	const forgedLater = parseAuthVerdict([
+		{ key: "Authentication-Results", value: "mx.cloudflare.net; dmarc=fail, mx.cloudflare.net; dmarc=pass" },
+	]);
+	assert.equal(forgedLater.dmarc, "fail");
 });
 
 test("HTML sanitizer drops executable surface and keeps inert structure", () => {
