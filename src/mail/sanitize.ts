@@ -2,9 +2,15 @@
  * Conservative HTML sanitizer for inbound mail (product design §8.1 #3).
  *
  * Inbound HTML is hostile input. This is an allowlist rewriter: unknown tags
- * are dropped, only inert attributes survive, no style/class/id/src survive, no
+ * are dropped, only inert attributes survive, no style/class/id survive, no
  * remote images are retained, and links are limited to http(s) and mailto with
  * a forced safe `rel`. Anything it cannot classify is removed rather than kept.
+ *
+ * `img` is the one exception: it survives only when its `src` is a `cid:`
+ * reference to an attachment of the same message. That local reference cannot
+ * load a remote resource, and dropping the tag would make every inline image
+ * disappear before the read path can replace it with a signed URL. An `img`
+ * without such a `src` is removed entirely, exactly like before.
  */
 
 const ALLOWED_TAGS = new Set([
@@ -23,6 +29,7 @@ const ALLOWED_TAGS = new Set([
 	"h6",
 	"hr",
 	"i",
+	"img",
 	"li",
 	"ol",
 	"p",
@@ -41,9 +48,10 @@ const ALLOWED_TAGS = new Set([
 	"ul",
 ]);
 
-const VOID_TAGS = new Set(["br", "hr"]);
+const VOID_TAGS = new Set(["br", "hr", "img"]);
 const ALLOWED_ATTRIBUTES = new Set(["href", "title", "colspan", "rowspan"]);
 const SAFE_LINK = /^(?:https?:\/\/|mailto:)/i;
+const SAFE_CID_SOURCE = /^cid:[^\s"'<>]+$/i;
 
 const REMOVED_BLOCKS = /<(script|style)\b[\s\S]*?<\/\1\s*>/gi;
 const COMMENTS = /<!--[\s\S]*?-->/g;
@@ -78,6 +86,25 @@ const safeHref = (value: string): string | null => {
 	if (!href || hasControlCharacter(href)) return null;
 	if (!SAFE_LINK.test(href)) return null;
 	return href;
+};
+
+/**
+ * `img` keeps exactly one attribute: a `cid:` src. Everything else (alt, width,
+ * style, srcset, remote src) is dropped, so the tag can never trigger a network
+ * request and carries no other attack surface.
+ */
+const cidSource = (source: string): string | null => {
+	ATTRIBUTES.lastIndex = 0;
+	let match = ATTRIBUTES.exec(source);
+	while (match) {
+		if (match[1].toLowerCase() === "src") {
+			const src = (match[2] ?? match[3] ?? match[4] ?? "").trim();
+			if (!src || hasControlCharacter(src) || !SAFE_CID_SOURCE.test(src)) return null;
+			return ` src="${escapeAttribute(src)}"`;
+		}
+		match = ATTRIBUTES.exec(source);
+	}
+	return null;
 };
 
 const rewriteAttributes = (source: string): string => {
@@ -136,7 +163,10 @@ export function sanitizeHtml(input: string): string {
 			if (opening) {
 				const name = opening[1].toLowerCase();
 				if (ALLOWED_TAGS.has(name)) {
-					if (VOID_TAGS.has(name)) {
+					if (name === "img") {
+						const source = cidSource(tag);
+						if (source) output += `<img${source}>`;
+					} else if (VOID_TAGS.has(name)) {
 						output += `<${name}>`;
 					} else {
 						const attributes = rewriteAttributes(tag);

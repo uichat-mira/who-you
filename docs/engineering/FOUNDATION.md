@@ -81,6 +81,20 @@ Explicit gaps: no third-party spam/virus gateway is integrated (spam/virus verdi
 
 Evidence boundary: `npm run check` proves HMAC/replay handling, report parsing, suppression blocking, pause thresholds, volume counting and PII-free alerts inside workerd with Miniflare D1. It does not prove a real bounce or complaint ever arrives, that `tomlab.cn` is configured, or that any DNS record exists.
 
+## S5 read path: delivery status, content-addressed attachments, inline images (implemented, not provisioned)
+
+Task card: `docs/task-cards/WHO-S5-client-integration.md` on `docs/who-you-task-cards-v1`. This slice is **additive only**: no existing tool name, argument, error code or attachment id changes.
+
+- Delivery visibility: `whoyou_mail_delivery_status` (`src/mcp/delivery.ts`) returns the `delivery_events` timeline of one `send_receipts` row, ordered by `occurred_at`. Status is derived strictest-wins over **every** event of the receipt (`complaint > hard_bounce > soft_bounce > delivered > dsn > sent`), not over the returned page, so a truncated timeline can never report a stale status. A receipt of another account is indistinguishable from a missing one (`receipt_not_found`). Events are written only by the HMAC callback from S4, so the tool is read-only and carries `recipient_hash` / `recipient_domain` only.
+- Attachment storage: `migrations/0005_attachment_content_addressing.sql` adds `attachments.content_hash` and the `attachment_objects` table. New objects are keyed `attachments/content/<sha256(bytes)>`, so identical bytes are stored once even across messages. The `att_` id still derives from `(message_id, part_path)`, so every previously issued id and signed link shape stays valid.
+- Reclamation: there is deliberately **no `ref_count`**. A missed increment would leak an object forever, while a missed decrement would delete live bytes; instead the retention sweep deletes only objects that are older than a 24-hour grace period **and** have no `attachments` row referencing their hash. The grace period covers the window between writing bytes and inserting the row. Objects and rows are deleted object-first so a failed R2 delete is retried instead of orphaned; errors are not swallowed. Message and mailbox delete paths only remove objects that are exclusively theirs (historical rows, `content_hash IS NULL`); shared bytes wait for the sweep.
+- Historical rows: SQL cannot compute SHA-256, so pre-0005 rows keep their per-message `r2_key` and a `NULL` `content_hash`. They are never deduplicated and never reclaimed by the sweep.
+- Inline images: `whoyou_mail_message_get` rewrites `cid:<content-id>` references to fresh per-attachment signed URLs when `include: "html"`, and returns `inlineAttachments` plus `inlineTruncated`. Rewriting happens at read time because signed URLs live 5 minutes; storing rewritten HTML would expire before the next read. At most 20 images are signed per read (the cap prevents a signing storm), and a reference that matches no attachment of that message is left untouched rather than pointed at an invented URL. `sanitize.ts` now keeps `img` only when its `src` is a `cid:` reference and keeps no other attribute; remote images are still removed entirely.
+
+Explicit gaps: inline images are only recoverable for mail stored **after** this change, because the earlier allowlist dropped `img` at ingest; a message with inline images fails with `attachment_download_unavailable` when signing is unconfigured instead of rendering a broken body.
+
+Evidence boundary: `npm run check` proves the timeline and derivation rules, deduplication, grace-period reclamation, delete-path filtering and CID rewriting inside workerd with Miniflare D1/R2. It does not prove real R2 `head` consistency under concurrent writes, real relay-generated events, or any deployed environment.
+
 ## Cloudflare rollout discipline (reserved names, not created)
 
 Proposed Worker names: `who-you-dev`, `who-you-test`, `who-you-prod`. Names are **candidates**, not existing resources or reservations.

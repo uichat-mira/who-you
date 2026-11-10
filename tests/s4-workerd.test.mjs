@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { encodeFixtureConfirmation } from "../dist/fixtures.mjs";
 import { computeWebhookSignature } from "../dist/unit.mjs";
-import { connect, seedTwoAccounts, withWorker } from "./workerd-harness.mjs";
+import { NOW, connect, seedTwoAccounts, withWorker } from "./workerd-harness.mjs";
 import {
 	complaintReport,
 	deliveredReport,
@@ -279,5 +279,128 @@ test("external recipient volume pauses an account and routes through a receipt",
 			.bind("account-a")
 			.first();
 		assert.equal(pause.send_paused_reason, "external_volume");
+	});
+});
+
+test("delivery status returns an ordered, account-scoped timeline and a derived status", async () => {
+	await withWorker(async ({ mf, db }) => {
+		await seedTwoAccounts(db);
+		for (const [id, accountId] of [
+			["rcpt_status", "account-a"],
+			["rcpt_empty", "account-a"],
+			["rcpt_foreign", "account-b"],
+		]) {
+			await db
+				.prepare(
+					`INSERT INTO send_receipts (
+					 id, account_id, draft_id, draft_version, content_hash,
+					 idempotency_key, status, error_code, provider_message_id, created_at
+					 ) VALUES (?,?,?,?,?,?,?,?,?,?)`,
+				)
+				.bind(
+					id,
+					accountId,
+					`draft_${id}`,
+					1,
+					"b".repeat(64),
+					`key-${id}`,
+					"sent",
+					null,
+					`provider-${id}`,
+					NOW,
+				)
+				.run();
+		}
+		const timeline = [
+			["ev_dsn", "dsn", NOW, "2.0.0"],
+			["ev_delivered", "delivered", NOW + 1000, "2.0.0"],
+			["ev_soft", "soft_bounce", NOW + 2000, "4.2.0"],
+			["ev_hard", "hard_bounce", NOW + 3000, "5.1.1"],
+			["ev_complaint", "complaint", NOW + 4000, null],
+		];
+		for (const [id, type, occurredAt, status] of timeline) {
+			await db
+				.prepare(
+					`INSERT INTO delivery_events (
+					 id, account_id, send_receipt_id, provider_message_id, type,
+					 recipient_hash, recipient_domain, status, diagnostic_code, occurred_at, created_at
+					 ) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+				)
+				.bind(
+					id,
+					"account-a",
+					"rcpt_status",
+					"provider-rcpt_status",
+					type,
+					"c".repeat(64),
+					"example.com",
+					status,
+					status ? `smtp ${status}` : null,
+					occurredAt,
+					occurredAt,
+				)
+				.run();
+		}
+
+		const client = await connect(mf, "fixture-consumer-1");
+		try {
+			const truncated = await client.callTool({
+				name: "whoyou_mail_delivery_status",
+				arguments: { receiptId: "rcpt_status", limit: 3 },
+			});
+			assert.equal(truncated.isError, undefined);
+			assert.equal(truncated.structuredContent.status, "complaint");
+			assert.equal(truncated.structuredContent.truncated, true);
+			assert.deepEqual(
+				truncated.structuredContent.events.map((event) => event.type),
+				["dsn", "delivered", "soft_bounce"],
+			);
+			assert.deepEqual(
+				truncated.structuredContent.events.map((event) => event.occurredAt),
+				[NOW, NOW + 1000, NOW + 2000],
+			);
+			assert.match(truncated.content[0].text, /# Who You · delivery status/);
+			assert.match(truncated.content[0].text, /- status: complaint/);
+			assert.equal(JSON.stringify(truncated.structuredContent).includes("@"), false);
+			assert.equal(truncated.content[0].text.includes("@"), false);
+
+			const full = await client.callTool({
+				name: "whoyou_mail_delivery_status",
+				arguments: { receiptId: "rcpt_status" },
+			});
+			assert.equal(full.structuredContent.truncated, false);
+			assert.deepEqual(
+				full.structuredContent.events.map((event) => event.type),
+				["dsn", "delivered", "soft_bounce", "hard_bounce", "complaint"],
+			);
+			assert.equal(full.structuredContent.events[3].diagnosticCode, "smtp 5.1.1");
+			assert.equal(full.structuredContent.events[3].recipientDomain, "example.com");
+			assert.equal(full.structuredContent.events[3].recipientHash, "c".repeat(64));
+			assert.equal(full.structuredContent.receipt.receiptId, "rcpt_status");
+
+			const empty = await client.callTool({
+				name: "whoyou_mail_delivery_status",
+				arguments: { receiptId: "rcpt_empty" },
+			});
+			assert.equal(empty.structuredContent.status, "sent");
+			assert.deepEqual(empty.structuredContent.events, []);
+			assert.equal(empty.structuredContent.truncated, false);
+
+			// Another account's receipt is indistinguishable from a missing one.
+			const foreign = await client.callTool({
+				name: "whoyou_mail_delivery_status",
+				arguments: { receiptId: "rcpt_foreign" },
+			});
+			assert.equal(foreign.isError, true);
+			assert.equal(foreign.structuredContent.error, "receipt_not_found");
+			const missing = await client.callTool({
+				name: "whoyou_mail_delivery_status",
+				arguments: { receiptId: "rcpt_missing" },
+			});
+			assert.equal(missing.isError, true);
+			assert.equal(missing.structuredContent.error, "receipt_not_found");
+		} finally {
+			await client.close();
+		}
 	});
 });

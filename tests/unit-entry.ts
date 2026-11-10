@@ -21,7 +21,12 @@ export {
 	createDownloadSigner,
 } from "../src/mail/download";
 export { ZipArchive } from "../src/mail/zip";
-export { DEFAULT_RETENTION, resolveRetention, runRetentionSweep } from "../src/mail/retention";
+export {
+	ATTACHMENT_OBJECT_GRACE_MS,
+	DEFAULT_RETENTION,
+	resolveRetention,
+	runRetentionSweep,
+} from "../src/mail/retention";
 export { sanitizeHtml } from "../src/mail/sanitize";
 export {
 	buildDraftContent,

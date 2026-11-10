@@ -2,6 +2,9 @@ import * as z from "zod/v4";
 
 export const WHOAMI_TOOL_NAME = "whoyou_whoami";
 
+/** Name of the read-only delivery-visibility tool registered by `delivery.ts`. */
+export const MAIL_DELIVERY_STATUS_TOOL_NAME = "whoyou_mail_delivery_status";
+
 export const READ_ONLY_ANNOTATIONS = {
 	readOnlyHint: true,
 	destructiveHint: false,

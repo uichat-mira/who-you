@@ -26,6 +26,7 @@ const MAIL_TOOL_NAMES = [
 	"whoyou_mail_message_get",
 	"whoyou_mail_attachment_get",
 	"whoyou_mail_flag_set",
+	"whoyou_mail_delivery_status",
 	"whoyou_mail_draft_create",
 	"whoyou_mail_draft_update",
 	"whoyou_mail_draft_discard",
@@ -44,6 +45,7 @@ const READ_ONLY_TOOL_NAMES = new Set([
 	"whoyou_mail_thread_get",
 	"whoyou_mail_message_get",
 	"whoyou_mail_attachment_get",
+	"whoyou_mail_delivery_status",
 	"whoyou_mail_draft_get",
 	"whoyou_mail_draft_list",
 ]);
