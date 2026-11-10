@@ -14,9 +14,10 @@ export default defineConfig({
 			// closes `/mcp` with mail_storage_not_configured rather than opening it.
 			DB: bindings.d1({ name: "who-you-dev" }),
 			MAIL_BUCKET: bindings.r2({ name: "who-you-dev-attachments" }),
-			// Declared domain only. No zone, MX record or Email Routing rule exists
-			// for it yet, so nothing can reach the inbound handler.
-			MAIL_DOMAIN: bindings.text("tomlab.cn"),
+			// Mail domain for this deployment. The zone is in the same account, but no
+			// MX record or Email Routing rule exists yet, so nothing can reach the
+			// inbound handler until those are provisioned.
+			MAIL_DOMAIN: bindings.text("tzt2026.xyz"),
 		},
 		// Retention only deletes audit rows, delivery events and webhook nonces.
 		// User mail has no TTL, so this schedule cannot expire a message.
