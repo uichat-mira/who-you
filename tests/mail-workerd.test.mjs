@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { MCP_TEST_RESOURCE_URL } from "../dist/fixtures.mjs";
 import { connect, seedMailbox, seedTwoAccounts, withWorker } from "./workerd-harness.mjs";
 
 const simpleRaw = (messageId, subject, body) =>
@@ -49,6 +50,32 @@ const attachmentRaw = [
 	"--b1--",
 	"",
 ].join("\r\n");
+
+const inlineImageRaw = (messageId, html, images) =>
+	[
+		"From: Carol <carol@example.com>",
+		"To: alpha@tomlab.cn",
+		"Subject: Inline",
+		`Message-ID: <${messageId}>`,
+		"MIME-Version: 1.0",
+		'Content-Type: multipart/related; boundary="rel"',
+		"",
+		"--rel",
+		"Content-Type: text/html; charset=utf-8",
+		"",
+		html,
+		...images.flatMap((image) => [
+			"--rel",
+			"Content-Type: image/png",
+			`Content-ID: <${image.contentId}>`,
+			"Content-Disposition: inline",
+			"Content-Transfer-Encoding: base64",
+			"",
+			btoa(image.bytes),
+		]),
+		"--rel--",
+		"",
+	].join("\r\n");
 
 async function postInbound(mf, payload) {
 	const response = await mf.dispatchFetch("https://127.0.0.1/__inbound", {
@@ -271,6 +298,108 @@ test("attachments are listed and inlined only below the configured ceiling", asy
 			assert.equal(content.structuredContent.untrusted, true);
 			assert.ok(content.structuredContent.contentBase64.length > 0);
 			assert.match(content.content[0].text, /UNTRUSTED_EMAIL_CONTENT/);
+		} finally {
+			await client.close();
+		}
+	});
+});
+
+test("inline cid images become 5-minute signed URLs only at read time", async () => {
+	await withWorker({}, async ({ mf, db }) => {
+		await seedTwoAccounts(db);
+		await postInbound(mf, {
+			to: "alpha@tomlab.cn",
+			raw: inlineImageRaw(
+				"cid-1@example.com",
+				'<p>logo<img src="cid:inline-1@example.com">unknown<img src="cid:unknown@example.com"></p>',
+				[{ contentId: "inline-1@example.com", bytes: "inline-bytes" }],
+			),
+		});
+		const row = await db
+			.prepare("SELECT id, html_key FROM messages WHERE mailbox_id = 'mbx_a'")
+			.first();
+
+		// Stored HTML keeps the cid reference; no signed URL is ever persisted.
+		const stored = await mf.getR2Bucket("MAIL_BUCKET");
+		const storedHtml = await (await stored.get(row.html_key)).text();
+		assert.match(storedHtml, /cid:inline-1@example\.com/);
+		assert.doesNotMatch(storedHtml, /\/mail\/download\?/);
+
+		const client = await connect(mf, "fixture-consumer-1");
+		try {
+			const message = await client.callTool({
+				name: "whoyou_mail_message_get",
+				arguments: { messageId: row.id, include: "html" },
+			});
+			assert.equal(message.isError, undefined);
+			assert.match(message.structuredContent.body, /<img src="[^"]*\/mail\/download\?/);
+			assert.doesNotMatch(message.structuredContent.body, /cid:inline-1@example\.com/);
+			// An unmatched reference is left alone instead of inventing a URL.
+			assert.match(message.structuredContent.body, /cid:unknown@example\.com/);
+			assert.equal(message.structuredContent.inlineTruncated, false);
+			assert.equal(message.structuredContent.inlineAttachments.length, 1);
+			const inline = message.structuredContent.inlineAttachments[0];
+			assert.equal(inline.contentId, "<inline-1@example.com>");
+			assert.ok(
+				inline.downloadUrl.startsWith(
+					`${MCP_TEST_RESOURCE_URL.replace("/mcp", "")}/mail/download?`,
+				),
+			);
+
+			// The body link and the field are the same account-bound signed link.
+			assert.ok(
+				message.structuredContent.body.includes(`<img src="${inline.downloadUrl}">`),
+			);
+			const fetched = await mf.dispatchFetch(inline.downloadUrl, {
+				headers: { authorization: "Bearer fixture-consumer-1" },
+			});
+			assert.equal(fetched.status, 200);
+			assert.equal(await fetched.text(), "inline-bytes");
+
+			const metadata = await client.callTool({
+				name: "whoyou_mail_message_get",
+				arguments: { messageId: row.id },
+			});
+			assert.equal(metadata.structuredContent.inlineAttachments, undefined);
+		} finally {
+			await client.close();
+		}
+	});
+});
+
+test("cid rewriting stops at 20 inline images and reports the truncation", async () => {
+	await withWorker({ MAIL_MAX_ATTACHMENTS: "25" }, async ({ mf, db }) => {
+		await seedTwoAccounts(db);
+		const images = Array.from({ length: 21 }, (_, index) => ({
+			contentId: `inline-${index + 1}@example.com`,
+			bytes: `image-bytes-${index + 1}`,
+		}));
+		const html = images.map((image) => `<img src="cid:${image.contentId}">`).join("");
+		await postInbound(mf, {
+			to: "alpha@tomlab.cn",
+			raw: inlineImageRaw("cid-21@example.com", html, images),
+		});
+		const row = await db
+			.prepare("SELECT id FROM messages WHERE mailbox_id = 'mbx_a'")
+			.first();
+
+		const client = await connect(mf, "fixture-consumer-1");
+		try {
+			const message = await client.callTool({
+				name: "whoyou_mail_message_get",
+				arguments: { messageId: row.id, include: "html" },
+			});
+			assert.equal(message.isError, undefined);
+			assert.equal(message.structuredContent.inlineTruncated, true);
+			assert.equal(message.structuredContent.inlineAttachments.length, 20);
+			assert.equal(
+				message.structuredContent.body.match(/\/mail\/download\?/g).length,
+				20,
+			);
+			// Attachments are ordered by part path, so which single cid survives is
+			// not predetermined; exactly one must remain untouched.
+			const remaining = message.structuredContent.body.match(/cid:inline-\d+@example\.com/g);
+			assert.equal(remaining.length, 1);
 		} finally {
 			await client.close();
 		}

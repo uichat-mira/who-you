@@ -177,6 +177,39 @@ export type AttachmentRecord = {
 	disposition: string;
 	contentId: string | null;
 	r2Key: string;
+	/**
+	 * SHA-256 of the attachment bytes for content-addressed objects. `null` for
+	 * historical rows written before content addressing existed; those keep their
+	 * per-message key and are excluded from dedupe and orphan reclamation.
+	 */
+	contentHash: string | null;
+};
+
+/** Orphaned content-addressed object eligible for reclamation. */
+export type AttachmentObjectRecord = {
+	contentHash: string;
+	r2Key: string;
+	sizeBytes: number;
+};
+
+export type SendReceiptView = {
+	id: string;
+	accountId: string;
+	draftId: string;
+	draftVersion: number;
+	status: "sent" | "failed";
+	providerMessageId: string | null;
+	createdAt: number;
+};
+
+export type DeliveryEventView = {
+	id: string;
+	type: DeliveryEventType;
+	status: string | null;
+	diagnosticCode: string | null;
+	recipientHash: string;
+	recipientDomain: string;
+	occurredAt: number;
 };
 
 export type NewMailbox = {
@@ -260,6 +293,12 @@ export const mailObjectKeys = {
 		attachmentId: string,
 	): string =>
 		`${objectPrefix(accountId, mailboxId, messageId)}/attachments/${attachmentId}`,
+	/**
+	 * Shared, content-addressed attachment object. The hash is the SHA-256 of the
+	 * bytes, so identical attachments in different messages and mailboxes resolve
+	 * to one object. The key never contains an account or message id.
+	 */
+	attachmentContent: (contentHash: string): string => `attachments/content/${contentHash}`,
 };
 
 const parseJson = <T>(value: unknown, fallback: T): T => {
@@ -328,7 +367,12 @@ type AttachmentRow = {
 	disposition: string;
 	content_id: string | null;
 	r2_key: string;
+	content_hash: string | null;
 };
+
+const ATTACHMENT_COLUMNS = `
+	a.id, a.message_id, a.mailbox_id, a.part_path, a.filename, a.mime_type,
+	a.size_bytes, a.disposition, a.content_id, a.r2_key, a.content_hash`;
 
 const toMailbox = (row: MailboxRow): MailboxRecord => ({
 	id: row.id,
@@ -393,6 +437,7 @@ const toAttachment = (row: AttachmentRow): AttachmentRecord => ({
 	disposition: row.disposition,
 	contentId: row.content_id,
 	r2Key: row.r2_key,
+	contentHash: row.content_hash,
 });
 
 const MESSAGE_COLUMNS = `
@@ -514,6 +559,15 @@ export class MailRepository {
 		});
 	}
 
+	/**
+	 * R2 `head` is used only to skip a redundant content-addressed write. The put
+	 * itself is idempotent, so a failed head is a real storage error and must
+	 * propagate; there is no fallback path that pretends the object exists.
+	 */
+	async objectExists(key: string): Promise<boolean> {
+		return (await this.bucket.head(key)) !== null;
+	}
+
 	async deleteObjects(keys: string[]): Promise<void> {
 		if (!keys.length) return;
 		await this.bucket.delete(keys);
@@ -536,6 +590,19 @@ export class MailRepository {
 		attachments: AttachmentRecord[],
 		receivedAt: number,
 	): Promise<boolean> {
+		// One metadata row per distinct byte sequence, even when the same content
+		// appears twice inside one message (same hash, same object key).
+		const contentObjects: { contentHash: string; r2Key: string; sizeBytes: number }[] = [];
+		const seenHashes = new Set<string>();
+		for (const attachment of attachments) {
+			if (!attachment.contentHash || seenHashes.has(attachment.contentHash)) continue;
+			seenHashes.add(attachment.contentHash);
+			contentObjects.push({
+				contentHash: attachment.contentHash,
+				r2Key: attachment.r2Key,
+				sizeBytes: attachment.sizeBytes,
+			});
+		}
 		const statements: D1PreparedStatement[] = [
 			this.db
 				.prepare(
@@ -596,8 +663,8 @@ export class MailRepository {
 					.prepare(
 						`INSERT INTO attachments (
 						 id, message_id, mailbox_id, part_path, filename, mime_type,
-						 size_bytes, disposition, content_id, r2_key
-					 ) VALUES (?,?,?,?,?,?,?,?,?,?)
+						 size_bytes, disposition, content_id, r2_key, content_hash
+					 ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
 					 ON CONFLICT (message_id, part_path) DO NOTHING`,
 					)
 					.bind(
@@ -611,7 +678,17 @@ export class MailRepository {
 						attachment.disposition,
 						attachment.contentId,
 						attachment.r2Key,
+						attachment.contentHash,
 					),
+			),
+			...contentObjects.map((object) =>
+				this.db
+					.prepare(
+						`INSERT INTO attachment_objects (content_hash, r2_key, size_bytes, created_at)
+						 VALUES (?,?,?,?)
+						 ON CONFLICT (content_hash) DO NOTHING`,
+					)
+					.bind(object.contentHash, object.r2Key, object.sizeBytes, receivedAt),
 			),
 			this.db
 				.prepare(
@@ -732,8 +809,7 @@ export class MailRepository {
 	async listAttachments(accountId: string, messageId: string): Promise<AttachmentRecord[]> {
 		const rows = await this.db
 			.prepare(
-				`SELECT a.id, a.message_id, a.mailbox_id, a.part_path, a.filename, a.mime_type,
-				 a.size_bytes, a.disposition, a.content_id, a.r2_key
+				`SELECT ${ATTACHMENT_COLUMNS}
 				 FROM attachments a
 				 JOIN messages m ON m.id = a.message_id
 				 JOIN mailboxes b ON b.id = m.mailbox_id
@@ -752,8 +828,7 @@ export class MailRepository {
 	): Promise<AttachmentRecord | null> {
 		const row = await this.db
 			.prepare(
-				`SELECT a.id, a.message_id, a.mailbox_id, a.part_path, a.filename, a.mime_type,
-				 a.size_bytes, a.disposition, a.content_id, a.r2_key
+				`SELECT ${ATTACHMENT_COLUMNS}
 				 FROM attachments a
 				 JOIN messages m ON m.id = a.message_id
 				 JOIN mailboxes b ON b.id = m.mailbox_id
@@ -777,8 +852,7 @@ export class MailRepository {
 	): Promise<{ attachment: AttachmentRecord; state: "visible" | "quarantined" } | null> {
 		const row = await this.db
 			.prepare(
-				`SELECT a.id, a.message_id, a.mailbox_id, a.part_path, a.filename, a.mime_type,
-				 a.size_bytes, a.disposition, a.content_id, a.r2_key, m.state
+				`SELECT ${ATTACHMENT_COLUMNS}, m.state
 				 FROM attachments a
 				 JOIN messages m ON m.id = a.message_id
 				 JOIN mailboxes b ON b.id = m.mailbox_id
@@ -964,9 +1038,136 @@ export class MailRepository {
 		return result.meta.changes ?? 0;
 	}
 
+	/**
+	 * Content-addressed objects that no attachments row references any more and
+	 * that were created before the grace period. Reference counting is avoided on
+	 * purpose: the `NOT EXISTS` check is the single source of truth, so a missed
+	 * increment can never reclaim a live object.
+	 */
+	async listUnreferencedAttachmentObjects(
+		cutoff: number,
+		limit: number,
+	): Promise<AttachmentObjectRecord[]> {
+		const rows = await this.db
+			.prepare(
+				`SELECT o.content_hash, o.r2_key, o.size_bytes
+				 FROM attachment_objects o
+				 WHERE o.created_at < ?
+				   AND NOT EXISTS (
+				     SELECT 1 FROM attachments a WHERE a.content_hash = o.content_hash
+				   )
+				 ORDER BY o.created_at ASC
+				 LIMIT ?`,
+			)
+			.bind(cutoff, limit)
+			.all<{ content_hash: string; r2_key: string; size_bytes: number }>();
+		return (rows.results ?? []).map((row) => ({
+			contentHash: row.content_hash,
+			r2Key: row.r2_key,
+			sizeBytes: row.size_bytes,
+		}));
+	}
+
+	async deleteAttachmentObject(contentHash: string): Promise<void> {
+		await this.db
+			.prepare("DELETE FROM attachment_objects WHERE content_hash = ?")
+			.bind(contentHash)
+			.run();
+	}
+
+	async findSendReceipt(accountId: string, receiptId: string): Promise<SendReceiptView | null> {
+		const row = await this.db
+			.prepare(
+				`SELECT id, account_id, draft_id, draft_version, status, provider_message_id, created_at
+				 FROM send_receipts
+				 WHERE account_id = ? AND id = ?
+				 LIMIT 1`,
+			)
+			.bind(accountId, receiptId)
+			.first<{
+				id: string;
+				account_id: string;
+				draft_id: string;
+				draft_version: number;
+				status: "sent" | "failed";
+				provider_message_id: string | null;
+				created_at: number;
+			}>();
+		if (!row) return null;
+		return {
+			id: row.id,
+			accountId: row.account_id,
+			draftId: row.draft_id,
+			draftVersion: row.draft_version,
+			status: row.status,
+			providerMessageId: row.provider_message_id,
+			createdAt: row.created_at,
+		};
+	}
+
+	/**
+	 * Every event type for one receipt. The derived status must consider all
+	 * events, not just the page returned to the client, otherwise a truncated
+	 * timeline would report a stale status.
+	 */
+	async listDeliveryEventTypes(accountId: string, receiptId: string): Promise<DeliveryEventType[]> {
+		const rows = await this.db
+			.prepare(
+				`SELECT type FROM delivery_events
+				 WHERE account_id = ? AND send_receipt_id = ?`,
+			)
+			.bind(accountId, receiptId)
+			.all<{ type: DeliveryEventType }>();
+		return (rows.results ?? []).map((row) => row.type);
+	}
+
+	async listDeliveryEvents(
+		accountId: string,
+		receiptId: string,
+		limit: number,
+	): Promise<DeliveryEventView[]> {
+		const rows = await this.db
+			.prepare(
+				`SELECT id, type, status, diagnostic_code, recipient_hash, recipient_domain, occurred_at
+				 FROM delivery_events
+				 WHERE account_id = ? AND send_receipt_id = ?
+				 ORDER BY occurred_at ASC, id ASC
+				 LIMIT ?`,
+			)
+			.bind(accountId, receiptId, limit)
+			.all<{
+				id: string;
+				type: DeliveryEventType;
+				status: string | null;
+				diagnostic_code: string | null;
+				recipient_hash: string;
+				recipient_domain: string;
+				occurred_at: number;
+			}>();
+		return (rows.results ?? []).map((row) => ({
+			id: row.id,
+			type: row.type,
+			status: row.status,
+			diagnosticCode: row.diagnostic_code,
+			recipientHash: row.recipient_hash,
+			recipientDomain: row.recipient_domain,
+			occurredAt: row.occurred_at,
+		}));
+	}
+
+	/**
+	 * Keys the delete paths may remove directly. Content-addressed objects
+	 * (`content_hash IS NOT NULL`) are deliberately excluded: several messages can
+	 * share one object, so deleting it here would break a live message. Those
+	 * objects are reclaimed by the retention sweep once no attachments row
+	 * references them.
+	 */
 	async listAttachmentKeys(mailboxId: string, messageId: string): Promise<string[]> {
 		const rows = await this.db
-			.prepare("SELECT r2_key FROM attachments WHERE mailbox_id = ? AND message_id = ?")
+			.prepare(
+				`SELECT r2_key FROM attachments
+				 WHERE mailbox_id = ? AND message_id = ? AND content_hash IS NULL`,
+			)
 			.bind(mailboxId, messageId)
 			.all<{ r2_key: string }>();
 		return (rows.results ?? []).map((row) => row.r2_key);
@@ -1036,7 +1237,15 @@ export class MailRepository {
 					 UNION ALL SELECT html_key AS key FROM messages WHERE mailbox_id = ? AND html_key IS NOT NULL`,
 				)
 				.bind(mailboxId, mailboxId, mailboxId),
-			this.db.prepare("SELECT r2_key AS key FROM attachments WHERE mailbox_id = ?").bind(mailboxId),
+			// Same rule as listAttachmentKeys: shared content objects are reclaimed by
+			// the sweep, not deleted inline, because another mailbox may reference the
+			// same bytes. Erasure therefore leaves those bytes in R2 only until the
+			// next sweep run finds no remaining references.
+			this.db
+				.prepare(
+					"SELECT r2_key AS key FROM attachments WHERE mailbox_id = ? AND content_hash IS NULL",
+				)
+				.bind(mailboxId),
 			this.db.prepare("SELECT r2_key AS key FROM mail_exports WHERE mailbox_id = ?").bind(mailboxId),
 		];
 		const results = await this.db.batch(statements);

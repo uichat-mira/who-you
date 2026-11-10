@@ -79,6 +79,39 @@ async function seedAttachment(db, options) {
 		.run();
 }
 
+const sharedAttachmentRaw = (messageId) =>
+	[
+		"From: Carol <carol@example.com>",
+		"To: alpha@tomlab.cn",
+		"Subject: Shared file",
+		`Message-ID: <${messageId}>`,
+		"MIME-Version: 1.0",
+		'Content-Type: multipart/mixed; boundary="b1"',
+		"",
+		"--b1",
+		"Content-Type: text/plain; charset=utf-8",
+		"",
+		"see attached",
+		"--b1",
+		'Content-Type: application/pdf; name="contract.pdf"',
+		'Content-Disposition: attachment; filename="contract.pdf"',
+		"Content-Transfer-Encoding: base64",
+		"",
+		"JVBERi0xLjQ=",
+		"--b1--",
+		"",
+	].join("\r\n");
+
+async function postInbound(mf, raw) {
+	const response = await mf.dispatchFetch("https://127.0.0.1/__inbound", {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ to: "alpha@tomlab.cn", raw }),
+	});
+	assert.equal(response.status, 200);
+	return response.json();
+}
+
 test("flag writes are idempotent, versioned and conflict-safe", async () => {
 	await withWorker(async ({ mf, db }) => {
 		await seedTwoAccounts(db);
@@ -507,5 +540,125 @@ test("retention sweep expires only audit rows, never user mail", async () => {
 			.prepare("SELECT COUNT(*) AS total FROM messages WHERE id = 'msg_keep_forever'")
 			.first();
 		assert.equal(message.total, 1);
+	});
+});
+
+test("identical attachment bytes are stored once and reclaimed only after the grace period", async () => {
+	await withWorker(async ({ mf, db }) => {
+		await seedTwoAccounts(db);
+		await postInbound(mf, sharedAttachmentRaw("shared-1@example.com"));
+		await postInbound(mf, sharedAttachmentRaw("shared-2@example.com"));
+
+		const attachments = await db
+			.prepare(
+				"SELECT id, message_id, content_hash, r2_key FROM attachments ORDER BY message_id",
+			)
+			.all();
+		assert.equal(attachments.results.length, 2);
+		const [first, second] = attachments.results;
+		assert.ok(first.content_hash);
+		assert.equal(first.content_hash, second.content_hash);
+		assert.equal(first.r2_key, `attachments/content/${first.content_hash}`);
+		assert.equal(first.r2_key, second.r2_key);
+		// The public attachment id is still derived from (message, part).
+		assert.notEqual(first.id, second.id);
+
+		const objects = await db.prepare("SELECT COUNT(*) AS total FROM attachment_objects").first();
+		assert.equal(objects.total, 1);
+		const bucket = await mf.getR2Bucket("MAIL_BUCKET");
+		assert.equal((await bucket.list({ prefix: "attachments/content/" })).objects.length, 1);
+
+		// Dedupe must not change what the user sees as used space: attachments were
+		// never part of bytes_used, so it stays the sum of message sizes.
+		const mailbox = await db
+			.prepare("SELECT bytes_used, message_count FROM mailboxes WHERE id = 'mbx_a'")
+			.first();
+		const messages = await db
+			.prepare(
+				"SELECT COALESCE(SUM(size_bytes), 0) AS total FROM messages WHERE mailbox_id = 'mbx_a'",
+			)
+			.first();
+		assert.equal(mailbox.message_count, 2);
+		assert.equal(mailbox.bytes_used, messages.total);
+
+		const reader = await connect(mf, "fixture-consumer-1");
+		try {
+			const one = await reader.callTool({
+				name: "whoyou_mail_attachment_get",
+				arguments: { messageId: first.message_id, attachmentId: first.id },
+			});
+			const two = await reader.callTool({
+				name: "whoyou_mail_attachment_get",
+				arguments: { messageId: second.message_id, attachmentId: second.id },
+			});
+			assert.equal(one.isError, undefined);
+			assert.equal(two.isError, undefined);
+			assert.ok(one.structuredContent.contentBase64.length > 0);
+			assert.equal(one.structuredContent.contentBase64, two.structuredContent.contentBase64);
+		} finally {
+			await reader.close();
+		}
+
+		const writer = await connect(mf, "fixture-mail-writer");
+		try {
+			for (const messageId of [first.message_id, second.message_id]) {
+				await writer.callTool({
+					name: "whoyou_mail_flag_set",
+					arguments: { messageId, trashed: true },
+				});
+				const deleted = await writer.callTool({
+					name: "whoyou_mail_message_delete",
+					arguments: { messageId },
+				});
+				assert.equal(deleted.isError, undefined);
+			}
+		} finally {
+			await writer.close();
+		}
+		// Delete paths never remove a shared content object inline.
+		assert.equal((await bucket.list({ prefix: "attachments/content/" })).objects.length, 1);
+
+		const early = await mf.dispatchFetch("https://127.0.0.1/__retention", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ now: Date.now() }),
+		});
+		assert.equal(early.status, 200);
+		assert.equal((await early.json()).deletedAttachmentObjects, 0);
+		assert.equal((await bucket.list({ prefix: "attachments/content/" })).objects.length, 1);
+
+		const late = await mf.dispatchFetch("https://127.0.0.1/__retention", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ now: Date.now() + 2 * DAY_MS }),
+		});
+		assert.equal(late.status, 200);
+		assert.equal((await late.json()).deletedAttachmentObjects, 1);
+		assert.equal((await bucket.list({ prefix: "attachments/content/" })).objects.length, 0);
+		const remaining = await db
+			.prepare("SELECT COUNT(*) AS total FROM attachment_objects")
+			.first();
+		assert.equal(remaining.total, 0);
+
+		// A historical row has no content_hash: its per-message object is never swept.
+		await seedMessage(db, { id: "msg_legacy", accountId: "account-a", attachmentCount: 1 });
+		await seedAttachment(db, { id: "att_legacy", messageId: "msg_legacy" });
+		await bucket.put(
+			"accounts/account-a/mailboxes/mbx_a/messages/msg_legacy/attachments/att_legacy",
+			new TextEncoder().encode("LEGACY"),
+		);
+		await mf.dispatchFetch("https://127.0.0.1/__retention", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ now: Date.now() + 4 * DAY_MS }),
+		});
+		const legacy = await db
+			.prepare("SELECT content_hash FROM attachments WHERE id = 'att_legacy'")
+			.first();
+		assert.equal(legacy.content_hash, null);
+		const legacyObject = await bucket.get(
+			"accounts/account-a/mailboxes/mbx_a/messages/msg_legacy/attachments/att_legacy",
+		);
+		assert.ok(legacyObject);
 	});
 });

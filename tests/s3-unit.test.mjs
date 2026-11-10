@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+	ATTACHMENT_OBJECT_GRACE_MS,
 	DEFAULT_RETENTION,
 	SIGNED_DOWNLOAD_TTL_MS,
 	ZipArchive,
@@ -92,19 +93,25 @@ test("retention sweep delegates each policy cutoff to the repository", async () 
 			seen.push(["nonce", cutoff]);
 			return 3;
 		},
+		async listUnreferencedAttachmentObjects(cutoff) {
+			seen.push(["attachment", cutoff]);
+			return [];
+		},
 	};
 	const now = 1_795_000_000_000;
 	const result = await runRetentionSweep(repository, DEFAULT_RETENTION, now);
 	assert.equal(result.deletedAuditEntries, 4);
 	assert.equal(result.deletedDeliveryEvents, 2);
 	assert.equal(result.deletedWebhookNonces, 3);
+	assert.equal(result.deletedAttachmentObjects, 0);
 	assert.deepEqual(
 		seen.map(([kind]) => kind),
-		["audit", "bounce", "nonce"],
+		["audit", "bounce", "nonce", "attachment"],
 	);
 	assert.equal(seen[0][1], now - 180 * 24 * 60 * 60 * 1000);
 	assert.equal(seen[1][1], now - 90 * 24 * 60 * 60 * 1000);
 	assert.equal(seen[2][1], now - 24 * 60 * 60 * 1000);
+	assert.equal(seen[3][1], now - ATTACHMENT_OBJECT_GRACE_MS);
 });
 
 function le16(bytes, offset) {

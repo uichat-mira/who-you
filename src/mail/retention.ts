@@ -45,6 +45,43 @@ export type SweepResult = {
 	deletedDeliveryEvents: number;
 	/** Relay nonces only need to outlive the accepted timestamp skew. */
 	deletedWebhookNonces: number;
+	/** Content-addressed attachment objects no attachments row references any more. */
+	deletedAttachmentObjects: number;
+};
+
+/**
+ * Grace period before an unreferenced attachment object may be reclaimed.
+ *
+ * Object bytes are written before the `attachments` row is inserted, so a
+ * freshly written object can briefly have no reference. Sweeping inside that
+ * window would delete the bytes of an inbound message still being committed.
+ * 24h is far longer than any inbound write and keeps the sweep idempotent.
+ */
+export const ATTACHMENT_OBJECT_GRACE_MS = DAY_MS;
+
+const ATTACHMENT_RECLAIM_BATCH = 200;
+
+const reclaimAttachmentObjects = async (
+	repository: MailRepository,
+	cutoff: number,
+): Promise<number> => {
+	let deleted = 0;
+	for (;;) {
+		const batch = await repository.listUnreferencedAttachmentObjects(
+			cutoff,
+			ATTACHMENT_RECLAIM_BATCH,
+		);
+		if (!batch.length) break;
+		for (const object of batch) {
+			// Object first, row second. If the R2 delete throws, the row survives and
+			// the next sweep run retries; the error is never swallowed.
+			await repository.deleteObjects([object.r2Key]);
+			await repository.deleteAttachmentObject(object.contentHash);
+			deleted += 1;
+		}
+		if (batch.length < ATTACHMENT_RECLAIM_BATCH) break;
+	}
+	return deleted;
 };
 
 /** Deletes time-bounded evidence older than the policy window. Safe to re-run. */
@@ -60,5 +97,9 @@ export async function runRetentionSweep(
 		deletedAuditEntries: await repository.deleteAuditBefore(auditCutoff),
 		deletedDeliveryEvents: await repository.deleteDeliveryEventsBefore(bounceCutoff),
 		deletedWebhookNonces: await repository.deleteWebhookNoncesBefore(nonceCutoff),
+		deletedAttachmentObjects: await reclaimAttachmentObjects(
+			repository,
+			now - ATTACHMENT_OBJECT_GRACE_MS,
+		),
 	};
 }

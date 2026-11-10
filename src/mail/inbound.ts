@@ -275,8 +275,15 @@ export async function handleInboundEmail(
 		: null;
 
 	const attachments: AttachmentRecord[] = [];
+	// Bytes stay in memory only long enough to write the objects below; keeping
+	// them aligned with `attachments` avoids re-reading the parsed part later.
+	const attachmentContents: Uint8Array[] = [];
 	for (const attachment of parsed?.attachments ?? []) {
+		attachmentContents.push(attachment.content);
 		const attachmentId = `att_${(await sha256Hex(`${messageId}\n${attachment.partPath}`)).slice(0, 24)}`;
+		// The id stays derived from (message, part) so existing ids never change;
+		// only the object key becomes content-addressed and therefore shareable.
+		const contentHash = await sha256Hex(attachment.content);
 		attachments.push({
 			id: attachmentId,
 			messageId,
@@ -287,12 +294,8 @@ export async function handleInboundEmail(
 			sizeBytes: attachment.sizeBytes,
 			disposition: attachment.disposition,
 			contentId: attachment.contentId,
-			r2Key: mailObjectKeys.attachment(
-				mailbox.accountId,
-				mailbox.id,
-				messageId,
-				attachmentId,
-			),
+			r2Key: mailObjectKeys.attachmentContent(contentHash),
+			contentHash,
 		});
 	}
 
@@ -342,13 +345,17 @@ export async function handleInboundEmail(
 			writtenKeys.push(htmlKey);
 			await repository.putObject(htmlKey, new TextEncoder().encode(parsed.html), "text/html; charset=utf-8");
 		}
+		// Content-addressed objects are deliberately NOT tracked for rollback:
+		// another message may already reference the same hash, so deleting on a
+		// failed insert could break a live message. Unreferenced rows are reclaimed
+		// by the retention sweep after its grace period.
 		for (const [index, attachment] of attachments.entries()) {
-			writtenKeys.push(attachment.r2Key);
-			await repository.putObject(
-				attachment.r2Key,
-				parsed?.attachments[index]?.content ?? new Uint8Array(),
-				attachment.mimeType,
-			);
+			const content = attachmentContents[index];
+			// `attachments` and `attachmentContents` are built by the same loop, so a
+			// missing entry is a programming error, not an input condition.
+			if (!content) throw new Error("inbound_attachment_content_missing");
+			if (await repository.objectExists(attachment.r2Key)) continue;
+			await repository.putObject(attachment.r2Key, content, attachment.mimeType);
 		}
 
 		const inserted = await repository.insertMessage(
