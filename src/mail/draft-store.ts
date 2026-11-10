@@ -1,5 +1,4 @@
 import type { DraftAddress, DraftContent } from "./draft";
-import type { SqlDatabase } from "./ports";
 
 /**
  * Draft, confirmation-nonce and send-receipt persistence. Every statement is
@@ -125,9 +124,9 @@ const RECEIPT_COLUMNS = `
 	r.recipient_count, r.external_recipient_count, r.created_at`;
 
 export class DraftRepository {
-	private readonly db: SqlDatabase;
+	private readonly db: D1Database;
 
-	constructor(db: SqlDatabase) {
+	constructor(db: D1Database) {
 		this.db = db;
 	}
 

@@ -1,22 +1,21 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createServer } from "node:http";
+import { Miniflare } from "miniflare";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
-import { mfFetch, withDeployedWorker } from "./node-harness.mjs";
 
 /**
- * Exercises the deployed app entry (`dist/app.mjs`), not the fixture entry:
- * `createRemoteJWKSet` fetches the JWKS over real Node HTTP, the signature is
- * verified there, and the principal is derived from the token. A loopback
- * server serves the key set so no test depends on a real Cloud Auth host while
- * the production fetch path still runs.
+ * Exercises the deployed entry (`dist/worker.mjs`), not the fixture entry:
+ * `createRemoteJWKSet` fetches Cloud Auth's JWKS inside workerd, the signature
+ * is verified there, and the principal is derived from the token. Outbound
+ * traffic is intercepted with Miniflare's `outboundService` so no test depends
+ * on the real Cloud Auth host while the production fetch path still runs.
  */
 
 const RESOURCE_URL = "https://127.0.0.1/mcp";
 const METADATA_URL = "https://127.0.0.1/.well-known/oauth-protected-resource/mcp";
 const OAUTH_ISSUER = "https://auth.example.com";
-const JWKS_PATH = "/.well-known/jwks.json";
+const JWKS_URL = "https://auth.example.com/.well-known/jwks.json";
 const TOKEN_ISSUER = "mira:cloud-auth";
 const AUDIENCE = "mira:who-you";
 const SCOPE = "whoyou.read";
@@ -24,7 +23,7 @@ const SCOPE = "whoyou.read";
 const BINDINGS = {
 	MCP_RESOURCE_URL: RESOURCE_URL,
 	CLOUD_AUTH_ISSUER: OAUTH_ISSUER,
-	CLOUD_AUTH_JWKS_URL: `https://auth.example.com${JWKS_PATH}`,
+	CLOUD_AUTH_JWKS_URL: JWKS_URL,
 	MCP_AUDIENCE: AUDIENCE,
 	MCP_REQUIRED_SCOPES: SCOPE,
 };
@@ -54,39 +53,42 @@ async function signToken({
 		.sign(key);
 }
 
-async function withJwksWorker(run) {
+async function withDeployedWorker(run) {
 	let jwksHits = 0;
-	const server = createServer((request, response) => {
-		if (request.url === JWKS_PATH) {
-			jwksHits += 1;
-			response.setHeader("content-type", "application/json");
-			response.end(JSON.stringify({ keys: [trustedJwk] }));
-			return;
-		}
-		response.statusCode = 404;
-		response.end("not found");
+	const mf = new Miniflare({
+		modules: true,
+		scriptPath: "dist/worker.mjs",
+		compatibilityDate: "2026-08-06",
+		cf: false,
+		bindings: BINDINGS,
+		d1Databases: ["DB"],
+		r2Buckets: ["MAIL_BUCKET"],
+		outboundService: async (request) => {
+			if (request.url === JWKS_URL) {
+				jwksHits += 1;
+				return Response.json({ keys: [trustedJwk] });
+			}
+			return new Response("not found", { status: 404 });
+		},
 	});
-	await new Promise((resolve, reject) => {
-		server.once("error", reject);
-		server.listen(0, "127.0.0.1", resolve);
-	});
-	const address = server.address();
-	const port = typeof address === "object" && address !== null ? address.port : 0;
-	const bindings = {
-		...BINDINGS,
-		CLOUD_AUTH_JWKS_URL: `http://127.0.0.1:${port}/.well-known/jwks.json`,
-	};
 	try {
-		return await withDeployedWorker(bindings, async ({ mf }) =>
-			run({ mf, jwksHits: () => jwksHits }),
-		);
+		return await run({ mf, jwksHits: () => jwksHits });
 	} finally {
-		await new Promise((resolve) => server.close(resolve));
+		await mf.dispose();
 	}
 }
 
+const mfFetch = (mf) => async (input, init) => {
+	const url = typeof input === "string"
+		? input
+		: input instanceof URL
+			? input.href
+			: input.url;
+	return mf.dispatchFetch(url, init);
+};
+
 test("the deployed entry verifies a real MCP client through the remote JWKS path", async () => {
-	await withJwksWorker(async ({ mf, jwksHits }) => {
+	await withDeployedWorker(async ({ mf, jwksHits }) => {
 		const transport = new StreamableHTTPClientTransport(new URL(RESOURCE_URL), {
 			requestInit: { headers: { authorization: `Bearer ${await signToken()}` } },
 			fetch: mfFetch(mf),
@@ -110,7 +112,7 @@ test("the deployed entry verifies a real MCP client through the remote JWKS path
 });
 
 test("the deployed JWKS path rejects a foreign signature without trusting a fixture", async () => {
-	await withJwksWorker(async ({ mf, jwksHits }) => {
+	await withDeployedWorker(async ({ mf, jwksHits }) => {
 		const rejected = await mf.dispatchFetch(RESOURCE_URL, {
 			method: "POST",
 			headers: {
@@ -128,7 +130,7 @@ test("the deployed JWKS path rejects a foreign signature without trusting a fixt
 });
 
 test("discovery advertises the OAuth issuer; tokens must carry the service issuer", async () => {
-	await withJwksWorker(async ({ mf }) => {
+	await withDeployedWorker(async ({ mf }) => {
 		const discovery = await mf.dispatchFetch(METADATA_URL, {
 			headers: { origin: "https://app.example" },
 		});
