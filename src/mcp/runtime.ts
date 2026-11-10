@@ -1,6 +1,6 @@
 import { createMailServices, type WhoYouEnv } from "../mail/config";
 import type { WhoYouConfirmationVerifier } from "../mail/confirmation";
-import type { MailSender } from "../mail/send";
+import { createCloudflareMailSender, type MailSender } from "../mail/send";
 import { createCloudAuthVerifier, type WhoYouTokenVerifier } from "./auth";
 import { createCloudAuthConfirmationVerifier } from "./confirmation";
 import { WHOYOU_SERVICE_AUDIENCE, resolveMcpConfig } from "./config";
@@ -74,7 +74,9 @@ export function createWhoYouRuntime(
 		});
 
 	const sender =
-		options.sender !== undefined ? options.sender : (env.MAIL_SENDER ?? null);
+		options.sender !== undefined
+			? options.sender
+			: createCloudflareMailSender(env.MAIL_EMAIL_SEND);
 
 	const tools = { confirmations, sender };
 

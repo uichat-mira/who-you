@@ -1,6 +1,5 @@
 import { mailboxAddress, normalizeLocalPart } from "./address";
 import { sha256Hex } from "./hash";
-import type { MailBucket, SqlDatabase, SqlStatement } from "./ports";
 
 export type MailboxStatus = "active" | "disabled";
 
@@ -445,10 +444,10 @@ export type FlagUpdateResult =
 	  };
 
 export class MailRepository {
-	private readonly db: SqlDatabase;
-	private readonly bucket: MailBucket;
+	private readonly db: D1Database;
+	private readonly bucket: R2Bucket;
 
-	constructor(db: SqlDatabase, bucket: MailBucket) {
+	constructor(db: D1Database, bucket: R2Bucket) {
 		this.db = db;
 		this.bucket = bucket;
 	}
@@ -523,7 +522,7 @@ export class MailRepository {
 	async getObject(key: string): Promise<{ bytes: ArrayBuffer; size: number } | null> {
 		const object = await this.bucket.get(key);
 		if (!object) return null;
-		return { bytes: await new Response(object.body).arrayBuffer(), size: object.size };
+		return { bytes: await object.arrayBuffer(), size: object.size };
 	}
 
 	/**
@@ -537,7 +536,7 @@ export class MailRepository {
 		attachments: AttachmentRecord[],
 		receivedAt: number,
 	): Promise<boolean> {
-		const statements: SqlStatement[] = [
+		const statements: D1PreparedStatement[] = [
 			this.db
 				.prepare(
 					`INSERT INTO messages (

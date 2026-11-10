@@ -1,10 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import {
-	connectWithTransport,
-	withBareWorker,
-	withWorker,
-} from "./node-harness.mjs";
+import { Miniflare } from "miniflare";
+import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import {
 	MCP_TEST_AUDIENCE,
 	MCP_TEST_ISSUER,
@@ -58,9 +55,48 @@ const DESTRUCTIVE_TOOL_NAMES = new Set([
 	"whoyou_mail_mailbox_delete",
 ]);
 
-test("a real Node modern MCP client lists and calls the read-only whoami tool", async () => {
-	await withWorker(FIXTURE_BINDINGS, async ({ mf }) => {
-		const { client, transport } = await connectWithTransport(mf, "fixture-consumer-1", {
+async function withWorker(scriptPath, bindings, run) {
+	const mf = new Miniflare({
+		modules: true,
+		scriptPath,
+		compatibilityDate: "2026-08-06",
+		cf: false,
+		bindings,
+		// S1 requires D1 + R2 for `/mcp`; absent storage must stay fail-closed.
+		d1Databases: ["DB"],
+		r2Buckets: ["MAIL_BUCKET"],
+	});
+	try {
+		await run({ mf });
+	} finally {
+		await mf.dispose();
+	}
+}
+
+function disconnectedFetch(mf) {
+	return async (input, init) => {
+		const url = typeof input === "string"
+			? input
+			: input instanceof URL
+				? input.href
+				: input.url;
+		return mf.dispatchFetch(url, init);
+	};
+}
+
+async function connect(mf, token, options = {}) {
+	const transport = new StreamableHTTPClientTransport(new URL(MCP_TEST_RESOURCE_URL), {
+		requestInit: { headers: { authorization: `Bearer ${token}` } },
+		fetch: disconnectedFetch(mf),
+	});
+	const client = new Client({ name: "who-002-test", version: "1.0.0" }, options);
+	await client.connect(transport);
+	return { client, transport };
+}
+
+test("a real workerd modern MCP client lists and calls the read-only whoami tool", async () => {
+	await withWorker("dist/test-worker.mjs", FIXTURE_BINDINGS, async ({ mf }) => {
+		const { client, transport } = await connect(mf, "fixture-consumer-1", {
 			versionNegotiation: { mode: { pin: "2026-07-28" } },
 		});
 		try {
@@ -99,9 +135,9 @@ test("a real Node modern MCP client lists and calls the read-only whoami tool", 
 });
 
 test("real 2025-06-18 and 2025-11-25 initialize clients use the stateless legacy path", async () => {
-	await withWorker(FIXTURE_BINDINGS, async ({ mf }) => {
+	await withWorker("dist/test-worker.mjs", FIXTURE_BINDINGS, async ({ mf }) => {
 		for (const version of ["2025-06-18", "2025-11-25"]) {
-			const { client, transport } = await connectWithTransport(mf, "fixture-consumer-2", {
+			const { client, transport } = await connect(mf, "fixture-consumer-2", {
 				supportedProtocolVersions: [version],
 			});
 			try {
@@ -121,7 +157,7 @@ test("real 2025-06-18 and 2025-11-25 initialize clients use the stateless legacy
 });
 
 test("modern raw requests carry no session id and reject a missing Mcp-Method header", async () => {
-	await withWorker(FIXTURE_BINDINGS, async ({ mf }) => {
+	await withWorker("dist/test-worker.mjs", FIXTURE_BINDINGS, async ({ mf }) => {
 		const envelope = {
 			jsonrpc: "2.0",
 			id: 1,
@@ -163,7 +199,7 @@ test("modern raw requests carry no session id and reject a missing Mcp-Method he
 });
 
 test("unauthenticated and insufficient callers see 401 discovery but no tools or identity", async () => {
-	await withWorker(FIXTURE_BINDINGS, async ({ mf }) => {
+	await withWorker("dist/test-worker.mjs", FIXTURE_BINDINGS, async ({ mf }) => {
 		const unauthorized = await mf.dispatchFetch(MCP_TEST_RESOURCE_URL, {
 			method: "POST",
 			headers: {
@@ -209,7 +245,7 @@ test("unauthenticated and insufficient callers see 401 discovery but no tools or
 });
 
 test("RFC 9728 discovery serves cross-origin browsers while /mcp keeps its same-origin gate", async () => {
-	await withWorker(FIXTURE_BINDINGS, async ({ mf }) => {
+	await withWorker("dist/test-worker.mjs", FIXTURE_BINDINGS, async ({ mf }) => {
 		const metadataUrl = "https://127.0.0.1/.well-known/oauth-protected-resource/mcp";
 		const crossOrigin = { origin: "https://app.example" };
 
@@ -255,8 +291,8 @@ test("RFC 9728 discovery serves cross-origin browsers while /mcp keeps its same-
 	});
 });
 
-test("the deployed Node entry has no fixture fallback and stays closed without bindings", async () => {
-	await withBareWorker({}, async ({ mf }) => {
+test("the deployed Worker has no fixture fallback and stays closed without bindings", async () => {
+	await withWorker("dist/worker.mjs", {}, async ({ mf }) => {
 		const closed = await mf.dispatchFetch(MCP_TEST_RESOURCE_URL, {
 			method: "POST",
 			headers: {
