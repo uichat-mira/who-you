@@ -7,7 +7,7 @@
 ## 1. 执行结论
 
 1. **建议巩固 Cloudflare Workers + D1 + R2 + Email Routing 作为狐邮运行架构。** 初期仅 2 名用户，重点风险并非请求吞吐，而是收件正确性、真实外发可用性、免费配额及安全。
-2. **这一步实际上已经发生。** [Who You PR #11](https://github.com/uichat-mira/who-you/pull/11) 2026-11-10 已撤销 [PR #9](https://github.com/uichat-mira/who-you/pull/9) 的 Node VPS 迁移；核查时 \`dev@623942d1dc663702ed6ac4d64109cdd98ba31aff\` 是 Workers 代码。**不要再布置重复的 VPS → CF 回迁施工。**
+2. **这一步实际上已经发生。** [Who You PR #11](https://github.com/uichat-mira/who-you/pull/11) 2026-11-10 已撤销 [PR #9](https://github.com/uichat-mira/who-you/pull/9) 的 Node VPS 迁移；核查时 `dev@623942d1dc663702ed6ac4d64109cdd98ba31aff` 是 Workers 代码。**不要再布置重复的 VPS → CF 回迁施工。**
 3. [maillab/cloud-mail](https://github.com/maillab/cloud-mail) 是技术参考，不是替换品。它证明了 Cloudflare 上构建 Web 邮箱的可行性，却不自带 Who You 的 Mira Cloud Auth、远程 MCP 和用户逐草稿确认发送安全契约。
 4. **Cloudflare Email Sending Beta 官方定位为事务邮件。** 不能仅凭每月包含发信额度便声称支持自由个人邮件往来。可考虑 Resend 等方案，但必须先确认对具体用途的许可/合规与免费额度。
 5. 上线前先修复 Who You 当前 [PR #4](https://github.com/uichat-mira/who-you/pull/4) 所涉及的并发重复收信数据完整性、伪造认证头等 P1；随后在隔离环境实测实际 Cloudflare 的接收、读取、发送资格和回执。
@@ -16,8 +16,8 @@
 
 | 对象 | 检查快照及证据 |
 | --- | --- |
-| Cloud Mail | \`main@d115f4ccc5cb5fb9c602b3ba364acbca6d19f274\`，2026-10-25 的最新可见提交；[README](https://github.com/maillab/cloud-mail/blob/main/README.md) |
-| Who You | \`dev@623942d1\`，2026-11-10 回归 Workers 后；[PR #11](https://github.com/uichat-mira/who-you/pull/11) |
+| Cloud Mail | `main@d115f4ccc5cb5fb9c602b3ba364acbca6d19f274`，2026-10-25 的最新可见提交；[README](https://github.com/maillab/cloud-mail/blob/main/README.md) |
+| Who You | `dev@623942d1`，2026-11-10 回归 Workers 后；[PR #11](https://github.com/uichat-mira/who-you/pull/11) |
 | Cloud Mail 入站 | [mail-worker/src/email/email.js](https://github.com/maillab/cloud-mail/blob/main/mail-worker/src/email/email.js) |
 | Cloud Mail 出站 | [mail-worker/src/service/email-service.js](https://github.com/maillab/cloud-mail/blob/main/mail-worker/src/service/email-service.js) |
 | Cloud Mail 部署 | [.github/workflows/deploy-cloudflare.yml](https://github.com/maillab/cloud-mail/blob/main/.github/workflows/deploy-cloudflare.yml) |
@@ -29,11 +29,11 @@
 
 ## 3. Cloud Mail 架构与功能分析
 
-Cloud Mail 的服务器端是 **Cloudflare Worker + Hono + Drizzle + D1 + KV + R2**，前端是 **Vue 3 + Element Plus**；\`postal-mime\` 处理入站 MIME，R2 保存附件，D1 管理邮件与账户元数据。Worker 同时有 HTTP 和 \`email()\` 入口，定时任务清理缓存/状态。它可配置 Cloudflare Email binding 和 Resend 对外发信，另有站内投递；见 [Worker 入口](https://github.com/maillab/cloud-mail/blob/main/mail-worker/src/index.js)、[依赖](https://github.com/maillab/cloud-mail/blob/main/mail-worker/package.json)、[发送选择](https://github.com/maillab/cloud-mail/blob/main/mail-worker/src/service/email-service.js)。
+Cloud Mail 的服务器端是 **Cloudflare Worker + Hono + Drizzle + D1 + KV + R2**，前端是 **Vue 3 + Element Plus**；`postal-mime` 处理入站 MIME，R2 保存附件，D1 管理邮件与账户元数据。Worker 同时有 HTTP 和 `email()` 入口，定时任务清理缓存/状态。它可配置 Cloudflare Email binding 和 Resend 对外发信，另有站内投递；见 [Worker 入口](https://github.com/maillab/cloud-mail/blob/main/mail-worker/src/index.js)、[依赖](https://github.com/maillab/cloud-mail/blob/main/mail-worker/package.json)、[发送选择](https://github.com/maillab/cloud-mail/blob/main/mail-worker/src/service/email-service.js)。
 
 | 能力 | Cloud Mail 当前证据 | Who You 应用判断 |
 | --- | --- | --- |
-| 自有域收件 | \`email()\` + \`postal-mime\` + DB | 架构范式可借鉴 |
+| 自有域收件 | `email()` + `postal-mime` + DB | 架构范式可借鉴 |
 | 账户/角色、管理后台 | Web 用户及 RBAC | 2 个 Mira 账户无需复制完整用户体系 |
 | 邮件发送 | CF binding 优先 / Resend 备选 | 借鉴 Provider Adapter，不能绕过发送确认 |
 | 附件处理 | R2 存取 | 学习对象存储和下载实践，必须保留账户隔离 |
@@ -49,13 +49,13 @@ Cloud Mail 的服务器端是 **Cloudflare Worker + Hono + Drizzle + D1 + KV + R
 
 [Cloud Mail 安全 Issue #642](https://github.com/maillab/cloud-mail/issues/642) 2026-11-10 报告，伪造“系统通知”能够进入邮箱，并指出收信入口没有使用可信 SPF/DKIM/DMARC 判定。阅读其 [email.js](https://github.com/maillab/cloud-mail/blob/main/mail-worker/src/email/email.js) 可确认：可见入口主要使用解析出的 MIME 字段、字符串黑名单和账户匹配，没有按可信认证结果决定隔离/拒收。实际攻击过程属于 Issue 提交人的自述，未经本报告复现。
 
-[Cloudflare 官方 Email Worker 文档](https://developers.cloudflare.com/email-service/api/route-emails/email-handler/) 明确：Email Routing 会前置认证结果，应从 **message.headers 的第一个 Authentication-Results** 读取，并校验 authserv-id 是 \`mx.cloudflare.net\`；原始 MIME 内的同名头可能由攻击者插入，不能充当平台可信结果。不能简单地把认证信息未知当成 pass，也不应一律误杀所有合法转发邮件。应提供可靠的隔离/拒收策略及审计。
+[Cloudflare 官方 Email Worker 文档](https://developers.cloudflare.com/email-service/api/route-emails/email-handler/) 明确：Email Routing 会前置认证结果，应从 **message.headers 的第一个 Authentication-Results** 读取，并校验 authserv-id 是 `mx.cloudflare.net`；原始 MIME 内的同名头可能由攻击者插入，不能充当平台可信结果。不能简单地把认证信息未知当成 pass，也不应一律误杀所有合法转发邮件。应提供可靠的隔离/拒收策略及审计。
 
 Who You [PR #4](https://github.com/uichat-mira/who-you/pull/4) 同样涉及该问题，目前仍未合并，**这是正式收件前的 P1 Gate**。
 
 ### 4.2 MIME 边界
 
-Cloud Mail 借助 \`postal-mime\` 减少 MIME 实现维护成本，但其入口按块 \`TextDecoder().decode(value)\` 后拼接字符串，理论上有 UTF-8 多字节字符跨块被错误解码的风险；这是静态推断，应通过人工构造分块测试确认，而不是已证实线上故障。Who You 现有 MIME 解析器虽严格限制部件、层级和大小，却承担自维护兼容性的风险。建议先建立**同一批真实格式/恶意边界 fixture**，再决定是否引入成熟解析库；不是因为开源项目用了就立刻重写。
+Cloud Mail 借助 `postal-mime` 减少 MIME 实现维护成本，但其入口按块 `TextDecoder().decode(value)` 后拼接字符串，理论上有 UTF-8 多字节字符跨块被错误解码的风险；这是静态推断，应通过人工构造分块测试确认，而不是已证实线上故障。Who You 现有 MIME 解析器虽严格限制部件、层级和大小，却承担自维护兼容性的风险。建议先建立**同一批真实格式/恶意边界 fixture**，再决定是否引入成熟解析库；不是因为开源项目用了就立刻重写。
 
 ### 4.3 代码测试与可用性证据不足
 
@@ -63,7 +63,7 @@ Cloud Mail 可见的 [测试文件](https://github.com/maillab/cloud-mail/blob/m
 
 ### 4.4 GitHub Action 不可照搬
 
-[Cloud Mail 自动部署工作流](https://github.com/maillab/cloud-mail/blob/main/.github/workflows/deploy-cloudflare.yml) 从 \`main\` 直接部署，还在 CI 中查找/创建 KV、D1 并按模板替换环境。其初始化访问采用含 **JWT_SECRET 的 URL 路径**；密钥可能因代理访问日志、监控等残留，属于应避免的设计风险（不声称已发生真实泄漏）。Who You 必须保留 \`feat/* → dev → test → prod\`、独立密钥/数据库、生产仅由 prod 发布、可回滚和有限权限。现有项目使用 Cloudflare \`cf\` CLI，不应因为参考项目用了 Wrangler 就双重引入。
+[Cloud Mail 自动部署工作流](https://github.com/maillab/cloud-mail/blob/main/.github/workflows/deploy-cloudflare.yml) 从 `main` 直接部署，还在 CI 中查找/创建 KV、D1 并按模板替换环境。其初始化访问采用含 **JWT_SECRET 的 URL 路径**；密钥可能因代理访问日志、监控等残留，属于应避免的设计风险（不声称已发生真实泄漏）。Who You 必须保留 `feat/* → dev → test → prod`、独立密钥/数据库、生产仅由 prod 发布、可回滚和有限权限。现有项目使用 Cloudflare `cf` CLI，不应因为参考项目用了 Wrangler 就双重引入。
 
 ### 4.5 许可和范围
 
@@ -90,15 +90,15 @@ Cloud Mail 可见的 [测试文件](https://github.com/maillab/cloud-mail/blob/m
 
 ## 6. Who You 现存能力与缺口
 
-- 当前 [Worker 入口](https://github.com/uichat-mira/who-you/blob/dev/src/index.ts) 已恢复 \`fetch / email / scheduled\`；[\`cloudflare.config.ts\`](https://github.com/uichat-mira/who-you/blob/dev/cloudflare.config.ts) 仍无正式生产服务绑定，不能据此宣称已实际部署。
+- 当前 [Worker 入口](https://github.com/uichat-mira/who-you/blob/dev/src/index.ts) 已恢复 `fetch / email / scheduled`；[`cloudflare.config.ts`](https://github.com/uichat-mira/who-you/blob/dev/cloudflare.config.ts) 仍无正式生产服务绑定，不能据此宣称已实际部署。
 - S1–S4 代码累积具备：邮箱、线程、搜索、附件、草稿、一次性确认、用户侧邮件状态、审计、退信/投诉抑制。然而**本地/workerd 测试不证明生产端到端真实邮件收发**。
 - [#4 P1](https://github.com/uichat-mira/who-you/pull/4) 尚未合并：并发重复收件可能写入或清理相同 R2 对象；未经可信认证的 DMARC 影响隔离判断。修复应兼顾 D1 唯一约束、只有获胜写入才能更新计数与线程、失败对象安全回滚。
 - [S5 PR #12](https://github.com/uichat-mira/who-you/pull/12) 正在增加投递状态、附件去重、CID 图片显示等；尚未合并，也不等于客户端已完成。
-- 设计分支提出邮箱域名 \`tomlab.cn\`，但**没有看到经批准的 MX、Cloudflare Zone 归属和 DNS 操作授权**。拼写与真实域名必须逐字核对，不可据相似名字推定。
+- 设计分支提出邮箱域名 `tomlab.cn`，但**没有看到经批准的 MX、Cloudflare Zone 归属和 DNS 操作授权**。拼写与真实域名必须逐字核对，不可据相似名字推定。
 
 ## 7. 推荐目标架构（保留已有业务语义）
 
-\`\`\`mermaid
+```mermaid
 flowchart TB
   C[Mira Desktop / Mobile] -->|Cloud Auth bearer / MCP| W[Who You Workers]
   U[用户查看最终草稿并确认] -->|绑定 hash/version 的一次性凭证| W
@@ -108,9 +108,9 @@ flowchart TB
   W --> R[(R2 raw、正文、附件)]
   W -->|仅获准的适用发信场景| P[合规发信服务商]
   P -->|签名回执、退信、投诉| W
-\`\`\`
+```
 
-**保留** Cloud Auth 发行的 \`mira:who-you\` audience、分离的 \`whoyou.read / whoyou.mail.write / whoyou.mail.send\` scope、token 派生账户、逐草稿版本/哈希校验、单次 nonce、隐私日志、不可信邮件正文标记以及 MCP API/错误码。不要引入 Cloud Mail 的第二套登录、公开管理 API、群发或自动发送控制面。
+**保留** Cloud Auth 发行的 `mira:who-you` audience、分离的 `whoyou.read / whoyou.mail.write / whoyou.mail.send` scope、token 派生账户、逐草稿版本/哈希校验、单次 nonce、隐私日志、不可信邮件正文标记以及 MCP API/错误码。不要引入 Cloud Mail 的第二套登录、公开管理 API、群发或自动发送控制面。
 
 ### 备选方案比较
 
@@ -138,13 +138,13 @@ flowchart TB
 
 **阶段 C — Cloudflare 实测与发信选择**
 
-- 使用独立 test 资源、最小权限 secret 和现有 \`cf\` CLI；在授权后实测 1/5/10/20MiB 不同 MIME，记录 Workers CPU、D1/R2 行为、\`EXCEEDED_CPU\`，决定是否必须使用 Workers Paid（费用由运营方决策）。
+- 使用独立 test 资源、最小权限 secret 和现有 `cf` CLI；在授权后实测 1/5/10/20MiB 不同 MIME，记录 Workers CPU、D1/R2 行为、`EXCEEDED_CPU`，决定是否必须使用 Workers Paid（费用由运营方决策）。
 - 真正用受控测试域收信，确认 MX、可信认证头、配额和对象存储可恢复；用真实适用的 Provider 验证“确认凭证→发送→回执→退信”，不可用时保持发送关闭。
 - 测试版先不碰既有 Mira Desktop 邮件中心；S5 单独明确共存/迁移选择。
 
 **阶段 D — 发布与产品闭环**
 
-- 只有 \`prod\` 经审批能触发生产部署；\`test\`/生产 D1、R2、路由、密钥必须隔离；记录固定 SHA、可回滚版本与数据恢复路径。
+- 只有 `prod` 经审批能触发生产部署；`test`/生产 D1、R2、路由、密钥必须隔离；记录固定 SHA、可回滚版本与数据恢复路径。
 - 客户端完成：看信 → 草稿 → 最终内容展示 → 人工确认 → 发送 → 送达/退信状态（若供应商允许）。草稿修改立即使旧授权作废。
 - Go/No-go 依据是**实际代码与环境证据**，不是 PR 合并或 CI 绿本身。
 
