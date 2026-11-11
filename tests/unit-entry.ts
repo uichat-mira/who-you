@@ -31,6 +31,18 @@ export {
 	draftContentHash,
 } from "../src/mail/draft";
 export { createCloudAuthConfirmationVerifier } from "../src/mcp/confirmation";
+export {
+	CredentialCryptoError,
+	base64Bytes,
+	bytesBase64,
+	credentialAad,
+	dekWrapAad,
+	openSecret,
+	parseKek,
+	rewrapDek,
+	sealSecret,
+} from "../src/mail/credential-crypto";
+export { resolveCredentialKeys } from "../src/mail/config";
 export { mailObjectKeys } from "../src/mail/store";
 export {
 	DEFAULT_ABUSE_POLICY,

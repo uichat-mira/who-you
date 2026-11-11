@@ -1,5 +1,7 @@
 import worker from "../src/index";
-import { createMailServices, type WhoYouEnv } from "../src/mail/config";
+import { createMailServices, resolveCredentialKeys, type WhoYouEnv } from "../src/mail/config";
+import { CredentialRepository, type CredentialKeys } from "../src/mail/credentials";
+import { parseKek } from "../src/mail/credential-crypto";
 import { MAIL_DOWNLOAD_PATH, handleSignedDownload } from "../src/mail/download";
 import { runRetentionSweep } from "../src/mail/retention";
 import { provisionOwnMailbox } from "../src/mail/provision";
@@ -120,6 +122,90 @@ export default {
 				now: 1_795_000_000_000,
 			});
 			return Response.json(result);
+		}
+
+		if (path === "/__credential") {
+			if (request.method !== "POST") {
+				return Response.json({ error: "method_not_allowed" }, { status: 405 });
+			}
+			const input = (await request.json()) as {
+				action: "store" | "read" | "revoke" | "list" | "rewrap";
+				accountId?: string;
+				mailboxId?: string;
+				provider?: "gmail" | "microsoft" | "imap_smtp";
+				credentialType?: "oauth_refresh" | "imap_password" | "smtp_password";
+				secret?: string;
+				scope?: string;
+				kek?: string;
+				version?: number;
+				previousKek?: string;
+				previousVersion?: number;
+			};
+			if (!env.DB) return Response.json({ error: "storage_missing" }, { status: 503 });
+
+			let keys: CredentialKeys | null = resolveCredentialKeys(env);
+			if (input.kek) {
+				const current = parseKek(input.kek);
+				const previous = parseKek(input.previousKek);
+				keys = current
+					? {
+						current: { version: input.version ?? 1, kek: current },
+						previous:
+							previous && input.previousVersion
+								? { version: input.previousVersion, kek: previous }
+								: null,
+					}
+					: null;
+			}
+			if (!keys) return Response.json({ error: "kek_missing" }, { status: 503 });
+
+			const repository = new CredentialRepository(env.DB);
+			const now = 1_795_000_000_000;
+			if (input.action === "store") {
+				if (!input.accountId || !input.mailboxId || !input.provider || !input.credentialType) {
+					return Response.json({ error: "invalid_request" }, { status: 400 });
+				}
+				const result = await repository.store({
+					accountId: input.accountId,
+					mailboxId: input.mailboxId,
+					provider: input.provider,
+					credentialType: input.credentialType,
+					secret: input.secret ?? "",
+					scope: input.scope,
+					keys,
+					now,
+				});
+				return Response.json(result);
+			}
+			if (input.action === "read") {
+				if (!input.accountId || !input.mailboxId || !input.credentialType) {
+					return Response.json({ error: "invalid_request" }, { status: 400 });
+				}
+				return Response.json(
+					await repository.readActive({
+						accountId: input.accountId,
+						mailboxId: input.mailboxId,
+						credentialType: input.credentialType,
+						keys,
+					}),
+				);
+			}
+			if (input.action === "revoke") {
+				if (!input.accountId || !input.mailboxId || !input.credentialType) {
+					return Response.json({ error: "invalid_request" }, { status: 400 });
+				}
+				const changes = await repository.revoke({
+					accountId: input.accountId,
+					mailboxId: input.mailboxId,
+					credentialType: input.credentialType,
+					now,
+				});
+				return Response.json({ changes });
+			}
+			if (input.action === "rewrap") {
+				return Response.json(await repository.rewrapPending({ keys, now }));
+			}
+			return Response.json(await repository.list(input.accountId ?? ""));
 		}
 
 		if (path === "/__retention") {

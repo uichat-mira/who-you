@@ -115,6 +115,8 @@ export async function provisionOwnMailbox(
 			accountId: options.accountId,
 			address,
 			localPart,
+			kind: "own_domain",
+			provider: null,
 			quotaBytes: options.quotaBytes,
 			now: options.now,
 		});
@@ -149,6 +151,8 @@ export async function provisionOwnMailbox(
 		accountId: options.accountId,
 		address,
 		localPart,
+		kind: "own_domain",
+		provider: null,
 		status: "active",
 		quotaBytes: options.quotaBytes,
 		bytesUsed: 0,

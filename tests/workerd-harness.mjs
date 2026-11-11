@@ -35,6 +35,8 @@ export const MIGRATIONS = [
 	...migrationStatements("migrations/0003_s3_state_search_retention.sql"),
 	...migrationStatements("migrations/0004_deliverability_abuse.sql"),
 	...migrationStatements("migrations/0005_mailbox_provisioning.sql"),
+	...migrationStatements("migrations/0006_third_party_mailboxes.sql"),
+	...migrationStatements("migrations/0007_provider_credentials.sql"),
 ];
 
 export const BASE_BINDINGS = {
