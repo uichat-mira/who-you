@@ -496,6 +496,36 @@ export class MailRepository {
 		return row ? toMailbox(row) : null;
 	}
 
+	/** Looks up one identity owned by the account; never crosses account boundary. */
+	async findMailboxById(accountId: string, mailboxId: string): Promise<MailboxRecord | null> {
+		const row = await this.db
+			.prepare(
+				`SELECT id, account_id, address, local_part, kind, provider, status,
+				 quota_bytes, bytes_used, message_count, quarantine_count,
+				 send_paused_at, send_paused_reason, created_at
+				 FROM mailboxes WHERE account_id = ? AND id = ? LIMIT 1`,
+			)
+			.bind(accountId, mailboxId)
+			.first<MailboxRow>();
+		return row ? toMailbox(row) : null;
+	}
+
+	/** Sync sweep input: active third-party identities of one provider. */
+	async listMailboxesByProvider(provider: MailboxProvider, limit: number): Promise<MailboxRecord[]> {
+		const { results } = await this.db
+			.prepare(
+				`SELECT id, account_id, address, local_part, kind, provider, status,
+				 quota_bytes, bytes_used, message_count, quarantine_count,
+				 send_paused_at, send_paused_reason, created_at
+				 FROM mailboxes
+				 WHERE kind = 'third_party' AND provider = ? AND status = 'active'
+				 ORDER BY created_at LIMIT ?`,
+			)
+			.bind(provider, limit)
+			.all<MailboxRow>();
+		return results.map(toMailbox);
+	}
+
 	/** Every identity the account holds, own-domain first. */
 	async listMailboxesByAccount(accountId: string): Promise<MailboxRecord[]> {
 		const { results } = await this.db
@@ -532,6 +562,24 @@ export class MailRepository {
 				mailbox.now,
 				mailbox.now,
 			)
+			.run();
+		return (result.meta.changes ?? 0) > 0;
+	}
+
+	/** Spends an identity confirmation nonce exactly once. */
+	async consumeIdentityNonce(input: {
+		nonce: string;
+		accountId: string;
+		action: "link" | "unlink";
+		now: number;
+	}): Promise<boolean> {
+		const result = await this.db
+			.prepare(
+				`INSERT INTO identity_confirmation_nonces (nonce, account_id, action, consumed_at)
+				 VALUES (?,?,?,?)
+				 ON CONFLICT (nonce) DO NOTHING`,
+			)
+			.bind(input.nonce, input.accountId, input.action, input.now)
 			.run();
 		return (result.meta.changes ?? 0) > 0;
 	}
@@ -1086,6 +1134,24 @@ export class MailRepository {
 	}
 
 	/**
+	 * Removes one linked identity and its synced copies. Must run after R2
+	 * deletion. Account-wide evidence (audit, receipts, suppressions) survives
+	 * because only this identity was unlinked.
+	 */
+	async deleteMailboxScoped(mailboxId: string): Promise<void> {
+		await this.db.batch([
+			this.db.prepare("DELETE FROM attachments WHERE mailbox_id = ?").bind(mailboxId),
+			this.db.prepare("DELETE FROM messages WHERE mailbox_id = ?").bind(mailboxId),
+			this.db.prepare("DELETE FROM threads WHERE mailbox_id = ?").bind(mailboxId),
+			this.db.prepare("DELETE FROM mail_exports WHERE mailbox_id = ?").bind(mailboxId),
+			this.db.prepare("DELETE FROM mail_drafts WHERE mailbox_id = ?").bind(mailboxId),
+			this.db.prepare("DELETE FROM mailbox_sync_state WHERE mailbox_id = ?").bind(mailboxId),
+			this.db.prepare("DELETE FROM provider_credentials WHERE mailbox_id = ?").bind(mailboxId),
+			this.db.prepare("DELETE FROM mailboxes WHERE id = ?").bind(mailboxId),
+		]);
+	}
+
+	/**
 	 * Removes every row owned by the mailbox. Must run after R2 deletion. The
 	 * audit history for this account is erased too: an account deletion is a
 	 * data-subject erasure, not a retention checkpoint.
@@ -1103,6 +1169,10 @@ export class MailRepository {
 			this.db.prepare("DELETE FROM suppressions WHERE account_id = ?").bind(accountId),
 			this.db.prepare("DELETE FROM deliverability_alerts WHERE account_id = ?").bind(accountId),
 			this.db.prepare("DELETE FROM mail_audit_log WHERE account_id = ?").bind(accountId),
+			this.db.prepare("DELETE FROM mailbox_sync_state WHERE mailbox_id = ?").bind(mailboxId),
+			this.db.prepare("DELETE FROM provider_credentials WHERE account_id = ?").bind(accountId),
+			this.db.prepare("DELETE FROM identity_confirmation_nonces WHERE account_id = ?").bind(accountId),
+			this.db.prepare("DELETE FROM oauth_link_states WHERE account_id = ?").bind(accountId),
 			this.db.prepare("DELETE FROM mailboxes WHERE id = ?").bind(mailboxId),
 		]);
 	}

@@ -145,6 +145,7 @@ const receiptJson = (receipt: SendReceipt): Record<string, unknown> => ({
 	idempotencyKey: receipt.idempotencyKey,
 	status: receipt.status,
 	providerMessageId: receipt.providerMessageId,
+	provider: receipt.provider,
 	sentAt: receipt.createdAt,
 });
 
@@ -188,8 +189,9 @@ export function registerDraftTools(
 		{
 			title: "Who You draft create",
 			description:
-				"Creates an editable outbound draft in the caller's own mailbox. Drafts are not sent. Attachments are not supported in this slice. The response carries the version and contentHash that a Cloud Auth confirmation must bind to.",
+				"Creates an editable outbound draft in the caller's own mailbox, or in a linked third-party identity when `mailboxId` names one. Drafts are not sent. Attachments are not supported in this slice. The response carries the version and contentHash that a Cloud Auth confirmation must bind to.",
 			inputSchema: z.strictObject({
+				mailboxId: SAFE_ID.optional(),
 				to: RECIPIENT_LIST.optional(),
 				cc: RECIPIENT_LIST.optional(),
 				bcc: RECIPIENT_LIST.optional(),
@@ -202,9 +204,16 @@ export function registerDraftTools(
 		async (args): Promise<ToolResult> => {
 			const denied = requireWriteScope(principal);
 			if (denied) return denied;
-			const mailbox = await repository.findMailboxByAccount(accountId);
-			if (!mailbox) {
-				return failure("mailbox_not_provisioned", "No mailbox exists for this account yet.");
+			const mailbox = args.mailboxId
+				? await repository.findMailboxById(accountId, args.mailboxId)
+				: await repository.findMailboxByAccount(accountId);
+			if (!mailbox || mailbox.status !== "active") {
+				return failure(
+					"mailbox_not_provisioned",
+					args.mailboxId
+						? "No active mailbox with that id belongs to this account."
+						: "No mailbox exists for this account yet.",
+				);
 			}
 			const built = buildDraftContent(args);
 			if (!built.ok) return failure(built.reason, DRAFT_ERROR_DETAIL[built.reason]);
@@ -409,7 +418,7 @@ export function registerDraftTools(
 		{
 			title: "Who You draft send",
 			description:
-				"Sends one draft revision through the configured Cloudflare Email Service binding. It accepts exactly three arguments: the draft id, a Cloud Auth draft-bound confirmation credential, and an idempotency key. Sender, recipients, subject and body come only from the stored draft revision; they cannot be overridden here. The credential is single-use and must bind this draft's current version and contentHash.",
+				"Sends one draft revision through the provider that owns its mailbox: the configured Cloudflare Email Service / Resend path for the service domain, or the linked provider for a third-party identity. It accepts exactly three arguments: the draft id, a Cloud Auth draft-bound confirmation credential, and an idempotency key. Sender, recipients, subject and body come only from the stored draft revision; they cannot be overridden here. The credential is single-use and must bind this draft's current version and contentHash.",
 			inputSchema: z.strictObject({
 				draftId: SAFE_ID,
 				confirmationCredential: z.string().trim().min(1).max(4096),
@@ -423,13 +432,25 @@ export function registerDraftTools(
 			annotations: SEND,
 		},
 		async (args): Promise<ToolResult> => {
-			const mailbox = await repository.findMailboxByAccount(accountId);
+			const existing = await drafts.getDraft(accountId, args.draftId);
+			if (!existing) {
+				return failure("draft_not_found", "No such draft exists in your mailbox.");
+			}
+			const mailbox = await repository.findMailboxById(accountId, existing.mailboxId);
+			const identity = mailbox
+				? {
+						accountId,
+						mailboxId: mailbox.id,
+						address: mailbox.address,
+						provider: mailbox.provider,
+					}
+				: null;
 			const result = await sendDraft(
 				{
 					drafts,
 					confirmations: dependencies.confirmations,
 					sender: dependencies.sender,
-					from: mailbox?.address ?? null,
+					identity,
 					gate: sendGate,
 					monitor: abuseMonitor,
 					now: () => Date.now(),

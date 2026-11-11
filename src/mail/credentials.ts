@@ -233,6 +233,35 @@ export class CredentialRepository {
 			.run();
 	}
 
+	/**
+	 * `invalid_grant` / missing scope means the user must consent again. The
+	 * material stays sealed so the unlink path can still attempt provider revoke,
+	 * but every send and sync stops immediately.
+	 */
+	async markReauth(input: {
+		accountId: string;
+		mailboxId: string;
+		credentialType: CredentialType;
+		now: number;
+	}): Promise<void> {
+		await this.db
+			.prepare(
+				`UPDATE provider_credentials SET status = 'reauth_required', updated_at = ?
+				 WHERE account_id = ? AND mailbox_id = ? AND credential_type = ?
+				 AND status = 'active'`,
+			)
+			.bind(input.now, input.accountId, input.mailboxId, input.credentialType)
+			.run();
+	}
+
+	/** Hard delete used only after the identity itself is being removed. */
+	async deleteForMailbox(mailboxId: string): Promise<void> {
+		await this.db
+			.prepare("DELETE FROM provider_credentials WHERE mailbox_id = ?")
+			.bind(mailboxId)
+			.run();
+	}
+
 	/** Crypto-shredding: the row survives for audit, the material does not. */
 	async revoke(input: {
 		accountId: string;

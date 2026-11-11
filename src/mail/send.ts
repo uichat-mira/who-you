@@ -4,11 +4,12 @@ import type { AbuseMonitor, SendGate } from "./deliverability";
 import { draftContentHash, type DraftAddress } from "./draft";
 import type { DraftRepository, SendReceipt } from "./draft-store";
 import { sha256Hex } from "./hash";
+import type { MailboxProvider } from "./store";
 
 /**
  * Outbound port. The deployed adapters are Resend (preferred) and the
  * Cloudflare Email Service `send_email` binding; tests inject a deterministic
- * fake. Who You never speaks SMTP or any other provider protocol directly.
+ * fake. Third-party identities route through their provider adapter instead.
  */
 export type OutboundMail = {
 	from: string;
@@ -20,8 +21,33 @@ export type OutboundMail = {
 	html: string | null;
 };
 
+/**
+ * The mailbox a draft is sent from. `provider` is null for the service domain,
+ * which keeps the existing Resend / `send_email` path byte-for-byte unchanged.
+ */
+export type SendIdentity = {
+	accountId: string;
+	mailboxId: string;
+	address: string;
+	provider: MailboxProvider | null;
+};
+
 export interface MailSender {
-	send(message: OutboundMail): Promise<{ providerMessageId: string }>;
+	send(
+		message: OutboundMail,
+		identity?: SendIdentity,
+	): Promise<{ providerMessageId: string; provider?: string }>;
+}
+
+/** Typed failure that the pipeline maps to a fixed, non-retryable code. */
+export class MailSendError extends Error {
+	constructor(
+		readonly code: SendFailureCode,
+		readonly detail: string,
+	) {
+		super(code);
+		this.name = "MailSendError";
+	}
 }
 
 const toPlatformAddress = (entry: DraftAddress): { name: string; email: string } => ({
@@ -112,7 +138,11 @@ export type SendFailureCode =
 	| "relay_unavailable"
 	| "idempotency_key_reused"
 	| "recipient_suppressed"
-	| "send_paused";
+	| "send_paused"
+	| "provider_reauth_required"
+	| "provider_not_configured"
+	| "credential_missing"
+	| "credential_unreadable";
 
 export type SendDraftResult =
 	| { ok: true; receipt: SendReceipt; alreadySent: boolean }
@@ -122,8 +152,8 @@ export type SendDraftDependencies = {
 	drafts: DraftRepository;
 	confirmations: WhoYouConfirmationVerifier;
 	sender: MailSender | null;
-	/** Sender address of the caller's own provisioned mailbox. */
-	from: string | null;
+	/** Mailbox the draft belongs to, or null when nothing is provisioned. */
+	identity: SendIdentity | null;
 	/** Suppression / pause gate; consulted before the nonce is spent. */
 	gate: SendGate;
 	/** Post-receipt abuse brake; never runs before a message is durable. */
@@ -228,13 +258,14 @@ export async function sendDraft(
 		return { ok: false, code: gate.code, detail: gate.detail };
 	}
 
-	if (!deps.sender || !deps.from) {
+	if (!deps.sender || !deps.identity) {
 		return {
 			ok: false,
 			code: "relay_unavailable",
 			detail: "No outbound mail binding or provisioned sender address is configured; nothing was sent.",
 		};
 	}
+	const identity = deps.identity;
 
 	const consumed = await deps.drafts.consumeNonce({
 		nonce: confirmation.nonce,
@@ -251,18 +282,26 @@ export async function sendDraft(
 	}
 
 	let providerMessageId: string;
+	let provider: string | null;
 	try {
-		const sent = await deps.sender.send({
-			from: deps.from,
-			to: draft.content.to,
-			cc: draft.content.cc,
-			bcc: draft.content.bcc,
-			subject: draft.content.subject,
-			text: draft.content.text,
-			html: draft.content.html,
-		});
+		const sent = await deps.sender.send(
+			{
+				from: identity.address,
+				to: draft.content.to,
+				cc: draft.content.cc,
+				bcc: draft.content.bcc,
+				subject: draft.content.subject,
+				text: draft.content.text,
+				html: draft.content.html,
+			},
+			identity,
+		);
 		providerMessageId = sent.providerMessageId;
-	} catch {
+		provider = sent.provider ?? null;
+	} catch (error) {
+		if (error instanceof MailSendError) {
+			return { ok: false, code: error.code, detail: error.detail };
+		}
 		return {
 			ok: false,
 			code: "relay_unavailable",
@@ -270,7 +309,7 @@ export async function sendDraft(
 		};
 	}
 
-	const ownDomain = deps.from.slice(deps.from.lastIndexOf("@") + 1).toLowerCase();
+	const ownDomain = identity.address.slice(identity.address.lastIndexOf("@") + 1).toLowerCase();
 
 	const receipt: SendReceipt = {
 		id: await receiptId(request.accountId, request.idempotencyKey),
@@ -282,6 +321,7 @@ export async function sendDraft(
 		status: "sent",
 		errorCode: null,
 		providerMessageId,
+		provider,
 		recipientCount: recipients.length,
 		externalRecipientCount: recipients.filter((address) => {
 			const domain = address.slice(address.lastIndexOf("@") + 1).toLowerCase();

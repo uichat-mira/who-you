@@ -5,6 +5,10 @@ import {
 	type WhoYouConfirmationVerifier,
 } from "../src/mail/confirmation";
 import type { MailSender } from "../src/mail/send";
+import {
+	IdentityConfirmationError,
+	type WhoYouIdentityConfirmationVerifier,
+} from "../src/mail/identity-confirmation";
 
 /**
  * Deterministic MCP contract fixtures. Every address, account and consumer here
@@ -173,6 +177,74 @@ export function createFixtureConfirmationVerifier(): WhoYouConfirmationVerifier 
 					draftId: parsed.draftId,
 					draftVersion: parsed.draftVersion,
 					contentHash: parsed.contentHash,
+					nonce: parsed.nonce,
+				},
+			};
+		},
+	};
+}
+
+export type FixtureIdentityConfirmation = {
+	accountId: string;
+	action: "link" | "unlink";
+	provider: "gmail" | "microsoft" | "imap_smtp" | null;
+	mailboxId: string | null;
+	nonce: string;
+};
+
+const FIXTURE_IDENTITY_PREFIX = "fixture-identity.";
+
+/** Builds a synthetic link/unlink credential; the test worker verifies it. */
+export function encodeFixtureIdentityConfirmation(
+	payload: FixtureIdentityConfirmation,
+): string {
+	return `${FIXTURE_IDENTITY_PREFIX}${base64UrlEncode(JSON.stringify(payload))}`;
+}
+
+export function createFixtureIdentityConfirmationVerifier(): WhoYouIdentityConfirmationVerifier {
+	return {
+		async verifyIdentityConfirmation(token: string) {
+			if (!token.startsWith(FIXTURE_IDENTITY_PREFIX)) {
+				throw new IdentityConfirmationError();
+			}
+			let parsed: Record<string, unknown>;
+			try {
+				const raw = JSON.parse(base64UrlDecode(token.slice(FIXTURE_IDENTITY_PREFIX.length)));
+				if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+					throw new IdentityConfirmationError();
+				}
+				parsed = raw as Record<string, unknown>;
+			} catch {
+				throw new IdentityConfirmationError();
+			}
+			if (typeof parsed.accountId !== "string" || !parsed.accountId) {
+				throw new IdentityConfirmationError();
+			}
+			if (parsed.action !== "link" && parsed.action !== "unlink") {
+				throw new IdentityConfirmationError();
+			}
+			const provider =
+				parsed.provider === "gmail" ||
+				parsed.provider === "microsoft" ||
+				parsed.provider === "imap_smtp"
+					? parsed.provider
+					: parsed.provider === null
+						? null
+						: undefined;
+			if (provider === undefined) throw new IdentityConfirmationError();
+			if (parsed.mailboxId !== null && typeof parsed.mailboxId !== "string") {
+				throw new IdentityConfirmationError();
+			}
+			if (typeof parsed.nonce !== "string" || parsed.nonce.length < 16) {
+				throw new IdentityConfirmationError();
+			}
+			return {
+				accountId: parsed.accountId,
+				confirmation: {
+					actor: "user",
+					action: parsed.action,
+					provider,
+					mailboxId: parsed.mailboxId,
 					nonce: parsed.nonce,
 				},
 			};

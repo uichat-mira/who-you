@@ -70,3 +70,20 @@ export {
 	WHOYOU_SERVICE_AUDIENCE,
 	resolveMcpConfig,
 } from "../src/mcp/config";
+export {
+	GMAIL_READONLY_SCOPE,
+	GMAIL_SCOPES,
+	GMAIL_SEND_SCOPE,
+	GOOGLE_AUTHORIZATION_ENDPOINT,
+	GOOGLE_REVOCATION_ENDPOINT,
+	GOOGLE_TOKEN_ENDPOINT,
+	OAuthProviderError,
+	createGoogleOAuthClient,
+	createOAuthState,
+	createPkcePair,
+	hasRequiredGmailScope,
+} from "../src/mail/oauth-client";
+export { GmailApiError, createGmailClient } from "../src/mail/gmail-client";
+export { buildRfc822Message, encodeRawMessage } from "../src/mail/rfc822";
+export { resolveGmailOAuthConfig } from "../src/mail/gmail-link";
+export { decodeBase64Url, encodeBase64Url } from "../src/mail/base64url";
