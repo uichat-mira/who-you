@@ -26,7 +26,14 @@
 按可独立验收的顺序分片：
 
 - **S7a 数据模型**：`mailboxes` 增加 `kind`（`own_domain` / `third_party`）与 provider 归属；`UNIQUE (account_id)` 放宽为 `UNIQUE (account_id, address)`，自有域地址仍由 S6 保证唯一；新增迁移 0006 与回填策略。
-- **S7b 凭据托管**：每用户 DEK + Worker secret 作为 KEK（或外部 KMS）加密存储；只落密文与元数据（provider、scope、过期时间、状态）；撤销与删除路径；审计事件只记 id/reason。
+- **S7b 凭据托管（已裁决：信封加密，不引入外部 KMS）**：
+  - 加密算法用 AES-256-GCM + WebCrypto；每账号一个随机 DEK（32 字节），用 Worker secret `MAIL_CREDENTIAL_KEK`（32 字节，base64）包裹后存 D1。
+  - 只持久化 refresh token；access token 每次按需换取、仅驻内存，不落库、不缓存到 R2/KV。
+  - 密文 AAD 绑定 `account_id|provider|mailbox_id|key_version`，防止密文被平移到其他账号或身份上解密。
+  - `provider_credentials` 存 `key_id`、`wrapped_dek`、`ciphertext`、`nonce`、`key_version`、`provider`、`scope`、`status` 与时间戳；不存任何明文或「先加密再解不开」的兜底值。
+  - 撤销 = 删除 wrapped DEK 与密文（crypto-shredding：即使备份泄漏也无法解密）；轮换 = 新 KEK 版本与旧版并存，Cron 惰性重包裹，窗口期结束后下线旧版本。
+  - 解密失败一律 fail-closed：返回固定码、停用该身份，不重试、不降级、不回退明文。
+  - 不选 Cloudflare Secrets Store（账户级、非按用户）；不选外部 KMS（首期引入跨云依赖与每次解密的额外延迟，收益不足以抵消复杂度）。
 - **S7c 首个 provider（Gmail）发信**：OAuth 授权码换 refresh token，发信走 Gmail HTTP API（不使用 SMTP 密码）；scope 最小化；token 失效、授权被撤的固定失败码。
 - **S7d 统一出站端口**：`MailSender` 按邮箱身份选择 provider，现有 Resend / `send_email` 路径不变；`send_receipts` 记录实际 provider。
 - **S7e 第三方收信同步（首期范围）**：Gmail API `users.messages.list/get` 增量拉取，游标用 `historyId` 并处理其过期回退；按 RFC `Message-ID` 去重，复用现有 thread/地址/正文/附件模型入库；与自有域收信共用配额、保留与审计；同步不得回写已读状态到 provider。
@@ -51,7 +58,8 @@
 ## 依赖与阻塞
 
 - WHO-S6 完成账号 ↔ 地址映射，否则第三方身份没有可归属的所有者。
-- 需要先有一份凭据托管与 provider OAuth 的安全契约（仓库 `AGENTS.md` 的硬要求），否则不得进入实现。
+- 需要先有一份凭据托管与 provider OAuth 的安全契约（仓库 `AGENTS.md` 的硬要求），否则不得进入实现。加密方案已在 S7b 裁决，契约仍需覆盖轮换 runbook 与丢失 KEK 的处置。
+- 需要新增 Worker secret `MAIL_CREDENTIAL_KEK`（32 字节）；丢失 KEK 意味着所有第三方身份必须重新授权，这是已接受的取舍。
 - Google OAuth 客户端注册、同意屏与最小 scope 评审。
 - 现有 `SendGate` / `AbuseMonitor` 的阈值是否按 provider 区分。
 - 现有 `triggers.scheduled` 只有每天一次（`17 3 * * *`）；首期收信同步需要更高频的触发（Cron / Queue / Gmail push），属于配置变更，需先定频率与成本。
@@ -59,7 +67,7 @@
 ## 待决
 
 1. 第三方邮件正文是否进入 D1/R2：全量入库（统一搜索与保留）还是只缓存最近窗口；影响保留策略与隐私面。
-2. 凭据加密方案：Worker secret 作 KEK + 每用户 DEK，还是外部 KMS；轮换时如何重加密。
-3. provider 白名单：仅 Gmail / Microsoft，还是允许用户填任意 IMAP/SMTP。
-4. 第三方发信的滥用阈值、暂停与用户可见提示如何复用现有 deliverability 机制。
-5. 同步触发与回填：Cron 频率、首次回填范围（全部 / 最近 N 天 / 最近 N 封）、失败重试上限。
+2. provider 白名单：仅 Gmail / Microsoft，还是允许用户填任意 IMAP/SMTP。
+3. 第三方发信的滥用阈值、暂停与用户可见提示如何复用现有 deliverability 机制。
+4. 同步触发与回填：Cron 频率、首次回填范围（全部 / 最近 N 天 / 最近 N 封）、失败重试上限。
+5. KEK 轮换周期与旧版本并存的窗口长度。
