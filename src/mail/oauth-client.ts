@@ -1,4 +1,11 @@
 import { encodeBase64Url } from "./base64url";
+import {
+	createOAuthAuthorizationUrl,
+	createOAuthFormPoster,
+	parseOAuthTokenSet,
+	parseScopeSet,
+	type OAuthTokenSet,
+} from "./oauth-shared";
 
 /**
  * Google OAuth 2.0 authorization-code + PKCE client (S7c).
@@ -8,6 +15,8 @@ import { encodeBase64Url } from "./base64url";
  * Provider error bodies are never surfaced or logged because they can echo
  * token material.
  */
+
+export { OAuthProviderError, type OAuthFailureCode, type OAuthTokenSet } from "./oauth-shared";
 
 export const GMAIL_SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send";
 export const GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly";
@@ -25,29 +34,6 @@ export type GoogleOAuthConfig = {
 	tokenEndpoint: string;
 	revocationEndpoint: string;
 };
-
-export type OAuthTokenSet = {
-	accessToken: string;
-	/** Present on the authorization-code exchange, absent on refresh. */
-	refreshToken: string | null;
-	scope: string | null;
-	expiresIn: number | null;
-};
-
-export type OAuthFailureCode =
-	| "invalid_grant"
-	| "invalid_client"
-	| "missing_refresh_token"
-	| "provider_scope_missing"
-	| "provider_unreachable"
-	| "provider_misconfigured";
-
-export class OAuthProviderError extends Error {
-	constructor(readonly code: OAuthFailureCode) {
-		super(code);
-		this.name = "OAuthProviderError";
-	}
-}
 
 export type GmailOAuthClient = {
 	authorizationUrl(input: { state: string; codeChallenge: string }): string;
@@ -75,90 +61,32 @@ export const createOAuthState = (): string =>
 
 export const hasRequiredGmailScope = (scope: string | null): boolean => {
 	if (!scope) return false;
-	const granted = new Set(scope.split(/\s+/).filter(Boolean));
+	const granted = parseScopeSet(scope);
 	return GMAIL_SCOPES.every((required) => granted.has(required));
-};
-
-const parseJson = async (response: Response): Promise<Record<string, unknown>> => {
-	try {
-		const payload = (await response.json()) as unknown;
-		return payload && typeof payload === "object" && !Array.isArray(payload)
-			? (payload as Record<string, unknown>)
-			: {};
-	} catch {
-		return {};
-	}
-};
-
-const providerErrorCode = (payload: Record<string, unknown>, status: number): OAuthFailureCode => {
-	if (payload.error === "invalid_grant") return "invalid_grant";
-	if (payload.error === "invalid_client") return "invalid_client";
-	// A 5xx is transient; anything else with the wrong shape is our own config.
-	return status >= 500 ? "provider_unreachable" : "provider_misconfigured";
-};
-
-const tokenSetFrom = (payload: Record<string, unknown>, requireRefresh: boolean): OAuthTokenSet => {
-	const accessToken = typeof payload.access_token === "string" ? payload.access_token : "";
-	if (!accessToken) throw new OAuthProviderError("provider_misconfigured");
-	const refreshToken = typeof payload.refresh_token === "string" ? payload.refresh_token : null;
-	if (requireRefresh && !refreshToken) throw new OAuthProviderError("missing_refresh_token");
-	const scope = typeof payload.scope === "string" ? payload.scope : null;
-	// The code exchange must prove both scopes were granted; a refresh response
-	// may omit scope, in which case the previously granted set is unchanged.
-	if (requireRefresh && !hasRequiredGmailScope(scope)) {
-		throw new OAuthProviderError("provider_scope_missing");
-	}
-	if (scope !== null && !requireRefresh && !hasRequiredGmailScope(scope)) {
-		throw new OAuthProviderError("provider_scope_missing");
-	}
-	const expiresIn =
-		typeof payload.expires_in === "number" && Number.isFinite(payload.expires_in)
-			? payload.expires_in
-			: null;
-	return { accessToken, refreshToken, scope, expiresIn };
 };
 
 export function createGoogleOAuthClient(
 	config: GoogleOAuthConfig,
 	fetchImpl: typeof fetch = fetch,
 ): GmailOAuthClient {
-	const postForm = async (
-		endpoint: string,
-		body: Record<string, string>,
-	): Promise<Record<string, unknown>> => {
-		let response: Response;
-		try {
-			response = await fetchImpl(endpoint, {
-				method: "POST",
-				headers: {
-					"content-type": "application/x-www-form-urlencoded",
-					accept: "application/json",
-				},
-				body: new URLSearchParams(body).toString(),
-			});
-		} catch {
-			throw new OAuthProviderError("provider_unreachable");
-		}
-		const payload = await parseJson(response);
-		if (!response.ok) throw new OAuthProviderError(providerErrorCode(payload, response.status));
-		return payload;
-	};
+	const postForm = createOAuthFormPoster(fetchImpl);
 
 	return {
 		authorizationUrl({ state, codeChallenge }): string {
-			const url = new URL(config.authorizationEndpoint);
-			url.searchParams.set("client_id", config.clientId);
-			url.searchParams.set("redirect_uri", config.redirectUri);
-			url.searchParams.set("response_type", "code");
-			url.searchParams.set("scope", GMAIL_SCOPES.join(" "));
-			url.searchParams.set("state", state);
-			url.searchParams.set("code_challenge", codeChallenge);
-			url.searchParams.set("code_challenge_method", "S256");
-			// `offline` plus `consent` is what makes Google return a refresh token.
-			url.searchParams.set("access_type", "offline");
-			url.searchParams.set("prompt", "consent");
-			url.searchParams.set("include_granted_scopes", "false");
-			return url.href;
+			return createOAuthAuthorizationUrl({
+				authorizationEndpoint: config.authorizationEndpoint,
+				clientId: config.clientId,
+				redirectUri: config.redirectUri,
+				scope: GMAIL_SCOPES,
+				state,
+				codeChallenge,
+				// `offline` plus `consent` is what makes Google return a refresh token.
+				extraParams: {
+					access_type: "offline",
+					prompt: "consent",
+					include_granted_scopes: "false",
+				},
+			});
 		},
 
 		async exchangeCode({ code, codeVerifier }): Promise<OAuthTokenSet> {
@@ -170,7 +98,7 @@ export function createGoogleOAuthClient(
 				redirect_uri: config.redirectUri,
 				code_verifier: codeVerifier,
 			});
-			return tokenSetFrom(payload, true);
+			return parseOAuthTokenSet(payload, true, hasRequiredGmailScope);
 		},
 
 		async refresh({ refreshToken }): Promise<OAuthTokenSet> {
@@ -180,7 +108,7 @@ export function createGoogleOAuthClient(
 				client_id: config.clientId,
 				client_secret: config.clientSecret,
 			});
-			return tokenSetFrom(payload, false);
+			return parseOAuthTokenSet(payload, false, hasRequiredGmailScope);
 		},
 
 		async revoke({ token }): Promise<boolean> {

@@ -12,6 +12,12 @@ import { CredentialRepository, type CredentialKeys } from "./credentials";
 import { parseKek } from "./credential-crypto";
 import { createGmailClient, type GmailClient } from "./gmail-client";
 import { resolveGmailOAuthConfig } from "./gmail-link";
+import { createGraphClient, type GraphClient } from "./microsoft-client";
+import { resolveMicrosoftOAuthConfig } from "./microsoft-link";
+import {
+	createMicrosoftOAuthClient,
+	type MicrosoftOAuthClient,
+} from "./microsoft-oauth";
 import { createGoogleOAuthClient, type GmailOAuthClient } from "./oauth-client";
 import { OAuthStateRepository } from "./oauth-state";
 import { resolveRetention, type RetentionEnv, type RetentionPolicy } from "./retention";
@@ -57,6 +63,12 @@ export type WhoYouEnv = McpEnv &
 		GMAIL_OAUTH_CLIENT_ID?: string;
 		GMAIL_OAUTH_CLIENT_SECRET?: string;
 		GMAIL_OAUTH_REDIRECT_URI?: string;
+		/** Microsoft identity platform client for Outlook linking. */
+		MICROSOFT_OAUTH_CLIENT_ID?: string;
+		MICROSOFT_OAUTH_CLIENT_SECRET?: string;
+		MICROSOFT_OAUTH_REDIRECT_URI?: string;
+		/** Authority tenant; defaults to `common` (any work or personal account). */
+		MICROSOFT_OAUTH_TENANT?: string;
 	};
 
 export type MailServices = {
@@ -82,6 +94,12 @@ export type MailServices = {
 	gmail: GmailClient | null;
 	/** The exact redirect URI registered with Google, echoed on the callback. */
 	gmailRedirectUri: string | null;
+	/** `null` when the Microsoft OAuth client env is incomplete. */
+	microsoftOauth: MicrosoftOAuthClient | null;
+	/** `null` when Microsoft OAuth is not configured; both are built together. */
+	microsoft: GraphClient | null;
+	/** The exact redirect URI registered with Microsoft, echoed on the callback. */
+	microsoftRedirectUri: string | null;
 };
 
 export type MailServicesResult =
@@ -119,6 +137,7 @@ export function createMailServices(env: WhoYouEnv): MailServicesResult {
 	const signingKey = (env.MAIL_SIGNING_KEY ?? "").trim();
 	const mcpConfig = resolveMcpConfig(env);
 	const gmailConfig = resolveGmailOAuthConfig(env);
+	const microsoftConfig = resolveMicrosoftOAuthConfig(env);
 	return {
 		ok: true,
 		services: {
@@ -137,6 +156,9 @@ export function createMailServices(env: WhoYouEnv): MailServicesResult {
 			oauth: gmailConfig ? createGoogleOAuthClient(gmailConfig) : null,
 			gmail: gmailConfig ? createGmailClient() : null,
 			gmailRedirectUri: gmailConfig?.redirectUri ?? null,
+			microsoftOauth: microsoftConfig ? createMicrosoftOAuthClient(microsoftConfig) : null,
+			microsoft: microsoftConfig ? createGraphClient() : null,
+			microsoftRedirectUri: microsoftConfig?.redirectUri ?? null,
 		},
 	};
 }

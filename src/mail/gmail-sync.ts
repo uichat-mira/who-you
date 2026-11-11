@@ -1,11 +1,18 @@
-import type { CredentialFailureCode, CredentialKeys, CredentialRepository } from "./credentials";
+import type { CredentialKeys, CredentialRepository } from "./credentials";
 import { GmailApiError, type GmailClient } from "./gmail-client";
-import { readHeaderValue, ingestRawMail } from "./ingest";
 import type { MailLimits } from "./limits";
-import { OAuthProviderError, type GmailOAuthClient } from "./oauth-client";
+import { GMAIL_BACKFILL_WINDOW_MS } from "./gmail-link";
+import type { GmailOAuthClient } from "./oauth-client";
+import {
+	createOAuthMailImporter,
+	finishOAuthSyncFailure,
+	resolveOAuthAccessToken,
+	type OAuthSyncCounters,
+	type OAuthSyncDisposition,
+	type OAuthSyncFailureCode,
+} from "./oauth-sync";
 import type { MailboxSyncState, SyncStateRepository } from "./sync-state";
 import type { MailboxRecord, MailRepository } from "./store";
-import { GMAIL_BACKFILL_WINDOW_MS } from "./gmail-link";
 
 /**
  * Gmail incremental sync (S7c).
@@ -20,12 +27,7 @@ import { GMAIL_BACKFILL_WINDOW_MS } from "./gmail-link";
 export const GMAIL_BACKFILL_MAX_MESSAGES = 500;
 export const GMAIL_SYNC_MAX_MESSAGES_PER_RUN = 20;
 
-export type GmailSyncFailureCode =
-	| "provider_credentials_not_configured"
-	| "provider_reauth_required"
-	| "provider_unreachable"
-	| "credential_unavailable"
-	| "sync_failed";
+export type GmailSyncFailureCode = OAuthSyncFailureCode;
 
 export type GmailSyncDependencies = {
 	repository: MailRepository;
@@ -80,54 +82,23 @@ const parseBackfillPage = (value: string | null): { pageToken: string | null; se
 const encodeBackfillPage = (pageToken: string | null, seen: number): string =>
 	JSON.stringify({ pageToken, seen });
 
-const asCredentialFailure = (code: CredentialFailureCode): GmailSyncFailureCode =>
-	code === "credential_reauth_required" ? "provider_reauth_required" : "credential_unavailable";
+const classifyGmailFailure = (error: unknown): OAuthSyncDisposition => {
+	if (error instanceof GmailApiError) {
+		if (error.code === "unauthorized") return "unauthorized";
+		if (error.code === "provider_unreachable") return "unreachable";
+	}
+	return "other";
+};
 
 export async function syncGmailMailbox(
 	deps: GmailSyncDependencies,
 	mailbox: MailboxRecord,
 ): Promise<GmailSyncOutcome> {
-	if (!deps.keys) return { ok: false, code: "provider_credentials_not_configured" };
-	if (mailbox.provider !== "gmail" || mailbox.kind !== "third_party") {
-		return { ok: false, code: "sync_failed" };
-	}
-
-	const credential = await deps.credentials.readActive({
-		accountId: mailbox.accountId,
-		mailboxId: mailbox.id,
-		credentialType: "oauth_refresh",
-		keys: deps.keys,
-	});
-	if (!credential.ok) {
-		const code = asCredentialFailure(credential.code);
-		await deps.syncStates.markError(mailbox.id, code, deps.now);
-		return { ok: false, code };
-	}
-
-	let accessToken: string;
-	try {
-		const refreshed = await deps.oauth.refresh({ refreshToken: credential.secret });
-		accessToken = refreshed.accessToken;
-	} catch (error) {
-		if (error instanceof OAuthProviderError) {
-			if (error.code === "invalid_grant") {
-				await deps.credentials.markReauth({
-					accountId: mailbox.accountId,
-					mailboxId: mailbox.id,
-					credentialType: "oauth_refresh",
-					now: deps.now,
-				});
-				await deps.syncStates.markError(mailbox.id, "provider_reauth_required", deps.now);
-				return { ok: false, code: "provider_reauth_required" };
-			}
-			if (error.code === "provider_unreachable") {
-				await deps.syncStates.markError(mailbox.id, "provider_unreachable", deps.now);
-				return { ok: false, code: "provider_unreachable" };
-			}
-		}
-		await deps.syncStates.markError(mailbox.id, "sync_failed", deps.now);
-		return { ok: false, code: "sync_failed" };
-	}
+	const access = await resolveOAuthAccessToken(deps, mailbox, "gmail", (input) =>
+		deps.oauth.refresh(input),
+	);
+	if (!access.ok) return access;
+	const accessToken = access.accessToken;
 
 	const existingState = await deps.syncStates.get(mailbox.id);
 	let state: MailboxSyncState = existingState ?? {
@@ -141,44 +112,17 @@ export async function syncGmailMailbox(
 		lastError: null,
 	};
 
-	const counters = { imported: 0, duplicates: 0, skipped: 0 };
-
-	const importMessage = async (id: string): Promise<boolean> => {
-		let message;
-		try {
-			message = await deps.gmail.getMessage(accessToken, id);
-		} catch (error) {
-			if (error instanceof GmailApiError && error.code === "unauthorized") {
-				throw error;
-			}
-			counters.skipped += 1;
-			return false;
-		}
-		if (message.raw.byteLength > deps.limits.maxRawBytes) {
-			counters.skipped += 1;
-			return true;
-		}
-		const fromHeader = (readHeaderValue(message.raw, "from") ?? "").toLowerCase();
-		const direction = fromHeader.includes(mailbox.address.toLowerCase())
-			? "outbound"
-			: "inbound";
-		const result = await ingestRawMail({
-			repository: deps.repository,
-			limits: deps.limits,
-			mailbox,
-			raw: message.raw,
-			envelopeFrom: mailbox.address,
-			receivedAt: message.internalDate ?? deps.now,
-			direction,
-		});
-		if (!result.ok) {
-			counters.skipped += 1;
-			return true;
-		}
-		if (result.duplicate) counters.duplicates += 1;
-		else counters.imported += 1;
-		return true;
-	};
+	const counters: OAuthSyncCounters = { imported: 0, duplicates: 0, skipped: 0 };
+	const importMessage = createOAuthMailImporter<string>(
+		deps,
+		mailbox,
+		counters,
+		async (id) => {
+			const message = await deps.gmail.getMessage(accessToken, id);
+			return { raw: message.raw, receivedAt: message.internalDate };
+		},
+		(error) => error instanceof GmailApiError && error.code === "unauthorized",
+	);
 
 	try {
 		if (!state.cursor) {
@@ -297,21 +241,6 @@ export async function syncGmailMailbox(
 		await deps.syncStates.upsert({ ...state, now: deps.now });
 		return { ok: true, ...counters, mode: "history" };
 	} catch (error) {
-		if (error instanceof GmailApiError && error.code === "unauthorized") {
-			await deps.credentials.markReauth({
-				accountId: mailbox.accountId,
-				mailboxId: mailbox.id,
-				credentialType: "oauth_refresh",
-				now: deps.now,
-			});
-			await deps.syncStates.markError(mailbox.id, "provider_reauth_required", deps.now);
-			return { ok: false, code: "provider_reauth_required" };
-		}
-		if (error instanceof GmailApiError && error.code === "provider_unreachable") {
-			await deps.syncStates.markError(mailbox.id, "provider_unreachable", deps.now);
-			return { ok: false, code: "provider_unreachable" };
-		}
-		await deps.syncStates.markError(mailbox.id, "sync_failed", deps.now);
-		return { ok: false, code: "sync_failed" };
+		return finishOAuthSyncFailure(deps, mailbox, error, classifyGmailFailure);
 	}
 }
