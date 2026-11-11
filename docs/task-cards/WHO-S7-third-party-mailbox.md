@@ -23,7 +23,7 @@
 3. 滥用阈值：复用 `SendGate` / `AbuseMonitor`，但**按 kind 区分**——自有域沿用现值，第三方按身份约 100 封/天。
 4. 同步频率与回填：Cron **每 5 分钟**增量；回填最近 30 天或 500 封；每轮每身份最多 20 封；失败重试 3 次。
 5. KEK 轮换：**90 天一轮，旧版本并存 30 天**；泄漏事件走强制轮换 runbook。
-6. 凭据加密：AES-256-GCM 信封加密，每账号 DEK + Worker secret `MAIL_CREDENTIAL_KEK`；只持久化长期凭据；AAD 绑定 `account_id|provider|mailbox_id|key_version`；撤销用 crypto-shredding。
+6. 凭据加密：AES-256-GCM 信封加密，每账号 DEK + Worker secret `MAIL_CREDENTIAL_KEK`；只持久化长期凭据；AAD 绑定 `account_id|provider|mailbox_id|dek_id|credential_type`（不绑定随轮换变化的 `key_version`）；撤销用 crypto-shredding。
 
 ## Goal
 
@@ -41,8 +41,8 @@
 - **S7b 凭据托管（已裁决：信封加密，不引入外部 KMS）**：
   - AES-256-GCM + WebCrypto；每账号随机 DEK（32 字节），用 Worker secret `MAIL_CREDENTIAL_KEK`（32 字节，base64）包裹后存 D1。
   - OAuth 型只持久化 refresh token；access token 每次按需换取、仅驻内存，不落库、不缓存到 R2/KV。自填型持久化用户密码（明文密码不可撤销，只能由用户在 provider 侧改密，此风险见 S7f）。
-  - 密文 AAD 绑定 `account_id|provider|mailbox_id|key_version`，防止密文被平移到其他账号或身份上解密。
-  - `provider_credentials` 存 `key_id`、`wrapped_dek`、`ciphertext`、`nonce`、`key_version`、`provider`、`scope`、`status` 与时间戳；不存任何明文或「先加密再解不开」的兜底值。
+  - 密文 AAD 绑定 `account_id|provider|mailbox_id|dek_id|credential_type`，防止密文被平移到其他账号或身份上解密；AAD 不含 `key_version`，否则 KEK 轮换会让旧密文不可解。
+  - `provider_credentials` 存 `dek_id`、`wrapped_dek`、`ciphertext`、`nonce`、`key_version`、`provider`、`scope`、`status` 与时间戳；不存任何明文或「先加密再解不开」的兜底值。
   - 撤销 = 删除 wrapped DEK 与密文（crypto-shredding）；轮换 = 新 KEK 版本与旧版并存，Cron 惰性重包裹，30 天后下线旧版本。
   - 解密失败一律 fail-closed：返回固定码、停用该身份，不重试、不降级、不回退明文。
   - 不选 Cloudflare Secrets Store（账户级、非按用户）；不选外部 KMS（首期引入跨云依赖与每次解密的额外延迟，收益不足以抵消复杂度）。
@@ -54,8 +54,8 @@
   - 通用：按 RFC `Message-ID` 去重，复用现有 thread/地址/正文/附件模型入库；与自有域收信共用配额、保留与审计；不得回写已读状态到 provider。
   - IMAP 无 IDLE（Workers 无法维持长连接），一律轮询。
 - **S7f 自填服务器的威胁模型（本卡前置门禁）**：
-  - **SSRF 防护**：只接受主机名，拒绝 IP 字面量；解析后拒绝私网（RFC1918）、回环、链路本地、CGNAT、云元数据地址与 Cloudflare 自有 IP；连接时用已解析并校验过的 IP，防止 DNS rebinding；端口白名单 IMAP 993/143、SMTP 465/587。
-  - **禁止明文**：SMTP 仅 465（隐式 TLS）或 587（STARTTLS），IMAP 仅 993（隐式 TLS）或 143（STARTTLS）；证书校验失败或 STARTTLS 不可用即失败，**绝不降级为明文**（否则密码泄漏）。Cloudflare Workers 出站 **25 端口被封禁**，实现前须实测确认端口可达性。
+  - **SSRF 防护**：只接受主机名，拒绝 IP 字面量与私有域名后缀；端口白名单 IMAP 993/143、SMTP 465/587。Workers socket 只接受主机名且不暴露对端 IP，因此「用已校验 IP 建连」不可实现：DNS rebinding 按契约 §5.1 作为已接受残余风险（R1），补偿控制是强制 TLS 主机名校验 + 端口白名单 + 无私有网络绑定；平台一旦提供对端 IP 或 VPC 绑定，必须启用 CIDR 校验。详见 [`CREDENTIAL-SECURITY-CONTRACT.md`](../engineering/CREDENTIAL-SECURITY-CONTRACT.md) §5.1。
+  - **禁止明文**：SMTP 仅 465（隐式 TLS）或 587（STARTTLS），IMAP 仅 993（隐式 TLS）或 143（STARTTLS）；证书校验失败或 STARTTLS 不可用即失败，**绝不降级为明文**（否则密码泄漏）。Cloudflare Workers 出站 **25 端口被封禁**；143/587 的 STARTTLS 可达性未实测，**实测确认前只实现 993/465**。
   - **开放中继**：SMTP 必须 `AUTH`，不实现无认证投递；不实现「用本服务凭据代发他人域名」的中继语义。
   - **扫描防护**：连通性测试按账号限流，避免被当作端口扫描器；失败码不区分「拒绝连接」与「连上但握手失败」以外的细节。
   - **凭据弱点**：自填密码不可撤销，撤销路径必须同时提供「删除凭据 + 停用身份」，并在 UI 层提示用户去 provider 侧改密。
@@ -76,10 +76,13 @@
 4. 撤销授权后发信返回固定失败码，不重试、不落 receipt、不再调用 provider。
 5. 收信同步：三类 provider 各真实拉取至少一封入库，正文/附件/线程与自有域邮件同构；重复同步不产生重复行。
 6. 游标失效回退（Gmail `historyId` 过期、IMAP `UIDVALIDITY` 变化）时仍幂等，不重复入库、不丢已入库数据。
-7. **SSRF 负例**：指向私网、回环、云元数据地址与 Cloudflare IP 的配置被拒绝，且未发起任何连接。
+7. **SSRF 负例**：以 IP 字面量、私有域名后缀（`localhost`/`.local`/`.internal`）或畸形主机名指向内网的配置被拒绝，且未发起任何连接；解析型私网目标因无私有网络绑定不可达，属契约 §5.1 的已接受风险 R1。
 8. **明文负例**：仅提供明文端口或 STARTTLS 不可用的服务器被拒绝，凭据不外发。
 9. 单轮同步在 CPU 与子请求上限内完成；超限时留下可续跑的游标，不产生重复或半成品行。
 10. 自有域收信与发信回归不变（现有 integration 用例全绿）。
+11. 撤销顺序正确：provider revoke 调用时凭据仍可解密，删除后不可解且不再重试。
+12. 绑定/解绑缺少 S4 确认凭证时被拒绝；解绑后该身份的邮件行、附件行与 R2 对象为空，重复调用幂等。
+13. KEK 轮换后旧密文仍可解（AAD 不含 `key_version`），且批量重包裹有预算与积压指标。
 
 ## 依赖与阻塞
 
