@@ -1,10 +1,22 @@
+import { createMailServices, type WhoYouEnv } from "../mail/config";
+import type { WhoYouConfirmationVerifier } from "../mail/confirmation";
+import {
+	createCloudflareMailSender,
+	createResendMailSender,
+	type MailSender,
+} from "../mail/send";
 import { createCloudAuthVerifier, type WhoYouTokenVerifier } from "./auth";
-import { resolveMcpConfig, type McpEnv } from "./config";
+import { createCloudAuthConfirmationVerifier } from "./confirmation";
+import { WHOYOU_SERVICE_AUDIENCE, resolveMcpConfig } from "./config";
 import { createWhoYouMcp, type WhoYouMcpRuntime } from "./server";
 
 export type McpRuntimeOptions = {
 	/** Test-only injection; the deployed entry never supplies this. */
 	verifier?: WhoYouTokenVerifier;
+	/** Test-only injection for the draft-bound send credential. */
+	confirmationVerifier?: WhoYouConfirmationVerifier;
+	/** Test-only injection; `null` proves the no-binding path. */
+	sender?: MailSender | null;
 };
 
 export type McpRuntimeResult =
@@ -36,11 +48,14 @@ const runtimeCacheKey = (config: {
  * deterministic verifier through their own worker entry, not through env.
  */
 export function createWhoYouRuntime(
-	env: McpEnv,
+	env: WhoYouEnv,
 	options: McpRuntimeOptions = {},
 ): McpRuntimeResult {
 	const resolved = resolveMcpConfig(env);
 	if (!resolved.ok) return resolved;
+
+	const mail = createMailServices(env);
+	if (!mail.ok) return mail;
 
 	const { config } = resolved;
 	const verifier =
@@ -52,8 +67,35 @@ export function createWhoYouRuntime(
 			consumerClaim: config.consumerClaim,
 		});
 
-	if (options.verifier) {
-		return { ok: true, runtime: createWhoYouMcp(config, verifier) };
+	// A send confirmation is always minted for the dedicated Who You audience,
+	// independent of whether MCP_AUDIENCE is that label or the exact /mcp URL.
+	const confirmations =
+		options.confirmationVerifier ??
+		createCloudAuthConfirmationVerifier({
+			issuer: config.tokenIssuer,
+			audience: WHOYOU_SERVICE_AUDIENCE,
+			jwksUrl: config.jwksUrl,
+		});
+
+	// Resend is preferred: it authenticates by SPF/DKIM only, so the receiving
+	// MX can stay with Cloudflare Email Routing on the same domain.
+	const sender =
+		options.sender !== undefined
+			? options.sender
+			: createResendMailSender(env.MAIL_RESEND_API_KEY) ??
+				createCloudflareMailSender(env.MAIL_EMAIL_SEND);
+
+	const tools = { confirmations, sender };
+
+	const injected =
+		options.verifier !== undefined ||
+		options.confirmationVerifier !== undefined ||
+		options.sender !== undefined;
+	if (injected) {
+		return {
+			ok: true,
+			runtime: createWhoYouMcp(config, verifier, mail.services, tools),
+		};
 	}
 
 	// The deployed Worker reuses one runtime per isolate and configuration set;
@@ -69,7 +111,7 @@ export function createWhoYouRuntime(
 
 	const result: McpRuntimeResult = {
 		ok: true,
-		runtime: createWhoYouMcp(config, verifier),
+		runtime: createWhoYouMcp(config, verifier, mail.services, tools),
 	};
 	byKey.set(key, result);
 	return result;

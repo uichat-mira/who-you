@@ -18,6 +18,43 @@ const FIXTURE_BINDINGS = {
 	MCP_REQUIRED_SCOPES: MCP_TEST_SCOPE,
 };
 
+const MAIL_TOOL_NAMES = [
+	"whoyou_whoami",
+	"whoyou_mailbox_get",
+	"whoyou_mail_search",
+	"whoyou_mail_thread_get",
+	"whoyou_mail_message_get",
+	"whoyou_mail_attachment_get",
+	"whoyou_mail_flag_set",
+	"whoyou_mail_draft_create",
+	"whoyou_mail_draft_update",
+	"whoyou_mail_draft_discard",
+	"whoyou_mail_draft_get",
+	"whoyou_mail_draft_list",
+	"whoyou_mail_send",
+	"whoyou_mail_export",
+	"whoyou_mail_message_delete",
+	"whoyou_mail_mailbox_delete",
+];
+
+const READ_ONLY_TOOL_NAMES = new Set([
+	"whoyou_whoami",
+	"whoyou_mailbox_get",
+	"whoyou_mail_search",
+	"whoyou_mail_thread_get",
+	"whoyou_mail_message_get",
+	"whoyou_mail_attachment_get",
+	"whoyou_mail_draft_get",
+	"whoyou_mail_draft_list",
+]);
+
+const DESTRUCTIVE_TOOL_NAMES = new Set([
+	"whoyou_mail_draft_discard",
+	"whoyou_mail_send",
+	"whoyou_mail_message_delete",
+	"whoyou_mail_mailbox_delete",
+]);
+
 async function withWorker(scriptPath, bindings, run) {
 	const mf = new Miniflare({
 		modules: true,
@@ -25,6 +62,9 @@ async function withWorker(scriptPath, bindings, run) {
 		compatibilityDate: "2026-08-06",
 		cf: false,
 		bindings,
+		// S1 requires D1 + R2 for `/mcp`; absent storage must stay fail-closed.
+		d1Databases: ["DB"],
+		r2Buckets: ["MAIL_BUCKET"],
 	});
 	try {
 		await run({ mf });
@@ -65,10 +105,14 @@ test("a real workerd modern MCP client lists and calls the read-only whoami tool
 			assert.equal(transport.sessionId, undefined);
 
 			const listed = await client.listTools();
-			assert.deepEqual(listed.tools.map((tool) => tool.name), ["whoyou_whoami"]);
-			// Mailbox tools do not exist yet; the only tool is a pure identity read.
-			assert.equal(listed.tools[0].annotations?.readOnlyHint, true);
-			assert.equal(listed.tools[0].annotations?.destructiveHint, false);
+			assert.deepEqual(listed.tools.map((tool) => tool.name), MAIL_TOOL_NAMES);
+			// Read tools stay non-destructive; write/send tools must not claim read-only.
+			for (const tool of listed.tools) {
+				const readOnly = READ_ONLY_TOOL_NAMES.has(tool.name);
+				const destructive = DESTRUCTIVE_TOOL_NAMES.has(tool.name);
+				assert.equal(tool.annotations?.readOnlyHint, readOnly);
+				assert.equal(tool.annotations?.destructiveHint, destructive);
+			}
 
 			const whoami = await client.callTool({ name: "whoyou_whoami", arguments: {} });
 			assert.equal(whoami.isError, undefined);
@@ -101,7 +145,7 @@ test("real 2025-06-18 and 2025-11-25 initialize clients use the stateless legacy
 				assert.equal(client.getNegotiatedProtocolVersion(), version);
 				assert.equal(transport.sessionId, undefined);
 				const listed = await client.listTools();
-				assert.equal(listed.tools.length, 1);
+				assert.equal(listed.tools.length, MAIL_TOOL_NAMES.length);
 				const whoami = await client.callTool({ name: "whoyou_whoami", arguments: {} });
 				assert.equal(whoami.isError, undefined);
 				assert.equal(whoami.structuredContent.consumerId, "consumer-2");
@@ -140,7 +184,7 @@ test("modern raw requests carry no session id and reject a missing Mcp-Method he
 		});
 		assert.equal(ok.status, 200);
 		assert.equal(ok.headers.get("mcp-session-id"), null);
-		assert.equal((await ok.json()).result.tools.length, 1);
+		assert.equal((await ok.json()).result.tools.length, MAIL_TOOL_NAMES.length);
 
 		const missingHeaders = { ...headers };
 		delete missingHeaders["Mcp-Method"];

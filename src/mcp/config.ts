@@ -10,6 +10,10 @@ export const MCP_RESOURCE_PATH = "/mcp";
 export const MCP_METADATA_PATH = "/.well-known/oauth-protected-resource/mcp";
 /** Read-only scope required by the global `/mcp` bearer gate. */
 export const WHOYOU_REQUIRED_SCOPE = "whoyou.read";
+/** Draft lifecycle write authority; never implied by read. */
+export const WHOYOU_MAIL_WRITE_SCOPE = "whoyou.mail.write";
+/** Send authority carried only by a draft-bound confirmation credential. */
+export const WHOYOU_MAIL_SEND_SCOPE = "whoyou.mail.send";
 /**
  * Planned local-ledger write scope. It is not issued or enforced by this slice;
  * M1 has no ledger tool yet (see docs/product-design.md §6.2).

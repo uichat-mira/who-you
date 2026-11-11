@@ -61,6 +61,8 @@ async function withDeployedWorker(run) {
 		compatibilityDate: "2026-08-06",
 		cf: false,
 		bindings: BINDINGS,
+		d1Databases: ["DB"],
+		r2Buckets: ["MAIL_BUCKET"],
 		outboundService: async (request) => {
 			if (request.url === JWKS_URL) {
 				jwksHits += 1;
