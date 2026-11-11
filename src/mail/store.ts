@@ -1,6 +1,3 @@
-import { mailboxAddress, normalizeLocalPart } from "./address";
-import { sha256Hex } from "./hash";
-
 export type MailboxStatus = "active" | "disabled";
 
 export type MailboxRecord = {
@@ -89,7 +86,11 @@ export type ExportRecord = {
 	createdAt: number;
 };
 
-export type AuditAction = "export" | "delete_message" | "delete_mailbox";
+export type AuditAction =
+	| "export"
+	| "delete_message"
+	| "delete_mailbox"
+	| "provision_mailbox";
 
 export type NewAuditEntry = {
 	id: string;
@@ -238,10 +239,6 @@ export type SearchFilters = {
 	limit: number;
 	cursor?: { receivedAt: number; id: string };
 };
-
-export type ProvisionResult =
-	| { ok: true; mailbox: MailboxRecord; created: boolean }
-	| { ok: false; reason: "invalid_local_part" | "reserved_local_part" | "mailbox_exists" | "address_conflict" };
 
 const objectPrefix = (accountId: string, mailboxId: string, messageId: string): string =>
 	`accounts/${encodeURIComponent(accountId)}/mailboxes/${encodeURIComponent(mailboxId)}/messages/${messageId}`;
@@ -1285,72 +1282,8 @@ export class MailRepository {
 }
 
 /**
- * Idempotent S1 address provisioning. The account-creation caller does not
- * exist yet; the Cloud Auth account-provisioning contract is a separate task.
- * Re-provisioning the same account and address returns the existing row.
+ * S1 address provisioning used to live here. S6 owns it now: the address is
+ * derived from the Cloud Auth username (or supplied by the user) and a collision
+ * is reported instead of retried with a suffix. See `./provision.ts`.
  */
-export async function provisionMailbox(
-	repository: MailRepository,
-	options: {
-		accountId: string;
-		localPart: string;
-		domain: string;
-		quotaBytes: number;
-		now: number;
-	},
-): Promise<ProvisionResult> {
-	const normalized = normalizeLocalPart(options.localPart);
-	if (!normalized.ok) return { ok: false, reason: normalized.reason };
 
-	const existing = await repository.findMailboxByAccount(options.accountId);
-	if (existing) {
-		return existing.address === mailboxAddress(normalized.localPart, options.domain)
-			? { ok: true, mailbox: existing, created: false }
-			: { ok: false, reason: "mailbox_exists" };
-	}
-
-	const base = normalized.localPart;
-	for (let attempt = 0; attempt < 8; attempt += 1) {
-		const candidate =
-			attempt === 0
-				? base
-				: `${base.slice(0, 27)}-${(await sha256Hex(`${options.accountId}:${attempt}`)).slice(0, 4)}`;
-		const id = `mbx_${(await sha256Hex(`${options.accountId}\n${candidate}`)).slice(0, 32)}`;
-		const address = mailboxAddress(candidate, options.domain);
-		const inserted = await repository.insertMailbox({
-			id,
-			accountId: options.accountId,
-			address,
-			localPart: candidate,
-			quotaBytes: options.quotaBytes,
-			now: options.now,
-		});
-		if (inserted) {
-			return {
-				ok: true,
-				created: true,
-				mailbox: {
-					id,
-					accountId: options.accountId,
-					address,
-					localPart: candidate,
-					status: "active",
-					quotaBytes: options.quotaBytes,
-					bytesUsed: 0,
-					messageCount: 0,
-					quarantineCount: 0,
-					sendPausedAt: null,
-					sendPausedReason: null,
-					createdAt: options.now,
-				},
-			};
-		}
-		const raced = await repository.findMailboxByAccount(options.accountId);
-		if (raced) {
-			return raced.address === address
-				? { ok: true, mailbox: raced, created: false }
-				: { ok: false, reason: "mailbox_exists" };
-		}
-	}
-	return { ok: false, reason: "address_conflict" };
-}
