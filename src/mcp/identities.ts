@@ -8,6 +8,7 @@ import {
 	listIdentities,
 	unlinkMailbox,
 } from "../mail/identity";
+import { startMicrosoftLink } from "../mail/microsoft-link";
 import type { MailboxRecord } from "../mail/store";
 import type { WhoYouPrincipal } from "./auth";
 import { failure, requireWriteScope, success, type ToolResult } from "./mail";
@@ -84,8 +85,8 @@ const verifyIdentityConfirmation = async (
 };
 
 /**
- * Identity management surface (S7c). Tokens never appear in output; the link
- * tool returns only the provider authorization URL the user must open.
+ * Identity management surface (S7c/S7d). Tokens never appear in output; the
+ * link tool returns only the provider authorization URL the user must open.
  */
 export function registerIdentityTools(
 	server: McpServer,
@@ -126,11 +127,11 @@ export function registerIdentityTools(
 	server.registerTool(
 		MAILBOX_LINK_TOOL,
 		{
-			title: "Who You link a Gmail identity",
+			title: "Who You link a third-party identity",
 			description:
-				"Starts linking a Gmail mailbox with OAuth + PKCE. Requires an identity confirmation credential bound to action=link and provider=gmail. Returns a Google authorization URL that the user must open; the refresh token is stored only after the provider callback succeeds. Never share the URL.",
+				"Starts linking a Gmail or Microsoft mailbox with OAuth + PKCE. Requires an identity confirmation credential bound to action=link and the same provider. Returns a provider authorization URL that the user must open; the refresh token is stored only after the provider callback succeeds. Never share the URL.",
 			inputSchema: z.object({
-				provider: z.literal("gmail"),
+				provider: z.enum(["gmail", "microsoft"]),
 				confirmationCredential: z.string().trim().min(1).max(8192),
 			}),
 			annotations: REVERSIBLE_WRITE,
@@ -138,10 +139,25 @@ export function registerIdentityTools(
 		async (args) => {
 			const denied = requireWriteScope(principal);
 			if (denied) return denied;
-			if (!services.oauth || !services.gmailRedirectUri || !services.credentialKeys) {
+			if (!services.credentialKeys) {
 				return failure(
 					"provider_not_configured",
-					"Gmail OAuth or the credential vault is not configured on this deployment.",
+					"The credential vault is not configured on this deployment.",
+				);
+			}
+			if (args.provider === "gmail" && (!services.oauth || !services.gmailRedirectUri)) {
+				return failure(
+					"provider_not_configured",
+					"Gmail OAuth is not configured on this deployment.",
+				);
+			}
+			if (
+				args.provider === "microsoft" &&
+				(!services.microsoftOauth || !services.microsoftRedirectUri)
+			) {
+				return failure(
+					"provider_not_configured",
+					"Microsoft OAuth is not configured on this deployment.",
 				);
 			}
 
@@ -177,18 +193,46 @@ export function registerIdentityTools(
 				);
 			}
 
-			const started = await startGmailLink(
-				{
-					states: services.oauthStates,
-					oauth: services.oauth,
-					redirectUri: services.gmailRedirectUri,
-				},
+			if (args.provider === "gmail") {
+				const oauth = services.oauth;
+				const redirectUri = services.gmailRedirectUri;
+				if (!oauth || !redirectUri) {
+					return failure(
+						"provider_not_configured",
+						"Gmail OAuth is not configured on this deployment.",
+					);
+				}
+				const started = await startGmailLink(
+					{ states: services.oauthStates, oauth, redirectUri },
+					{ accountId, now: Date.now() },
+				);
+				return success(
+					`Open this URL to authorize Gmail: ${started.authorizationUrl}\n\nThis link expires at ${new Date(started.expiresAt).toISOString()} and works once.`,
+					{
+						provider: "gmail",
+						authorizationUrl: started.authorizationUrl,
+						state: started.state,
+						expiresAt: started.expiresAt,
+					},
+				);
+			}
+
+			const oauth = services.microsoftOauth;
+			const redirectUri = services.microsoftRedirectUri;
+			if (!oauth || !redirectUri) {
+				return failure(
+					"provider_not_configured",
+					"Microsoft OAuth is not configured on this deployment.",
+				);
+			}
+			const started = await startMicrosoftLink(
+				{ states: services.oauthStates, oauth, redirectUri },
 				{ accountId, now: Date.now() },
 			);
 			return success(
-				`Open this URL to authorize Gmail: ${started.authorizationUrl}\n\nThis link expires at ${new Date(started.expiresAt).toISOString()} and works once.`,
+				`Open this URL to authorize Microsoft: ${started.authorizationUrl}\n\nThis link expires at ${new Date(started.expiresAt).toISOString()} and works once.`,
 				{
-					provider: "gmail",
+					provider: "microsoft",
 					authorizationUrl: started.authorizationUrl,
 					state: started.state,
 					expiresAt: started.expiresAt,

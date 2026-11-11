@@ -4,13 +4,15 @@ import type {
 	CredentialStatus,
 } from "./credentials";
 import { GmailApiError, type GmailClient } from "./gmail-client";
+import { encodeMimeBase64, GraphApiError, type GraphClient } from "./microsoft-client";
 import { OAuthProviderError, type GmailOAuthClient } from "./oauth-client";
+import type { MicrosoftOAuthClient } from "./microsoft-oauth";
 import { buildRfc822Message, encodeRawMessage } from "./rfc822";
 import { MailSendError, type MailSender, type OutboundMail, type SendIdentity } from "./send";
 import type { MailboxRecord, MailRepository } from "./store";
 
 /**
- * Identity management and outbound routing (S7c).
+ * Identity management and outbound routing (S7c/S7d).
  *
  * A draft keeps its mailbox; the router picks the provider adapter for that
  * mailbox and leaves the own-domain Resend / `send_email` path untouched.
@@ -52,6 +54,9 @@ export type UnlinkDependencies = {
 /**
  * Contract §8.2/§8.3 order: decrypt, best-effort provider revoke, unconditional
  * crypto-shredding, then objects and rows. Repeating the call is a no-op.
+ *
+ * Only Google exposes a token revocation endpoint; Microsoft has none, so a
+ * Microsoft unlink goes straight to local shredding.
  */
 export async function unlinkMailbox(
 	deps: UnlinkDependencies,
@@ -60,7 +65,7 @@ export async function unlinkMailbox(
 	const mailbox = await deps.repository.findMailboxById(input.accountId, input.mailboxId);
 	if (!mailbox) return { ok: true, alreadyUnlinked: true };
 
-	if (mailbox.provider === "gmail" && deps.keys && deps.oauth) {
+	if (deps.keys) {
 		const credential = await deps.credentials.readActive({
 			accountId: input.accountId,
 			mailboxId: mailbox.id,
@@ -68,27 +73,29 @@ export async function unlinkMailbox(
 			keys: deps.keys,
 		});
 		if (credential.ok) {
-			// A failed revocation is recorded only as a sync error; local shredding
-			// must still happen so a leaked token cannot outlive the unlink.
-			const revoked = await deps.oauth.revoke({ token: credential.secret });
-			if (!revoked) {
-				console.log(
-					JSON.stringify({
-						event: "whoyou_credential_event",
-						outcome: "credential_revoke_unconfirmed",
-						provider: "gmail",
-						accountId: input.accountId,
-						mailboxId: mailbox.id,
-					}),
-				);
+			if (mailbox.provider === "gmail" && deps.oauth) {
+				// A failed revocation is recorded only as a sync error; local shredding
+				// must still happen so a leaked token cannot outlive the unlink.
+				const revoked = await deps.oauth.revoke({ token: credential.secret });
+				if (!revoked) {
+					console.log(
+						JSON.stringify({
+							event: "whoyou_credential_event",
+							outcome: "credential_revoke_unconfirmed",
+							provider: "gmail",
+							accountId: input.accountId,
+							mailboxId: mailbox.id,
+						}),
+					);
+				}
 			}
+			await deps.credentials.revoke({
+				accountId: input.accountId,
+				mailboxId: mailbox.id,
+				credentialType: "oauth_refresh",
+				now: input.now,
+			});
 		}
-		await deps.credentials.revoke({
-			accountId: input.accountId,
-			mailboxId: mailbox.id,
-			credentialType: "oauth_refresh",
-			now: input.now,
-		});
 	}
 
 	const keys = await deps.repository.listMailboxObjectKeys(mailbox.id);
@@ -114,12 +121,44 @@ export type RoutedMailSenderDependencies = {
 	keys: CredentialKeys | null;
 	oauth: GmailOAuthClient | null;
 	gmail: GmailClient | null;
+	microsoftOauth: MicrosoftOAuthClient | null;
+	microsoft: GraphClient | null;
 };
+
+type OAuthProviderName = "gmail" | "microsoft";
+
+type RefreshableOAuth = {
+	refresh(input: { refreshToken: string }): Promise<{ accessToken: string }>;
+};
+
+type OAuthTransport = {
+	send(accessToken: string, raw: string): Promise<{ id: string }>;
+};
+
+const providerLabel = (provider: OAuthProviderName): string =>
+	provider === "gmail" ? "Gmail" : "Microsoft";
+
+const gmailTransport = (gmail: GmailClient): OAuthTransport => ({
+	async send(accessToken, raw) {
+		const sent = await gmail.sendMessage(accessToken, { raw: encodeRawMessage(raw) });
+		return { id: sent.id };
+	},
+});
+
+const microsoftTransport = (microsoft: GraphClient): OAuthTransport => ({
+	async send(accessToken, raw) {
+		const sent = await microsoft.sendMessage(accessToken, {
+			rawBase64: encodeMimeBase64(raw),
+		});
+		return { id: sent.id };
+	},
+});
 
 const reauth = async (
 	deps: RoutedMailSenderDependencies,
 	identity: SendIdentity,
 	now: number,
+	provider: OAuthProviderName,
 ): Promise<never> => {
 	await deps.credentials.markReauth({
 		accountId: identity.accountId,
@@ -129,20 +168,95 @@ const reauth = async (
 	});
 	throw new MailSendError(
 		"provider_reauth_required",
-		"The Gmail authorization is no longer valid; the identity must be linked again before it can send.",
+		`The ${providerLabel(provider)} authorization is no longer valid; the identity must be linked again before it can send.`,
 	);
 };
+
+async function sendViaOAuth(
+	deps: RoutedMailSenderDependencies,
+	input: {
+		identity: SendIdentity;
+		provider: OAuthProviderName;
+		oauth: RefreshableOAuth;
+		transport: OAuthTransport;
+		keys: CredentialKeys;
+		message: OutboundMail;
+		now: number;
+	},
+): Promise<{ providerMessageId: string; provider?: string }> {
+	const { identity, provider, oauth, transport, message } = input;
+	const label = providerLabel(provider);
+
+	const credential = await deps.credentials.readActive({
+		accountId: identity.accountId,
+		mailboxId: identity.mailboxId,
+		credentialType: "oauth_refresh",
+		keys: input.keys,
+	});
+	if (!credential.ok) {
+		if (
+			credential.code === "credential_reauth_required" ||
+			credential.code === "credential_revoked"
+		) {
+			throw new MailSendError(
+				"provider_reauth_required",
+				`The ${label} authorization is no longer valid; the identity must be linked again before it can send.`,
+			);
+		}
+		if (credential.code === "credential_missing") {
+			throw new MailSendError(
+				"credential_missing",
+				`No stored ${label} credential exists for this identity.`,
+			);
+		}
+		throw new MailSendError(
+			"credential_unreadable",
+			`The stored ${label} credential cannot be decrypted; the identity is disabled.`,
+		);
+	}
+
+	let accessToken: string;
+	try {
+		const refreshed = await oauth.refresh({ refreshToken: credential.secret });
+		accessToken = refreshed.accessToken;
+	} catch (error) {
+		if (error instanceof OAuthProviderError && error.code === "invalid_grant") {
+			await reauth(deps, identity, input.now, provider);
+		}
+		throw new MailSendError(
+			"relay_unavailable",
+			`The ${label} token refresh failed; delivery is unknown and the confirmation is spent.`,
+		);
+	}
+
+	const raw = buildRfc822Message({ ...message, from: identity.address });
+	try {
+		const sent = await transport.send(accessToken, raw);
+		return { providerMessageId: sent.id, provider };
+	} catch (error) {
+		if (
+			(error instanceof GmailApiError || error instanceof GraphApiError) &&
+			error.code === "unauthorized"
+		) {
+			await reauth(deps, identity, input.now, provider);
+		}
+		throw new MailSendError(
+			"relay_unavailable",
+			`The ${label} provider rejected or failed the message; delivery is unknown and the confirmation is spent.`,
+		);
+	}
+}
 
 export function createRoutedMailSender(
 	deps: RoutedMailSenderDependencies,
 	now: () => number = Date.now,
 ): MailSender {
 	return {
-		async send(
-			message: OutboundMail,
-			identity?: SendIdentity,
-		): Promise<{ providerMessageId: string; provider?: string }> {
-			if (!identity || identity.provider !== "gmail") {
+		async send(message: OutboundMail, identity?: SendIdentity) {
+			if (
+				!identity ||
+				(identity.provider !== "gmail" && identity.provider !== "microsoft")
+			) {
 				if (!deps.fallback) {
 					throw new MailSendError(
 						"relay_unavailable",
@@ -152,70 +266,51 @@ export function createRoutedMailSender(
 				return deps.fallback.send(message);
 			}
 
-			if (!deps.keys || !deps.oauth || !deps.gmail) {
+			const keys = deps.keys;
+			if (!keys) {
 				throw new MailSendError(
 					"provider_not_configured",
-					"The Gmail provider or credential vault is not configured on this deployment.",
+					`The ${providerLabel(identity.provider)} provider or credential vault is not configured on this deployment.`,
 				);
 			}
 
-			const credential = await deps.credentials.readActive({
-				accountId: identity.accountId,
-				mailboxId: identity.mailboxId,
-				credentialType: "oauth_refresh",
-				keys: deps.keys,
-			});
-			if (!credential.ok) {
-				if (
-					credential.code === "credential_reauth_required" ||
-					credential.code === "credential_revoked"
-				) {
+			if (identity.provider === "gmail") {
+				const oauth = deps.oauth;
+				const gmail = deps.gmail;
+				if (!oauth || !gmail) {
 					throw new MailSendError(
-						"provider_reauth_required",
-						"The Gmail authorization is no longer valid; the identity must be linked again before it can send.",
+						"provider_not_configured",
+						"The Gmail provider or credential vault is not configured on this deployment.",
 					);
 				}
-				if (credential.code === "credential_missing") {
-					throw new MailSendError(
-						"credential_missing",
-						"No stored Gmail credential exists for this identity.",
-					);
-				}
-				throw new MailSendError(
-					"credential_unreadable",
-					"The stored Gmail credential cannot be decrypted; the identity is disabled.",
-				);
-			}
-
-			let accessToken: string;
-			try {
-				const refreshed = await deps.oauth.refresh({ refreshToken: credential.secret });
-				accessToken = refreshed.accessToken;
-			} catch (error) {
-				if (error instanceof OAuthProviderError && error.code === "invalid_grant") {
-					await reauth(deps, identity, now());
-				}
-				throw new MailSendError(
-					"relay_unavailable",
-					"The Gmail token refresh failed; delivery is unknown and the confirmation is spent.",
-				);
-			}
-
-			const raw = buildRfc822Message({ ...message, from: identity.address });
-			try {
-				const sent = await deps.gmail.sendMessage(accessToken, {
-					raw: encodeRawMessage(raw),
+				return sendViaOAuth(deps, {
+					identity,
+					provider: "gmail",
+					oauth,
+					transport: gmailTransport(gmail),
+					keys,
+					message,
+					now: now(),
 				});
-				return { providerMessageId: sent.id, provider: "gmail" };
-			} catch (error) {
-				if (error instanceof GmailApiError && error.code === "unauthorized") {
-					await reauth(deps, identity, now());
-				}
+			}
+
+			const oauth = deps.microsoftOauth;
+			const microsoft = deps.microsoft;
+			if (!oauth || !microsoft) {
 				throw new MailSendError(
-					"relay_unavailable",
-					"The Gmail provider rejected or failed the message; delivery is unknown and the confirmation is spent.",
+					"provider_not_configured",
+					"The Microsoft provider or credential vault is not configured on this deployment.",
 				);
 			}
+			return sendViaOAuth(deps, {
+				identity,
+				provider: "microsoft",
+				oauth,
+				transport: microsoftTransport(microsoft),
+				keys,
+				message,
+				now: now(),
+			});
 		},
 	};
 }

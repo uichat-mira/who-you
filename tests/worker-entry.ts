@@ -1,5 +1,10 @@
 import worker from "../src/index";
-import { createMailServices, resolveCredentialKeys, type WhoYouEnv } from "../src/mail/config";
+import {
+	createMailServices,
+	resolveCredentialKeys,
+	type MailServices,
+	type WhoYouEnv,
+} from "../src/mail/config";
 import { CredentialRepository, type CredentialKeys } from "../src/mail/credentials";
 import { parseKek } from "../src/mail/credential-crypto";
 import { MAIL_DOWNLOAD_PATH, handleSignedDownload } from "../src/mail/download";
@@ -10,8 +15,14 @@ import { GMAIL_SCOPES, OAuthProviderError, type GmailOAuthClient } from "../src/
 import { GmailApiError, type GmailClient } from "../src/mail/gmail-client";
 import { completeGmailLink } from "../src/mail/gmail-link";
 import { syncGmailMailbox } from "../src/mail/gmail-sync";
+import { GraphApiError, type GraphClient } from "../src/mail/microsoft-client";
+import { completeMicrosoftLink } from "../src/mail/microsoft-link";
+import { syncMicrosoftMailbox } from "../src/mail/microsoft-sync";
+import { MICROSOFT_SCOPES, type MicrosoftOAuthClient } from "../src/mail/microsoft-oauth";
+import { encodeBase64Url } from "../src/mail/base64url";
 import { createRoutedMailSender } from "../src/mail/identity";
-import { MailSendError } from "../src/mail/send";
+import { MailSendError, type MailSender } from "../src/mail/send";
+import type { MailboxRecord } from "../src/mail/store";
 import {
 	CLOUD_AUTH_TOKEN_ISSUER,
 	MCP_METADATA_PATH,
@@ -159,10 +170,254 @@ function createFixtureOAuth(options: { invalidGrant?: boolean } = {}): GmailOAut
 	};
 }
 
+const FIXTURE_MICROSOFT_RAW = [
+	"From: Fixture Sender <sender@example.net>",
+	"To: linked@outlook.com",
+	"Subject: Microsoft fixture message",
+	"Message-ID: <microsoft-fixture-1@example.net>",
+	"Date: Mon, 10 Nov 2025 10:00:00 +0000",
+	"MIME-Version: 1.0",
+	'Content-Type: text/plain; charset="utf-8"',
+	"",
+	"Fixture body for the Microsoft sync path.",
+	"",
+].join("\r\n");
+
+const fixtureMicrosoftRawBytes = (): Uint8Array =>
+	new TextEncoder().encode(FIXTURE_MICROSOFT_RAW);
+
+/** Unsigned ID token; the address claim is all the link path reads. */
+const fixtureMicrosoftIdToken = (): string =>
+	[
+		encodeBase64Url(JSON.stringify({ alg: "none", typ: "JWT" })),
+		encodeBase64Url(JSON.stringify({ preferred_username: "linked@outlook.com" })),
+		"fixture-signature",
+	].join(".");
+
+type MicrosoftScript = "ok" | "empty" | "cursor_expired" | "unauthorized";
+
+/** OAuth double: returns fixed Microsoft tokens without contacting the authority. */
+function createFixtureMicrosoftOAuth(
+	options: { invalidGrant?: boolean } = {},
+): MicrosoftOAuthClient {
+	return {
+		authorizationUrl({ state, codeChallenge }) {
+			const url = new URL("https://login.microsoftonline.com/common/oauth2/v2.0/authorize");
+			url.searchParams.set("state", state);
+			url.searchParams.set("code_challenge", codeChallenge);
+			return url.href;
+		},
+		async exchangeCode() {
+			if (options.invalidGrant) throw new OAuthProviderError("invalid_grant");
+			return {
+				accessToken: "fixture-ms-access-token",
+				refreshToken: "fixture-ms-refresh-token",
+				scope: MICROSOFT_SCOPES.join(" "),
+				expiresIn: 3600,
+				idToken: fixtureMicrosoftIdToken(),
+			};
+		},
+		async refresh() {
+			if (options.invalidGrant) throw new OAuthProviderError("invalid_grant");
+			return {
+				accessToken: "fixture-ms-access-token",
+				refreshToken: null,
+				scope: MICROSOFT_SCOPES.join(" "),
+				expiresIn: 3600,
+				idToken: null,
+			};
+		},
+	};
+}
+
+const FIXTURE_DELTA_LINK =
+	"https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages/delta?$deltatoken=1";
+
+/** Deterministic Graph double; it never touches the network. */
+function createScriptedMicrosoft(script: MicrosoftScript): GraphClient {
+	const messageId = "ms-msg-1";
+	const failUnauthorized = (): never => {
+		throw new GraphApiError("unauthorized", 401);
+	};
+	return {
+		async sendMessage() {
+			if (script === "unauthorized") failUnauthorized();
+			return { id: "ms-sent-1" };
+		},
+		async getMessageMime() {
+			if (script === "unauthorized") failUnauthorized();
+			return { id: messageId, raw: fixtureMicrosoftRawBytes() };
+		},
+		async listInboxDelta() {
+			if (script === "unauthorized") failUnauthorized();
+			if (script === "cursor_expired") throw new GraphApiError("cursor_expired", 410);
+			if (script === "empty") {
+				return { messages: [], nextLink: null, deltaLink: FIXTURE_DELTA_LINK };
+			}
+			return {
+				messages: [{ id: messageId, receivedAt: 1_795_000_000_000 }],
+				nextLink: null,
+				deltaLink: FIXTURE_DELTA_LINK,
+			};
+		},
+	};
+}
+
 type TestEnv = WhoYouEnv & {
 	/** Test-only switch for the injected outbound fake. */
-	MAIL_SEND_MODE?: "ok" | "failing" | "missing" | "gmail";
+	MAIL_SEND_MODE?: "ok" | "failing" | "missing" | "gmail" | "microsoft";
 };
+
+type CallbackInput = { code: string; state: string; invalidGrant: boolean };
+
+const methodNotAllowed = (): Response =>
+	Response.json({ error: "method_not_allowed" }, { status: 405 });
+
+async function handleCallbackRoute(
+	request: Request,
+	env: TestEnv,
+	complete: (
+		services: MailServices,
+		keys: CredentialKeys,
+		input: CallbackInput,
+	) => Promise<unknown>,
+): Promise<Response> {
+	if (request.method !== "POST") return methodNotAllowed();
+	const input = (await request.json()) as {
+		code?: string;
+		state?: string;
+		invalidGrant?: boolean;
+	};
+	const resolved = createMailServices(env);
+	if (!resolved.ok || !resolved.services.credentialKeys) {
+		return Response.json({ error: "mail_not_configured" }, { status: 503 });
+	}
+	if (!input.code || !input.state) {
+		return Response.json({ error: "invalid_request" }, { status: 400 });
+	}
+	const result = await complete(resolved.services, resolved.services.credentialKeys, {
+		code: input.code,
+		state: input.state,
+		invalidGrant: Boolean(input.invalidGrant),
+	});
+	return Response.json(result);
+}
+
+/** Shared prelude for the sync and send routes: auth, body and mailbox. */
+async function handleMailboxRoute(
+	request: Request,
+	env: TestEnv,
+	run: (services: MailServices, keys: CredentialKeys, mailbox: MailboxRecord, body: Record<string, unknown>) => Promise<Response>,
+): Promise<Response> {
+	if (request.method !== "POST") return methodNotAllowed();
+	const body = (await request.json()) as Record<string, unknown>;
+	const resolved = createMailServices(env);
+	if (!resolved.ok || !resolved.services.credentialKeys) {
+		return Response.json({ error: "mail_not_configured" }, { status: 503 });
+	}
+	const accountId = typeof body.accountId === "string" ? body.accountId : "";
+	const mailboxId = typeof body.mailboxId === "string" ? body.mailboxId : "";
+	if (!accountId || !mailboxId) {
+		return Response.json({ error: "invalid_request" }, { status: 400 });
+	}
+	const mailbox = await resolved.services.repository.findMailboxById(accountId, mailboxId);
+	if (!mailbox) return Response.json({ error: "mailbox_not_found" }, { status: 404 });
+	return run(resolved.services, resolved.services.credentialKeys, mailbox, body);
+}
+
+const stringField = (body: Record<string, unknown>, key: string): string =>
+	typeof body[key] === "string" ? (body[key] as string) : "";
+
+async function handleSendRoute(
+	request: Request,
+	env: TestEnv,
+	config: {
+		provider: "gmail" | "microsoft";
+		subject: string;
+		buildSender: (
+			services: MailServices,
+			keys: CredentialKeys,
+			input: { invalidGrant: boolean; script: string },
+		) => MailSender;
+	},
+): Promise<Response> {
+	return handleMailboxRoute(request, env, async (services, keys, mailbox, body) => {
+		const to = stringField(body, "to");
+		if (!to) return Response.json({ error: "invalid_request" }, { status: 400 });
+		const sender = config.buildSender(services, keys, {
+			invalidGrant: body.invalidGrant === true,
+			script: stringField(body, "script") || "ok",
+		});
+		try {
+			const sent = await sender.send(
+				{
+					from: mailbox.address,
+					to: [{ name: "", address: to }],
+					cc: [],
+					bcc: [],
+					subject: config.subject,
+					text: "Fixture body",
+					html: null,
+				},
+				{
+					accountId: mailbox.accountId,
+					mailboxId: mailbox.id,
+					address: mailbox.address,
+					provider: config.provider,
+				},
+			);
+			return Response.json(sent);
+		} catch (error) {
+			if (error instanceof MailSendError) {
+				return Response.json(
+					{ error: error.code },
+					{ status: error.code === "provider_reauth_required" ? 409 : 502 },
+				);
+			}
+			throw error;
+		}
+	});
+}
+
+async function handleSyncRoute(
+	request: Request,
+	env: TestEnv,
+	run: (services: MailServices, keys: CredentialKeys, mailbox: MailboxRecord, script: string) => Promise<unknown>,
+): Promise<Response> {
+	return handleMailboxRoute(request, env, async (services, keys, mailbox, body) => {
+		const script = stringField(body, "script") || "ok";
+		return Response.json(await run(services, keys, mailbox, script));
+	});
+}
+
+/** The routed sender the MCP runtime uses when `MAIL_SEND_MODE` selects one. */
+function buildRoutedSender(
+	services: MailServices,
+	keys: CredentialKeys,
+	provider: "gmail" | "microsoft",
+): MailSender {
+	return createRoutedMailSender(
+		provider === "gmail"
+			? {
+					fallback: null,
+					credentials: services.credentials,
+					keys,
+					oauth: createFixtureOAuth(),
+					gmail: createScriptedGmail("ok"),
+					microsoftOauth: null,
+					microsoft: null,
+				}
+			: {
+					fallback: null,
+					credentials: services.credentials,
+					keys,
+					oauth: null,
+					gmail: null,
+					microsoftOauth: createFixtureMicrosoftOAuth(),
+					microsoft: createScriptedMicrosoft("ok"),
+				},
+	);
+}
 
 export default {
 	async fetch(request: Request, env: TestEnv): Promise<Response> {
@@ -307,133 +562,112 @@ export default {
 		}
 
 		if (path === "/__gmail/callback") {
-			if (request.method !== "POST") {
-				return Response.json({ error: "method_not_allowed" }, { status: 405 });
-			}
-			const input = (await request.json()) as {
-				code?: string;
-				state?: string;
-				invalidGrant?: boolean;
-			};
-			const services = createMailServices(env);
-			if (!services.ok || !services.services.credentialKeys) {
-				return Response.json({ error: "mail_not_configured" }, { status: 503 });
-			}
-			if (!input.code || !input.state) {
-				return Response.json({ error: "invalid_request" }, { status: 400 });
-			}
-			const result = await completeGmailLink(
-				{
-					repository: services.services.repository,
-					credentials: services.services.credentials,
-					keys: services.services.credentialKeys,
-					states: services.services.oauthStates,
-					syncStates: services.services.syncStates,
-					oauth: createFixtureOAuth({ invalidGrant: input.invalidGrant }),
-					gmail: createScriptedGmail("ok"),
-					limits: services.services.limits,
-					now: Date.now(),
-				},
-				{ code: input.code, state: input.state },
+			return handleCallbackRoute(request, env, (services, keys, input) =>
+				completeGmailLink(
+					{
+						repository: services.repository,
+						credentials: services.credentials,
+						keys,
+						states: services.oauthStates,
+						syncStates: services.syncStates,
+						oauth: createFixtureOAuth({ invalidGrant: input.invalidGrant }),
+						gmail: createScriptedGmail("ok"),
+						limits: services.limits,
+						now: Date.now(),
+					},
+					input,
+				),
 			);
-			return Response.json(result);
 		}
 
 		if (path === "/__gmail/sync") {
-			if (request.method !== "POST") {
-				return Response.json({ error: "method_not_allowed" }, { status: 405 });
-			}
-			const input = (await request.json()) as {
-				accountId?: string;
-				mailboxId?: string;
-				script?: GmailScript;
-			};
-			const services = createMailServices(env);
-			if (!services.ok || !services.services.credentialKeys) {
-				return Response.json({ error: "mail_not_configured" }, { status: 503 });
-			}
-			if (!input.accountId || !input.mailboxId) {
-				return Response.json({ error: "invalid_request" }, { status: 400 });
-			}
-			const mailbox = await services.services.repository.findMailboxById(
-				input.accountId,
-				input.mailboxId,
+			return handleSyncRoute(request, env, (services, keys, mailbox, script) =>
+				syncGmailMailbox(
+					{
+						repository: services.repository,
+						limits: services.limits,
+						credentials: services.credentials,
+						keys,
+						oauth: createFixtureOAuth(),
+						gmail: createScriptedGmail(script as GmailScript),
+						syncStates: services.syncStates,
+						now: Date.now(),
+					},
+					mailbox,
+				),
 			);
-			if (!mailbox) return Response.json({ error: "mailbox_not_found" }, { status: 404 });
-			const result = await syncGmailMailbox(
-				{
-					repository: services.services.repository,
-					limits: services.services.limits,
-					credentials: services.services.credentials,
-					keys: services.services.credentialKeys,
-					oauth: createFixtureOAuth(),
-					gmail: createScriptedGmail(input.script ?? "ok"),
-					syncStates: services.services.syncStates,
-					now: Date.now(),
-				},
-				mailbox,
-			);
-			return Response.json(result);
 		}
 
 		if (path === "/__gmail/send") {
-			if (request.method !== "POST") {
-				return Response.json({ error: "method_not_allowed" }, { status: 405 });
-			}
-			const input = (await request.json()) as {
-				accountId?: string;
-				mailboxId?: string;
-				to?: string;
-				invalidGrant?: boolean;
-				script?: GmailScript;
-			};
-			const services = createMailServices(env);
-			if (!services.ok || !services.services.credentialKeys) {
-				return Response.json({ error: "mail_not_configured" }, { status: 503 });
-			}
-			if (!input.accountId || !input.mailboxId || !input.to) {
-				return Response.json({ error: "invalid_request" }, { status: 400 });
-			}
-			const mailbox = await services.services.repository.findMailboxById(
-				input.accountId,
-				input.mailboxId,
-			);
-			if (!mailbox) return Response.json({ error: "mailbox_not_found" }, { status: 404 });
-			const sender = createRoutedMailSender({
-				fallback: null,
-				credentials: services.services.credentials,
-				keys: services.services.credentialKeys,
-				oauth: createFixtureOAuth({ invalidGrant: input.invalidGrant }),
-				gmail: createScriptedGmail(input.script ?? "ok"),
+			return handleSendRoute(request, env, {
+				provider: "gmail",
+				subject: "Fixture Gmail send",
+				buildSender: (services, keys, input) =>
+					createRoutedMailSender({
+						fallback: null,
+						credentials: services.credentials,
+						keys,
+						oauth: createFixtureOAuth({ invalidGrant: input.invalidGrant }),
+						gmail: createScriptedGmail(input.script as GmailScript),
+						microsoftOauth: null,
+						microsoft: null,
+					}),
 			});
-			try {
-				const sent = await sender.send(
+		}
+
+		if (path === "/__microsoft/callback") {
+			return handleCallbackRoute(request, env, (services, keys, input) =>
+				completeMicrosoftLink(
 					{
-						from: mailbox.address,
-						to: [{ name: "", address: input.to }],
-						cc: [],
-						bcc: [],
-						subject: "Fixture Gmail send",
-						text: "Fixture body",
-						html: null,
+						repository: services.repository,
+						credentials: services.credentials,
+						keys,
+						states: services.oauthStates,
+						syncStates: services.syncStates,
+						oauth: createFixtureMicrosoftOAuth({ invalidGrant: input.invalidGrant }),
+						limits: services.limits,
+						now: Date.now(),
 					},
+					input,
+				),
+			);
+		}
+
+		if (path === "/__microsoft/sync") {
+			return handleSyncRoute(request, env, (services, keys, mailbox, script) =>
+				syncMicrosoftMailbox(
 					{
-						accountId: input.accountId,
-						mailboxId: mailbox.id,
-						address: mailbox.address,
-						provider: "gmail",
+						repository: services.repository,
+						limits: services.limits,
+						credentials: services.credentials,
+						keys,
+						oauth: createFixtureMicrosoftOAuth(),
+						microsoft: createScriptedMicrosoft(script as MicrosoftScript),
+						syncStates: services.syncStates,
+						now: Date.now(),
 					},
-				);
-				return Response.json(sent);
-			} catch (error) {
-				if (error instanceof MailSendError) {
-					return Response.json(
-						{ error: error.code },
-						{ status: error.code === "provider_reauth_required" ? 409 : 502 },
-					);
-				}
-				throw error;
-			}
+					mailbox,
+				),
+			);
+		}
+
+		if (path === "/__microsoft/send") {
+			return handleSendRoute(request, env, {
+				provider: "microsoft",
+				subject: "Fixture Microsoft send",
+				buildSender: (services, keys, input) =>
+					createRoutedMailSender({
+						fallback: null,
+						credentials: services.credentials,
+						keys,
+						oauth: null,
+						gmail: null,
+						microsoftOauth: createFixtureMicrosoftOAuth({
+							invalidGrant: input.invalidGrant,
+						}),
+						microsoft: createScriptedMicrosoft(input.script as MicrosoftScript),
+					}),
+			});
 		}
 
 		if (path === "/__retention") {
@@ -474,18 +708,19 @@ export default {
 			return Response.json({ error: "not_found" }, { status: 404 });
 		}
 		const mailServices = createMailServices(env);
+		const mode = env.MAIL_SEND_MODE;
 		const injectedSender =
-			env.MAIL_SEND_MODE === "gmail" && mailServices.ok && mailServices.services.credentialKeys
-				? createRoutedMailSender({
-						fallback: null,
-						credentials: mailServices.services.credentials,
-						keys: mailServices.services.credentialKeys,
-						oauth: createFixtureOAuth(),
-						gmail: createScriptedGmail("ok"),
-					})
-				: env.MAIL_SEND_MODE === "missing"
+			(mode === "gmail" || mode === "microsoft") &&
+			mailServices.ok &&
+			mailServices.services.credentialKeys
+				? buildRoutedSender(
+						mailServices.services,
+						mailServices.services.credentialKeys,
+						mode,
+					)
+				: mode === "missing"
 					? null
-					: createFakeMailSender({ failing: env.MAIL_SEND_MODE === "failing" });
+					: createFakeMailSender({ failing: mode === "failing" });
 		const resolved = createWhoYouRuntime(env, {
 			verifier: createFixtureVerifier({
 				issuer: CLOUD_AUTH_TOKEN_ISSUER,

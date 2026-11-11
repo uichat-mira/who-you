@@ -20,7 +20,7 @@ export default defineConfig({
 			MAIL_DOMAIN: bindings.text("tzt2026.xyz"),
 		},
 		// Daily: retention expiry, deliverability report.
-		// Every five minutes: third-party (Gmail) incremental sync only.
+		// Every five minutes: third-party (Gmail, Microsoft) incremental sync only.
 		triggers: [
 			triggers.scheduled({ schedule: "17 3 * * *" }),
 			triggers.scheduled({ schedule: "*/5 * * * *" }),

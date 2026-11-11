@@ -8,6 +8,8 @@ import {
 } from "./mail/download";
 import { handleGmailCallback, GMAIL_SYNC_CRON, runGmailSyncSweep } from "./mail/gmail-http";
 import { GMAIL_CALLBACK_PATH } from "./mail/gmail-link";
+import { handleMicrosoftCallback, runMicrosoftSyncSweep } from "./mail/microsoft-http";
+import { MICROSOFT_CALLBACK_PATH } from "./mail/microsoft-link";
 import { runRetentionSweep } from "./mail/retention";
 import { DELIVERY_WEBHOOK_PATH, handleDeliveryWebhook } from "./mail/webhook";
 import { MCP_METADATA_PATH, MCP_RESOURCE_PATH } from "./mcp/config";
@@ -27,6 +29,9 @@ export default {
 		// `state` plus PKCE verifier, never by an MCP bearer.
 		if (path === GMAIL_CALLBACK_PATH) {
 			return handleGmailCallback(request, env);
+		}
+		if (path === MICROSOFT_CALLBACK_PATH) {
+			return handleMicrosoftCallback(request, env);
 		}
 		// `/mcp` plus its RFC 9728 discovery document is the only agent-facing API.
 		// `/mail/download` is not an API for agents to call freely: it serves one
@@ -68,6 +73,7 @@ export default {
 	async scheduled(controller: ScheduledController, env: WhoYouEnv): Promise<void> {
 		if (controller.cron === GMAIL_SYNC_CRON) {
 			await runGmailSyncSweep(env);
+			await runMicrosoftSyncSweep(env);
 			return;
 		}
 		const services = createMailServices(env);

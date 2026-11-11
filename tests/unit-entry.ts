@@ -84,6 +84,33 @@ export {
 	hasRequiredGmailScope,
 } from "../src/mail/oauth-client";
 export { GmailApiError, createGmailClient } from "../src/mail/gmail-client";
+export {
+	GraphApiError,
+	GRAPH_API_BASE_URL,
+	GRAPH_DELTA_PAGE_SIZE,
+	createGraphClient,
+	encodeMimeBase64,
+} from "../src/mail/microsoft-client";
+export {
+	MICROSOFT_AUTHORITY_HOST,
+	MICROSOFT_OIDC_SCOPES,
+	MICROSOFT_READ_SCOPE,
+	MICROSOFT_SCOPES,
+	MICROSOFT_SEND_SCOPE,
+	addressFromMicrosoftIdToken,
+	buildMicrosoftEndpoints,
+	createMicrosoftOAuthClient,
+	hasRequiredMicrosoftScope,
+	isValidMicrosoftTenant,
+} from "../src/mail/microsoft-oauth";
+export {
+	MICROSOFT_BACKFILL_WINDOW_MS,
+	resolveMicrosoftOAuthConfig,
+} from "../src/mail/microsoft-link";
+export {
+	MICROSOFT_BACKFILL_MAX_MESSAGES,
+	MICROSOFT_SYNC_MAX_MESSAGES_PER_RUN,
+} from "../src/mail/microsoft-sync";
 export { buildRfc822Message, encodeRawMessage } from "../src/mail/rfc822";
 export { resolveGmailOAuthConfig } from "../src/mail/gmail-link";
 export { decodeBase64Url, encodeBase64Url } from "../src/mail/base64url";

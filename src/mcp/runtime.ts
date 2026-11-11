@@ -109,12 +109,14 @@ export function createWhoYouRuntime(
 		keys: mail.services.credentialKeys,
 		oauth: mail.services.oauth,
 		gmail: mail.services.gmail,
+		microsoftOauth: mail.services.microsoftOauth,
+		microsoft: mail.services.microsoft,
 	});
 
 	const sender =
 		options.sender !== undefined
 			? options.sender
-			: fallbackSender || mail.services.oauth
+			: fallbackSender || mail.services.oauth || mail.services.microsoftOauth
 				? routedSender
 				: null;
 
