@@ -26,6 +26,11 @@ export type WhoYouEnv = McpEnv &
 		/** Cloudflare Email Service binding; send is closed when it is absent. */
 		MAIL_EMAIL_SEND?: SendEmail;
 		/**
+		 * Resend API key. Preferred over `MAIL_EMAIL_SEND` when present; Resend
+		 * needs no MX change, so it coexists with Cloudflare Email Routing.
+		 */
+		MAIL_RESEND_API_KEY?: string;
+		/**
 		 * HMAC key for short-lived attachment/export links. Absent or shorter
 		 * than 32 characters closes the signed-download capability entirely.
 		 */

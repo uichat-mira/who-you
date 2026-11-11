@@ -1,6 +1,10 @@
 import { createMailServices, type WhoYouEnv } from "../mail/config";
 import type { WhoYouConfirmationVerifier } from "../mail/confirmation";
-import { createCloudflareMailSender, type MailSender } from "../mail/send";
+import {
+	createCloudflareMailSender,
+	createResendMailSender,
+	type MailSender,
+} from "../mail/send";
 import { createCloudAuthVerifier, type WhoYouTokenVerifier } from "./auth";
 import { createCloudAuthConfirmationVerifier } from "./confirmation";
 import { WHOYOU_SERVICE_AUDIENCE, resolveMcpConfig } from "./config";
@@ -73,10 +77,13 @@ export function createWhoYouRuntime(
 			jwksUrl: config.jwksUrl,
 		});
 
+	// Resend is preferred: it authenticates by SPF/DKIM only, so the receiving
+	// MX can stay with Cloudflare Email Routing on the same domain.
 	const sender =
 		options.sender !== undefined
 			? options.sender
-			: createCloudflareMailSender(env.MAIL_EMAIL_SEND);
+			: createResendMailSender(env.MAIL_RESEND_API_KEY) ??
+				createCloudflareMailSender(env.MAIL_EMAIL_SEND);
 
 	const tools = { confirmations, sender };
 
