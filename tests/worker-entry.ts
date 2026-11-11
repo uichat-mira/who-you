@@ -2,7 +2,7 @@ import worker from "../src/index";
 import { createMailServices, type WhoYouEnv } from "../src/mail/config";
 import { MAIL_DOWNLOAD_PATH, handleSignedDownload } from "../src/mail/download";
 import { runRetentionSweep } from "../src/mail/retention";
-import { provisionMailbox } from "../src/mail/store";
+import { provisionOwnMailbox } from "../src/mail/provision";
 import { DELIVERY_WEBHOOK_PATH } from "../src/mail/webhook";
 import {
 	CLOUD_AUTH_TOKEN_ISSUER,
@@ -99,17 +99,22 @@ export default {
 			if (request.method !== "POST") {
 				return Response.json({ error: "method_not_allowed" }, { status: 405 });
 			}
-			const input = (await request.json()) as { accountId?: string; localPart?: string };
-			if (!input.accountId || !input.localPart) {
+			const input = (await request.json()) as {
+				accountId?: string;
+				localPart?: string;
+				username?: string;
+			};
+			if (!input.accountId) {
 				return Response.json({ error: "invalid_request" }, { status: 400 });
 			}
 			const services = createMailServices(env);
 			if (!services.ok || !services.services.domain) {
 				return Response.json({ error: "mail_not_configured" }, { status: 503 });
 			}
-			const result = await provisionMailbox(services.services.repository, {
+			const result = await provisionOwnMailbox(services.services.repository, {
 				accountId: input.accountId,
-				localPart: input.localPart,
+				username: input.username ?? null,
+				localPart: input.localPart ?? null,
 				domain: services.services.domain,
 				quotaBytes: services.services.limits.mailboxQuotaBytes,
 				now: 1_795_000_000_000,

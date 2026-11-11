@@ -20,6 +20,7 @@ const FIXTURE_BINDINGS = {
 
 const MAIL_TOOL_NAMES = [
 	"whoyou_whoami",
+	"whoyou_mailbox_provision",
 	"whoyou_mailbox_get",
 	"whoyou_mail_search",
 	"whoyou_mail_thread_get",

@@ -7,6 +7,7 @@ import {
 	SIGNED_DOWNLOAD_TTL_MS,
 } from "../mail/download";
 import { normalizeSearchQuery } from "../mail/search";
+import { LOCAL_PART_RULES, provisionOwnMailbox } from "../mail/provision";
 import type {
 	AttachmentRecord,
 	MailboxRecord,
@@ -18,6 +19,7 @@ import type { WhoYouPrincipal } from "./auth";
 import { WHOYOU_MAIL_WRITE_SCOPE } from "./config";
 
 export const MAILBOX_GET_TOOL = "whoyou_mailbox_get";
+export const MAILBOX_PROVISION_TOOL = "whoyou_mailbox_provision";
 export const MAIL_SEARCH_TOOL = "whoyou_mail_search";
 export const MAIL_THREAD_GET_TOOL = "whoyou_mail_thread_get";
 export const MAIL_MESSAGE_GET_TOOL = "whoyou_mail_message_get";
@@ -202,11 +204,51 @@ export function registerMailTools(
 	const accountId = principal.accountId;
 
 	server.registerTool(
+		MAILBOX_PROVISION_TOOL,
+		{
+			title: "Who You mailbox provisioning",
+			description: `Creates the caller's own service-domain address on first use and returns it; later calls return the existing mailbox unchanged. The prefix is derived from the Cloud Auth username. When that username cannot be used, the tool returns local_part_required: ask the user which mailbox prefix they want and call again with \`localPart\`. Prefix rules: ${LOCAL_PART_RULES} The tool never accepts an account id; identity comes from the bearer token.`,
+			inputSchema: z.object({
+				localPart: z.string().trim().min(1).max(64).optional(),
+			}),
+			annotations: REVERSIBLE_WRITE,
+		},
+		async (args) => {
+			const denied = requireWriteScope(principal);
+			if (denied) return denied;
+			if (!services.domain) {
+				return failure(
+					"mail_domain_not_configured",
+					"No mail domain is configured for this deployment, so no address can be created.",
+				);
+			}
+			const result = await provisionOwnMailbox(repository, {
+				accountId,
+				username: principal.username ?? null,
+				localPart: args.localPart ?? null,
+				domain: services.domain,
+				quotaBytes: limits.mailboxQuotaBytes,
+				now: Date.now(),
+			});
+			if (!result.ok) return failure(result.code, result.detail);
+			return success(
+				[
+					"# Who You · mailbox",
+					`- address: ${result.mailbox.address}`,
+					`- state: ${result.created ? "created" : "already provisioned"}`,
+					`- quota: ${result.mailbox.quotaBytes} bytes`,
+				].join("\n"),
+				{ ...mailboxJson(result.mailbox), created: result.created },
+			);
+		},
+	);
+
+	server.registerTool(
 		MAILBOX_GET_TOOL,
 		{
 			title: "Who You mailbox",
 			description:
-				"Returns the caller's own tomlab.cn mailbox status, quota and counters. Use it before listing mail. It never accepts an account id; identity comes from the bearer token.",
+				"Returns the caller's own service-domain mailbox status, quota and counters. Use it before listing mail. It never accepts an account id; identity comes from the bearer token.",
 			annotations: READ_ONLY,
 		},
 		async () => {
@@ -214,7 +256,7 @@ export function registerMailTools(
 			if (!mailbox) {
 				return failure(
 					"mailbox_not_provisioned",
-					"No mailbox is provisioned for this account. Provisioning is not available through this tool.",
+					`No mailbox is provisioned for this account yet. Call ${MAILBOX_PROVISION_TOOL} to create one.`,
 				);
 			}
 			return success(

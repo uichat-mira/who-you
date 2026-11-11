@@ -33,6 +33,8 @@ export type McpEnv = {
 	MCP_AUDIENCE?: string;
 	MCP_REQUIRED_SCOPES?: string;
 	MCP_CONSUMER_CLAIM?: string;
+	/** Claim carrying the Cloud Auth username used to derive the mailbox prefix. */
+	MCP_USERNAME_CLAIM?: string;
 };
 
 export type McpConfig = {
@@ -46,6 +48,8 @@ export type McpConfig = {
 	audience: string;
 	requiredScopes: string[];
 	consumerClaim: string;
+	/** Optional by design: a token without it just cannot derive an address. */
+	usernameClaim: string;
 };
 
 export type McpConfigResult =
@@ -112,6 +116,11 @@ export function resolveMcpConfig(env: McpEnv): McpConfigResult {
 		return { ok: false, reason: "mcp_consumer_claim" };
 	}
 
+	const usernameClaim = env.MCP_USERNAME_CLAIM?.trim() || "preferred_username";
+	if (!claimName.test(usernameClaim)) {
+		return { ok: false, reason: "mcp_username_claim" };
+	}
+
 	return {
 		ok: true,
 		config: {
@@ -123,6 +132,7 @@ export function resolveMcpConfig(env: McpEnv): McpConfigResult {
 			audience,
 			requiredScopes: scopes,
 			consumerClaim,
+			usernameClaim,
 		},
 	};
 }

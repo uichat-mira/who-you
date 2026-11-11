@@ -34,6 +34,7 @@ export const MIGRATIONS = [
 	...migrationStatements("migrations/0002_drafts_sends.sql"),
 	...migrationStatements("migrations/0003_s3_state_search_retention.sql"),
 	...migrationStatements("migrations/0004_deliverability_abuse.sql"),
+	...migrationStatements("migrations/0005_mailbox_provisioning.sql"),
 ];
 
 export const BASE_BINDINGS = {

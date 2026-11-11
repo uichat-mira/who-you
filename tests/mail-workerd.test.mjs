@@ -307,7 +307,7 @@ test("mailbox quota overflow is an explicit rejection, not silent truncation", a
 	});
 });
 
-test("provisioning is idempotent, reserved-word safe and address-collision aware", async () => {
+test("provisioning is idempotent, reserved-word safe and reports address collisions", async () => {
 	await withWorker({}, async ({ mf, db }) => {
 		await seedMailbox(db, {
 			id: "mbx_a",
@@ -342,15 +342,22 @@ test("provisioning is idempotent, reserved-word safe and address-collision aware
 		});
 		const reservedBody = await reserved.json();
 		assert.equal(reservedBody.ok, false);
-		assert.equal(reservedBody.reason, "reserved_local_part");
+		assert.equal(reservedBody.code, "reserved_local_part");
 
+		// A collision is reported instead of being retried with a suffix: the
+		// user picks the prefix, the service never invents one.
 		const collision = await mf.dispatchFetch("https://127.0.0.1/__provision", {
 			method: "POST",
 			headers: { "content-type": "application/json" },
 			body: JSON.stringify({ accountId: "account-f", localPart: "alpha" }),
 		});
 		const collisionBody = await collision.json();
-		assert.equal(collisionBody.ok, true);
-		assert.match(collisionBody.mailbox.address, /^alpha-[a-f0-9]{4}@tomlab\.cn$/);
+		assert.equal(collisionBody.ok, false);
+		assert.equal(collisionBody.code, "address_taken");
+		const stillOne = await db
+			.prepare("SELECT COUNT(*) AS total FROM mailboxes WHERE address = ?")
+			.bind("alpha@tomlab.cn")
+			.first();
+		assert.equal(stillOne.total, 1);
 	});
 });

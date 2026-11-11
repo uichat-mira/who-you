@@ -53,6 +53,21 @@ export const FIXTURE_TOKENS: Record<string, WhoYouPrincipal> = {
 		consumerId: "consumer-3",
 		scopes: [MCP_TEST_SCOPE, MCP_TEST_WRITE_SCOPE],
 	},
+	// S6: a writable principal whose Cloud Auth username derives cleanly.
+	"fixture-username-writer": {
+		...base(),
+		accountId: "account-c",
+		consumerId: "consumer-4",
+		username: "Mira.User",
+		scopes: [MCP_TEST_SCOPE, MCP_TEST_WRITE_SCOPE],
+	},
+	// S6: a writable principal with no usable username; provisioning must ask.
+	"fixture-anonymous-writer": {
+		...base(),
+		accountId: "account-d",
+		consumerId: "consumer-5",
+		scopes: [MCP_TEST_SCOPE, MCP_TEST_WRITE_SCOPE],
+	},
 };
 
 const invalidToken = (): OAuthError =>

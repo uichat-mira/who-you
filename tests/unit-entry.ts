@@ -15,6 +15,7 @@ export {
 	sanitizeFilename,
 } from "../src/mail/mime";
 export { normalizeSearchQuery } from "../src/mail/search";
+export { LOCAL_PART_RULES, decideLocalPart } from "../src/mail/provision";
 export { createResendMailSender } from "../src/mail/send";
 export {
 	SIGNED_DOWNLOAD_TTL_MS,
