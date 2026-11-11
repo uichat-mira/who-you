@@ -8,6 +8,8 @@ import {
 	type MailLimits,
 } from "./limits";
 import { DraftRepository } from "./draft-store";
+import { CredentialRepository, type CredentialKeys } from "./credentials";
+import { parseKek } from "./credential-crypto";
 import { resolveRetention, type RetentionEnv, type RetentionPolicy } from "./retention";
 import { MailRepository } from "./store";
 
@@ -40,6 +42,12 @@ export type WhoYouEnv = McpEnv &
 		 * than 32 characters closes the callback entirely (503, fail-closed).
 		 */
 		MAIL_INTERNAL_WEBHOOK_SECRET?: string;
+		/** Base64 32-byte KEK sealing third-party credentials. Absent closes S7. */
+		MAIL_CREDENTIAL_KEK?: string;
+		MAIL_CREDENTIAL_KEK_VERSION?: string;
+		/** Previous KEK kept for one rotation window. */
+		MAIL_CREDENTIAL_KEK_PREVIOUS?: string;
+		MAIL_CREDENTIAL_KEK_PREVIOUS_VERSION?: string;
 	};
 
 export type MailServices = {
@@ -54,11 +62,38 @@ export type MailServices = {
 	abuse: AbusePolicy;
 	/** Public resource URL used as the origin of signed download links. */
 	resourceUrl: URL | null;
+	credentials: CredentialRepository;
+	/** `null` when MAIL_CREDENTIAL_KEK is missing or not a base64 32-byte key. */
+	credentialKeys: CredentialKeys | null;
 };
 
 export type MailServicesResult =
 	| { ok: true; services: MailServices }
 	| { ok: false; reason: "mail_storage_not_configured" };
+
+const parseVersion = (raw: string | undefined, fallback: number): number => {
+	const value = Number.parseInt((raw ?? "").trim(), 10);
+	return Number.isInteger(value) && value > 0 ? value : fallback;
+};
+
+/**
+ * Resolves the KEK ring. A missing or malformed current KEK closes third-party
+ * credentials entirely instead of storing material that cannot be unsealed.
+ */
+export function resolveCredentialKeys(env: WhoYouEnv): CredentialKeys | null {
+	const current = parseKek(env.MAIL_CREDENTIAL_KEK);
+	if (!current) return null;
+	const version = parseVersion(env.MAIL_CREDENTIAL_KEK_VERSION, 1);
+	const previous = parseKek(env.MAIL_CREDENTIAL_KEK_PREVIOUS);
+	const previousVersion = parseVersion(env.MAIL_CREDENTIAL_KEK_PREVIOUS_VERSION, 0);
+	return {
+		current: { version, kek: current },
+		previous:
+			previous && previousVersion > 0 && previousVersion !== version
+				? { version: previousVersion, kek: previous }
+				: null,
+	};
+}
 
 export function createMailServices(env: WhoYouEnv): MailServicesResult {
 	if (!env.DB || !env.MAIL_BUCKET) {
@@ -77,6 +112,8 @@ export function createMailServices(env: WhoYouEnv): MailServicesResult {
 			retention: resolveRetention(env),
 			abuse: resolveAbusePolicy(env),
 			resourceUrl: mcpConfig.ok ? mcpConfig.config.resourceUrl : null,
+			credentials: new CredentialRepository(env.DB),
+			credentialKeys: resolveCredentialKeys(env),
 		},
 	};
 }

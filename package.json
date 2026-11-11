@@ -13,8 +13,8 @@
 		"typecheck": "tsc --noEmit",
 		"lint": "eslint .",
 		"build:tests": "esbuild tests/worker-entry.ts --bundle --platform=browser --format=esm --target=es2022 --outfile=dist/test-worker.mjs && esbuild tests/fixtures.ts --bundle --platform=browser --format=esm --target=es2022 --outfile=dist/fixtures.mjs && esbuild tests/unit-entry.ts --bundle --platform=browser --format=esm --target=es2022 --outfile=dist/unit.mjs && esbuild src/index.ts --bundle --platform=browser --format=esm --target=es2022 --outfile=dist/worker.mjs",
-		"test:unit": "npm run build:tests && node --test tests/mcp-auth.test.mjs tests/mail-unit.test.mjs tests/draft-unit.test.mjs tests/s3-unit.test.mjs tests/s4-unit.test.mjs tests/s6-unit.test.mjs",
-		"test:integration": "npm run build:tests && node --test tests/mcp-workerd.test.mjs tests/mcp-remote-jwks.test.mjs tests/mail-workerd.test.mjs tests/draft-workerd.test.mjs tests/s3-workerd.test.mjs tests/s4-workerd.test.mjs tests/s6-workerd.test.mjs",
+		"test:unit": "npm run build:tests && node --test tests/mcp-auth.test.mjs tests/mail-unit.test.mjs tests/draft-unit.test.mjs tests/s3-unit.test.mjs tests/s4-unit.test.mjs tests/s6-unit.test.mjs tests/s7b-unit.test.mjs",
+		"test:integration": "npm run build:tests && node --test tests/mcp-workerd.test.mjs tests/mcp-remote-jwks.test.mjs tests/mail-workerd.test.mjs tests/draft-workerd.test.mjs tests/s3-workerd.test.mjs tests/s4-workerd.test.mjs tests/s6-workerd.test.mjs tests/s7a-workerd.test.mjs tests/s7b-workerd.test.mjs",
 		"check": "npm run typecheck && npm run lint && npm run test:unit && npm run test:integration"
 	},
 	"dependencies": {

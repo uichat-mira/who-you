@@ -1,10 +1,18 @@
 export type MailboxStatus = "active" | "disabled";
 
+/** Own-domain identities are provisioned by S6; third-party ones are linked by the user. */
+export type MailboxKind = "own_domain" | "third_party";
+
+export type MailboxProvider = "gmail" | "microsoft" | "imap_smtp";
+
 export type MailboxRecord = {
 	id: string;
 	accountId: string;
 	address: string;
 	localPart: string;
+	kind: MailboxKind;
+	/** Null for own-domain identities; always set for third-party ones. */
+	provider: MailboxProvider | null;
 	status: MailboxStatus;
 	quotaBytes: number;
 	bytesUsed: number;
@@ -90,7 +98,9 @@ export type AuditAction =
 	| "export"
 	| "delete_message"
 	| "delete_mailbox"
-	| "provision_mailbox";
+	| "provision_mailbox"
+	| "link_mailbox"
+	| "unlink_mailbox";
 
 export type NewAuditEntry = {
 	id: string;
@@ -185,6 +195,8 @@ export type NewMailbox = {
 	accountId: string;
 	address: string;
 	localPart: string;
+	kind: MailboxKind;
+	provider: MailboxProvider | null;
 	quotaBytes: number;
 	now: number;
 };
@@ -273,6 +285,8 @@ type MailboxRow = {
 	account_id: string;
 	address: string;
 	local_part: string;
+	kind: MailboxKind;
+	provider: MailboxProvider | null;
 	status: MailboxStatus;
 	quota_bytes: number;
 	bytes_used: number;
@@ -332,6 +346,8 @@ const toMailbox = (row: MailboxRow): MailboxRecord => ({
 	accountId: row.account_id,
 	address: row.address,
 	localPart: row.local_part,
+	kind: row.kind,
+	provider: row.provider,
 	status: row.status,
 	quotaBytes: row.quota_bytes,
 	bytesUsed: row.bytes_used,
@@ -452,9 +468,9 @@ export class MailRepository {
 	async findMailboxByAddress(address: string): Promise<MailboxRecord | null> {
 		const row = await this.db
 			.prepare(
-				`SELECT id, account_id, address, local_part, status, quota_bytes, bytes_used,
-				 message_count, quarantine_count, send_paused_at, send_paused_reason,
-				 created_at
+				`SELECT id, account_id, address, local_part, kind, provider, status,
+				 quota_bytes, bytes_used, message_count, quarantine_count,
+				 send_paused_at, send_paused_reason, created_at
 				 FROM mailboxes WHERE address = ? LIMIT 1`,
 			)
 			.bind(address)
@@ -462,26 +478,47 @@ export class MailRepository {
 		return row ? toMailbox(row) : null;
 	}
 
+	/**
+	 * The account's own-domain identity. Third-party identities are deliberately
+	 * excluded so every existing S1–S6 caller keeps addressing one mailbox.
+	 */
 	async findMailboxByAccount(accountId: string): Promise<MailboxRecord | null> {
 		const row = await this.db
 			.prepare(
-				`SELECT id, account_id, address, local_part, status, quota_bytes, bytes_used,
-				 message_count, quarantine_count, send_paused_at, send_paused_reason,
-				 created_at
-				 FROM mailboxes WHERE account_id = ? LIMIT 1`,
+				`SELECT id, account_id, address, local_part, kind, provider, status,
+				 quota_bytes, bytes_used, message_count, quarantine_count,
+				 send_paused_at, send_paused_reason, created_at
+				 FROM mailboxes WHERE account_id = ? AND kind = 'own_domain'
+				 ORDER BY created_at LIMIT 1`,
 			)
 			.bind(accountId)
 			.first<MailboxRow>();
 		return row ? toMailbox(row) : null;
 	}
 
+	/** Every identity the account holds, own-domain first. */
+	async listMailboxesByAccount(accountId: string): Promise<MailboxRecord[]> {
+		const { results } = await this.db
+			.prepare(
+				`SELECT id, account_id, address, local_part, kind, provider, status,
+				 quota_bytes, bytes_used, message_count, quarantine_count,
+				 send_paused_at, send_paused_reason, created_at
+				 FROM mailboxes WHERE account_id = ?
+				 ORDER BY kind, created_at`,
+			)
+			.bind(accountId)
+			.all<MailboxRow>();
+		return results.map(toMailbox);
+	}
+
 	async insertMailbox(mailbox: NewMailbox): Promise<boolean> {
 		const result = await this.db
 			.prepare(
 				`INSERT INTO mailboxes (
-				 id, account_id, address, local_part, status, quota_bytes,
-				 bytes_used, message_count, quarantine_count, created_at, updated_at
-				 ) VALUES (?,?,?,?, 'active', ?, 0, 0, 0, ?, ?)
+				 id, account_id, address, local_part, kind, provider, status,
+				 quota_bytes, bytes_used, message_count, quarantine_count,
+				 created_at, updated_at
+				 ) VALUES (?,?,?,?,?,?, 'active', ?, 0, 0, 0, ?, ?)
 				 ON CONFLICT (address) DO NOTHING`,
 			)
 			.bind(
@@ -489,6 +526,8 @@ export class MailRepository {
 				mailbox.accountId,
 				mailbox.address,
 				mailbox.localPart,
+				mailbox.kind,
+				mailbox.provider,
 				mailbox.quotaBytes,
 				mailbox.now,
 				mailbox.now,

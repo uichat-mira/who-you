@@ -135,6 +135,8 @@ const bytesToBase64 = (bytes: ArrayBuffer): string => {
 const mailboxJson = (mailbox: MailboxRecord): Record<string, unknown> => ({
 	mailboxId: mailbox.id,
 	address: mailbox.address,
+	kind: mailbox.kind,
+	provider: mailbox.provider,
 	status: mailbox.status,
 	quotaBytes: mailbox.quotaBytes,
 	bytesUsed: mailbox.bytesUsed,
