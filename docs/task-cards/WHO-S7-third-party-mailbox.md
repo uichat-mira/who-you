@@ -14,7 +14,7 @@
 
 用户要求在同一产品里并存两种模型：自有域邮箱（WHO-S6）与第三方邮箱。第三方分两类：**OAuth 型**（Gmail / Microsoft，走 HTTP API）与**自填服务器型**（用户自己填 IMAP/SMTP 主机、端口与密码）。本卡只解决第三方身份的接入契约，不改自有域路径。
 
-自填 IMAP/SMTP 是攻击面最大的一类：它让用户决定 Worker 的出站连接目标与端口，因此本卡在 S7b 之外单独给出 SSRF / 开放中继的威胁模型（S7f），该部分未评审通过前不得实现。
+自填 IMAP/SMTP 是攻击面最大的一类：它让用户决定 Worker 的出站连接目标与端口，因此本卡在 S7b 之外单独给出 SSRF / 开放中继的威胁模型（S7f）。该部分的实现约束以 [`CREDENTIAL-SECURITY-CONTRACT.md`](../engineering/CREDENTIAL-SECURITY-CONTRACT.md) 为准，契约的人工评审环节已由维护者移除。
 
 ## 已裁决
 
@@ -54,8 +54,8 @@
   - 通用：按 RFC `Message-ID` 去重，复用现有 thread/地址/正文/附件模型入库；与自有域收信共用配额、保留与审计；不得回写已读状态到 provider。
   - IMAP 无 IDLE（Workers 无法维持长连接），一律轮询。
 - **S7f 自填服务器的威胁模型（本卡前置门禁）**：
-  - **SSRF 防护**：只接受主机名，拒绝 IP 字面量与私有域名后缀；端口白名单 IMAP 993/143、SMTP 465/587。Workers socket 只接受主机名且不暴露对端 IP，因此「用已校验 IP 建连」不可实现：DNS rebinding 按契约 §5.1 作为已接受残余风险（R1），补偿控制是强制 TLS 主机名校验 + 端口白名单 + 无私有网络绑定；平台一旦提供对端 IP 或 VPC 绑定，必须启用 CIDR 校验。详见 [`CREDENTIAL-SECURITY-CONTRACT.md`](../engineering/CREDENTIAL-SECURITY-CONTRACT.md) §5.1。
-  - **禁止明文**：SMTP 仅 465（隐式 TLS）或 587（STARTTLS），IMAP 仅 993（隐式 TLS）或 143（STARTTLS）；证书校验失败或 STARTTLS 不可用即失败，**绝不降级为明文**（否则密码泄漏）。Cloudflare Workers 出站 **25 端口被封禁**；143/587 的 STARTTLS 可达性未实测，**实测确认前只实现 993/465**。
+  - **SSRF 防护**：只接受主机名，拒绝 IP 字面量与私有域名后缀；端口白名单 IMAP 993/143、SMTP 465/587。Workers socket 只接受主机名，`SocketInfo.remoteAddress` 实测返回 `<hostname>:<port>` 而非 IP，因此「用已校验 IP 建连」不可实现：DNS rebinding 按契约 §5.1 作为已接受残余风险（R1），补偿控制是强制 TLS 主机名校验 + 端口白名单 + 无私有网络绑定；平台一旦提供对端 IP 或 VPC 绑定，必须启用 CIDR 校验。详见 [`CREDENTIAL-SECURITY-CONTRACT.md`](../engineering/CREDENTIAL-SECURITY-CONTRACT.md) §5.1。
+  - **禁止明文**：SMTP 仅 465（隐式 TLS）或 587（STARTTLS），IMAP 仅 993（隐式 TLS）或 143（STARTTLS）；证书校验失败或 STARTTLS 不可用即失败，**绝不降级为明文**（否则密码泄漏）。实测：993/465/587 可用，25 被平台拒绝（`Connections to port 25 are prohibited`），143 依赖 provider（Gmail 超时、QQ 未广播 STARTTLS），因此 143 默认关闭。
   - **开放中继**：SMTP 必须 `AUTH`，不实现无认证投递；不实现「用本服务凭据代发他人域名」的中继语义。
   - **扫描防护**：连通性测试按账号限流，避免被当作端口扫描器；失败码不区分「拒绝连接」与「连上但握手失败」以外的细节。
   - **凭据弱点**：自填密码不可撤销，撤销路径必须同时提供「删除凭据 + 停用身份」，并在 UI 层提示用户去 provider 侧改密。
@@ -87,17 +87,18 @@
 ## 依赖与阻塞
 
 - WHO-S6 完成账号 ↔ 地址映射，否则第三方身份没有可归属的所有者。
-- 需要先有一份凭据托管与 provider OAuth/IMAP 的安全契约（仓库 `AGENTS.md` 的硬要求），否则不得进入实现。加密方案已在 S7b 裁决，契约仍需覆盖 S7f 威胁模型、轮换 runbook 与丢失 KEK 的处置。
+- 需要先有一份凭据托管与 provider OAuth/IMAP 的安全契约（仓库 `AGENTS.md` 的硬要求），且该契约已合入 `dev`（人工评审环节已由维护者移除）。
 - 需要新增 Worker secret `MAIL_CREDENTIAL_KEK`（32 字节）；丢失 KEK 意味着所有第三方身份必须重新授权，这是已接受的取舍。
 - Google OAuth 客户端与 Microsoft 应用注册、同意屏与最小 scope 评审。
 - 现有 `triggers.scheduled` 只有每天一次（`17 3 * * *`）；5 分钟同步需要改 Cron（共 288 次/天），属配置与成本变更。
 - 对用户自填服务器的真实连接测试属于 `AGENTS.md` 意义上的「live 凭据使用」，需要显式任务授权与对应真实证据，不能仅凭构建通过发起。
-- Cloudflare Workers 出站 TCP 能力（`cloudflare:sockets`）的端口与目标限制需实测确认后再写实现。
+- ~~Cloudflare Workers 出站 TCP 能力（`cloudflare:sockets`）的端口与目标限制需实测确认后再写实现。~~ 已实测（2026-11-11）：993/465/587 可用，25 被拒绝，143 依赖 provider；隐式 TLS 需两参数 `connect` + `startTls`，详见契约 §5.2。
 
 ## 待决
 
-1. Workers 出站 socket 的实测边界：25 是否确实封禁、是否存在其他端口/IP 段限制。
+1. ~~Workers 出站 socket 的实测边界：25 是否确实封禁、是否存在其他端口/IP 段限制。~~ 已关闭：25 被平台拒绝；未发现 993/465/587 之外的可用端口需求。
 2. 同步超出单次调用 CPU / 子请求预算时的降级策略（跳轮 + 游标续跑 vs 改 Queue）。
 3. 自填服务器连通性测试的交互形态与失败码粒度（避免成为探测工具）。
 4. 第三方身份的保留与删除是否与自有域完全一致（含 `quota_bytes` 取值）。
 5. 自填密码的轮换提醒策略（不可撤销凭据的定期引导改密）。
+6. 是否开放 143 端口：平台可连，但 Gmail 超时、QQ 不广播 STARTTLS，收益低且增加攻击面，默认关闭。
