@@ -10,8 +10,13 @@ import {
 import { DraftRepository } from "./draft-store";
 import { CredentialRepository, type CredentialKeys } from "./credentials";
 import { parseKek } from "./credential-crypto";
+import { createGmailClient, type GmailClient } from "./gmail-client";
+import { resolveGmailOAuthConfig } from "./gmail-link";
+import { createGoogleOAuthClient, type GmailOAuthClient } from "./oauth-client";
+import { OAuthStateRepository } from "./oauth-state";
 import { resolveRetention, type RetentionEnv, type RetentionPolicy } from "./retention";
 import { MailRepository } from "./store";
+import { SyncStateRepository } from "./sync-state";
 
 /**
  * Deployed binding surface for this slice. Storage bindings are optional in the
@@ -48,6 +53,10 @@ export type WhoYouEnv = McpEnv &
 		/** Previous KEK kept for one rotation window. */
 		MAIL_CREDENTIAL_KEK_PREVIOUS?: string;
 		MAIL_CREDENTIAL_KEK_PREVIOUS_VERSION?: string;
+		/** Google OAuth client for Gmail linking; all three are required. */
+		GMAIL_OAUTH_CLIENT_ID?: string;
+		GMAIL_OAUTH_CLIENT_SECRET?: string;
+		GMAIL_OAUTH_REDIRECT_URI?: string;
 	};
 
 export type MailServices = {
@@ -65,6 +74,14 @@ export type MailServices = {
 	credentials: CredentialRepository;
 	/** `null` when MAIL_CREDENTIAL_KEK is missing or not a base64 32-byte key. */
 	credentialKeys: CredentialKeys | null;
+	oauthStates: OAuthStateRepository;
+	syncStates: SyncStateRepository;
+	/** `null` when the Google OAuth client env is incomplete. */
+	oauth: GmailOAuthClient | null;
+	/** `null` when OAuth is not configured; both are built together. */
+	gmail: GmailClient | null;
+	/** The exact redirect URI registered with Google, echoed on the callback. */
+	gmailRedirectUri: string | null;
 };
 
 export type MailServicesResult =
@@ -101,6 +118,7 @@ export function createMailServices(env: WhoYouEnv): MailServicesResult {
 	}
 	const signingKey = (env.MAIL_SIGNING_KEY ?? "").trim();
 	const mcpConfig = resolveMcpConfig(env);
+	const gmailConfig = resolveGmailOAuthConfig(env);
 	return {
 		ok: true,
 		services: {
@@ -114,6 +132,11 @@ export function createMailServices(env: WhoYouEnv): MailServicesResult {
 			resourceUrl: mcpConfig.ok ? mcpConfig.config.resourceUrl : null,
 			credentials: new CredentialRepository(env.DB),
 			credentialKeys: resolveCredentialKeys(env),
+			oauthStates: new OAuthStateRepository(env.DB),
+			syncStates: new SyncStateRepository(env.DB),
+			oauth: gmailConfig ? createGoogleOAuthClient(gmailConfig) : null,
+			gmail: gmailConfig ? createGmailClient() : null,
+			gmailRedirectUri: gmailConfig?.redirectUri ?? null,
 		},
 	};
 }

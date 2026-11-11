@@ -6,6 +6,12 @@ import { MAIL_DOWNLOAD_PATH, handleSignedDownload } from "../src/mail/download";
 import { runRetentionSweep } from "../src/mail/retention";
 import { provisionOwnMailbox } from "../src/mail/provision";
 import { DELIVERY_WEBHOOK_PATH } from "../src/mail/webhook";
+import { GMAIL_SCOPES, OAuthProviderError, type GmailOAuthClient } from "../src/mail/oauth-client";
+import { GmailApiError, type GmailClient } from "../src/mail/gmail-client";
+import { completeGmailLink } from "../src/mail/gmail-link";
+import { syncGmailMailbox } from "../src/mail/gmail-sync";
+import { createRoutedMailSender } from "../src/mail/identity";
+import { MailSendError } from "../src/mail/send";
 import {
 	CLOUD_AUTH_TOKEN_ISSUER,
 	MCP_METADATA_PATH,
@@ -15,6 +21,7 @@ import { createWhoYouRuntime } from "../src/mcp/runtime";
 import {
 	createFakeMailSender,
 	createFixtureConfirmationVerifier,
+	createFixtureIdentityConfirmationVerifier,
 	createFixtureVerifier,
 	fixtureOutbox,
 } from "./fixtures";
@@ -61,9 +68,100 @@ function buildEmailMessage(input: InboundRequest): {
 	return { message, rejectedReason: () => rejected };
 }
 
+const FIXTURE_GMAIL_RAW = [
+	"From: Fixture Sender <sender@example.net>",
+	"To: linked@gmail.com",
+	"Subject: Gmail fixture message",
+	"Message-ID: <gmail-fixture-1@example.net>",
+	"Date: Mon, 10 Nov 2025 10:00:00 +0000",
+	"MIME-Version: 1.0",
+	'Content-Type: text/plain; charset="utf-8"',
+	"",
+	"Fixture body for the Gmail sync path.",
+	"",
+].join("\r\n");
+
+const fixtureGmailRawBytes = (): Uint8Array => new TextEncoder().encode(FIXTURE_GMAIL_RAW);
+
+type GmailScript = "ok" | "empty" | "history_expired" | "unauthorized";
+
+/** Deterministic Gmail double; it never touches the network. */
+function createScriptedGmail(script: GmailScript): GmailClient {
+	const messageId = "gmail-msg-1";
+	const failUnauthorized = (): never => {
+		throw new GmailApiError("unauthorized", 401);
+	};
+	return {
+		async getProfile() {
+			if (script === "unauthorized") failUnauthorized();
+			return { emailAddress: "linked@gmail.com", historyId: "100" };
+		},
+		async sendMessage() {
+			if (script === "unauthorized") failUnauthorized();
+			return { id: "gmail-sent-1", threadId: "gmail-thread-1" };
+		},
+		async listMessages() {
+			if (script === "unauthorized") failUnauthorized();
+			if (script === "empty") return { ids: [], nextPageToken: null };
+			return { ids: [messageId], nextPageToken: null };
+		},
+		async getMessage() {
+			if (script === "unauthorized") failUnauthorized();
+			return {
+				id: messageId,
+				threadId: "gmail-thread-1",
+				internalDate: 1_795_000_000_000,
+				raw: fixtureGmailRawBytes(),
+			};
+		},
+		async listHistory() {
+			if (script === "unauthorized") failUnauthorized();
+			if (script === "history_expired") throw new GmailApiError("history_expired", 404);
+			return { historyId: "101", messageIds: [messageId], nextPageToken: null };
+		},
+	};
+}
+
+/** OAuth double: returns fixed tokens without contacting Google. */
+function createFixtureOAuth(options: { invalidGrant?: boolean } = {}): GmailOAuthClient {
+	return {
+		authorizationUrl({ state, codeChallenge }) {
+			const url = new URL("https://accounts.google.com/o/oauth2/v2/auth");
+			url.searchParams.set("state", state);
+			url.searchParams.set("code_challenge", codeChallenge);
+			return url.href;
+		},
+		async exchangeCode() {
+			if (options.invalidGrant) {
+				throw new OAuthProviderError("invalid_grant");
+			}
+			return {
+				accessToken: "fixture-access-token",
+				refreshToken: "fixture-refresh-token",
+				scope: GMAIL_SCOPES.join(" "),
+				expiresIn: 3600,
+			};
+		},
+		async refresh() {
+			if (options.invalidGrant) {
+				throw new OAuthProviderError("invalid_grant");
+			}
+			return {
+				accessToken: "fixture-access-token",
+				refreshToken: null,
+				scope: GMAIL_SCOPES.join(" "),
+				expiresIn: 3600,
+			};
+		},
+		async revoke() {
+			return true;
+		},
+	};
+}
+
 type TestEnv = WhoYouEnv & {
 	/** Test-only switch for the injected outbound fake. */
-	MAIL_SEND_MODE?: "ok" | "failing" | "missing";
+	MAIL_SEND_MODE?: "ok" | "failing" | "missing" | "gmail";
 };
 
 export default {
@@ -208,6 +306,136 @@ export default {
 			return Response.json(await repository.list(input.accountId ?? ""));
 		}
 
+		if (path === "/__gmail/callback") {
+			if (request.method !== "POST") {
+				return Response.json({ error: "method_not_allowed" }, { status: 405 });
+			}
+			const input = (await request.json()) as {
+				code?: string;
+				state?: string;
+				invalidGrant?: boolean;
+			};
+			const services = createMailServices(env);
+			if (!services.ok || !services.services.credentialKeys) {
+				return Response.json({ error: "mail_not_configured" }, { status: 503 });
+			}
+			if (!input.code || !input.state) {
+				return Response.json({ error: "invalid_request" }, { status: 400 });
+			}
+			const result = await completeGmailLink(
+				{
+					repository: services.services.repository,
+					credentials: services.services.credentials,
+					keys: services.services.credentialKeys,
+					states: services.services.oauthStates,
+					syncStates: services.services.syncStates,
+					oauth: createFixtureOAuth({ invalidGrant: input.invalidGrant }),
+					gmail: createScriptedGmail("ok"),
+					limits: services.services.limits,
+					now: Date.now(),
+				},
+				{ code: input.code, state: input.state },
+			);
+			return Response.json(result);
+		}
+
+		if (path === "/__gmail/sync") {
+			if (request.method !== "POST") {
+				return Response.json({ error: "method_not_allowed" }, { status: 405 });
+			}
+			const input = (await request.json()) as {
+				accountId?: string;
+				mailboxId?: string;
+				script?: GmailScript;
+			};
+			const services = createMailServices(env);
+			if (!services.ok || !services.services.credentialKeys) {
+				return Response.json({ error: "mail_not_configured" }, { status: 503 });
+			}
+			if (!input.accountId || !input.mailboxId) {
+				return Response.json({ error: "invalid_request" }, { status: 400 });
+			}
+			const mailbox = await services.services.repository.findMailboxById(
+				input.accountId,
+				input.mailboxId,
+			);
+			if (!mailbox) return Response.json({ error: "mailbox_not_found" }, { status: 404 });
+			const result = await syncGmailMailbox(
+				{
+					repository: services.services.repository,
+					limits: services.services.limits,
+					credentials: services.services.credentials,
+					keys: services.services.credentialKeys,
+					oauth: createFixtureOAuth(),
+					gmail: createScriptedGmail(input.script ?? "ok"),
+					syncStates: services.services.syncStates,
+					now: Date.now(),
+				},
+				mailbox,
+			);
+			return Response.json(result);
+		}
+
+		if (path === "/__gmail/send") {
+			if (request.method !== "POST") {
+				return Response.json({ error: "method_not_allowed" }, { status: 405 });
+			}
+			const input = (await request.json()) as {
+				accountId?: string;
+				mailboxId?: string;
+				to?: string;
+				invalidGrant?: boolean;
+				script?: GmailScript;
+			};
+			const services = createMailServices(env);
+			if (!services.ok || !services.services.credentialKeys) {
+				return Response.json({ error: "mail_not_configured" }, { status: 503 });
+			}
+			if (!input.accountId || !input.mailboxId || !input.to) {
+				return Response.json({ error: "invalid_request" }, { status: 400 });
+			}
+			const mailbox = await services.services.repository.findMailboxById(
+				input.accountId,
+				input.mailboxId,
+			);
+			if (!mailbox) return Response.json({ error: "mailbox_not_found" }, { status: 404 });
+			const sender = createRoutedMailSender({
+				fallback: null,
+				credentials: services.services.credentials,
+				keys: services.services.credentialKeys,
+				oauth: createFixtureOAuth({ invalidGrant: input.invalidGrant }),
+				gmail: createScriptedGmail(input.script ?? "ok"),
+			});
+			try {
+				const sent = await sender.send(
+					{
+						from: mailbox.address,
+						to: [{ name: "", address: input.to }],
+						cc: [],
+						bcc: [],
+						subject: "Fixture Gmail send",
+						text: "Fixture body",
+						html: null,
+					},
+					{
+						accountId: input.accountId,
+						mailboxId: mailbox.id,
+						address: mailbox.address,
+						provider: "gmail",
+					},
+				);
+				return Response.json(sent);
+			} catch (error) {
+				if (error instanceof MailSendError) {
+					return Response.json(
+						{ error: error.code },
+						{ status: error.code === "provider_reauth_required" ? 409 : 502 },
+					);
+				}
+				throw error;
+			}
+		}
+
 		if (path === "/__retention") {
 			if (request.method !== "POST") {
 				return Response.json({ error: "method_not_allowed" }, { status: 405 });
@@ -245,16 +473,27 @@ export default {
 		if (path !== MCP_RESOURCE_PATH && path !== MCP_METADATA_PATH) {
 			return Response.json({ error: "not_found" }, { status: 404 });
 		}
+		const mailServices = createMailServices(env);
+		const injectedSender =
+			env.MAIL_SEND_MODE === "gmail" && mailServices.ok && mailServices.services.credentialKeys
+				? createRoutedMailSender({
+						fallback: null,
+						credentials: mailServices.services.credentials,
+						keys: mailServices.services.credentialKeys,
+						oauth: createFixtureOAuth(),
+						gmail: createScriptedGmail("ok"),
+					})
+				: env.MAIL_SEND_MODE === "missing"
+					? null
+					: createFakeMailSender({ failing: env.MAIL_SEND_MODE === "failing" });
 		const resolved = createWhoYouRuntime(env, {
 			verifier: createFixtureVerifier({
 				issuer: CLOUD_AUTH_TOKEN_ISSUER,
 				audience: env.MCP_AUDIENCE ?? "",
 			}),
 			confirmationVerifier: createFixtureConfirmationVerifier(),
-			sender:
-				env.MAIL_SEND_MODE === "missing"
-					? null
-					: createFakeMailSender({ failing: env.MAIL_SEND_MODE === "failing" }),
+			identityConfirmationVerifier: createFixtureIdentityConfirmationVerifier(),
+			sender: injectedSender,
 		});
 		if (!resolved.ok) {
 			return Response.json(

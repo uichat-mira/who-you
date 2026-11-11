@@ -30,6 +30,7 @@ import {
 import { registerMailTools } from "./mail";
 import { registerLifecycleTools } from "./lifecycle";
 import { registerDraftTools, type DraftToolDependencies } from "./drafts";
+import { registerIdentityTools, type IdentityToolDependencies } from "./identities";
 import type { MailServices } from "../mail/config";
 
 const MAX_REQUEST_BODY_BYTES = 256 * 1024;
@@ -37,7 +38,7 @@ const MAX_REQUEST_BODY_BYTES = 256 * 1024;
 function buildMcpServer(
 	authInfo: AuthInfo | undefined,
 	services: MailServices,
-	tools: DraftToolDependencies,
+	tools: DraftToolDependencies & IdentityToolDependencies,
 ): McpServer {
 	const principal = principalFromAuthInfo(authInfo);
 	const server = new McpServer(
@@ -68,6 +69,7 @@ function buildMcpServer(
 
 	registerMailTools(server, principal, services);
 	registerDraftTools(server, principal, services, tools);
+	registerIdentityTools(server, principal, services, tools);
 	registerLifecycleTools(server, principal, services);
 
 	return server;
@@ -126,7 +128,7 @@ export function createWhoYouMcp(
 	config: McpConfig,
 	verifier: WhoYouTokenVerifier,
 	services: MailServices,
-	tools: DraftToolDependencies,
+	tools: DraftToolDependencies & IdentityToolDependencies,
 ): WhoYouMcpRuntime {
 	const tokenVerifier: OAuthTokenVerifier = {
 		async verifyAccessToken(token: string): Promise<AuthInfo> {

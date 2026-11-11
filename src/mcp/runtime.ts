@@ -1,5 +1,7 @@
 import { createMailServices, type WhoYouEnv } from "../mail/config";
 import type { WhoYouConfirmationVerifier } from "../mail/confirmation";
+import { createRoutedMailSender } from "../mail/identity";
+import type { WhoYouIdentityConfirmationVerifier } from "../mail/identity-confirmation";
 import {
 	createCloudflareMailSender,
 	createResendMailSender,
@@ -7,6 +9,7 @@ import {
 } from "../mail/send";
 import { createCloudAuthVerifier, type WhoYouTokenVerifier } from "./auth";
 import { createCloudAuthConfirmationVerifier } from "./confirmation";
+import { createCloudAuthIdentityConfirmationVerifier } from "./identity-confirmation";
 import { WHOYOU_SERVICE_AUDIENCE, resolveMcpConfig } from "./config";
 import { createWhoYouMcp, type WhoYouMcpRuntime } from "./server";
 
@@ -15,6 +18,8 @@ export type McpRuntimeOptions = {
 	verifier?: WhoYouTokenVerifier;
 	/** Test-only injection for the draft-bound send credential. */
 	confirmationVerifier?: WhoYouConfirmationVerifier;
+	/** Test-only injection for link/unlink confirmation credentials. */
+	identityConfirmationVerifier?: WhoYouIdentityConfirmationVerifier;
 	/** Test-only injection; `null` proves the no-binding path. */
 	sender?: MailSender | null;
 };
@@ -80,19 +85,45 @@ export function createWhoYouRuntime(
 			jwksUrl: config.jwksUrl,
 		});
 
+	// Same issuance pipeline, different claim: identity link/unlink carries
+	// action/provider/mailbox_id and the write scope.
+	const identityConfirmations =
+		options.identityConfirmationVerifier ??
+		createCloudAuthIdentityConfirmationVerifier({
+			issuer: config.tokenIssuer,
+			audience: WHOYOU_SERVICE_AUDIENCE,
+			jwksUrl: config.jwksUrl,
+		});
+
 	// Resend is preferred: it authenticates by SPF/DKIM only, so the receiving
 	// MX can stay with Cloudflare Email Routing on the same domain.
+	const fallbackSender =
+		createResendMailSender(env.MAIL_RESEND_API_KEY) ??
+		createCloudflareMailSender(env.MAIL_EMAIL_SEND);
+
+	// Third-party identities route by mailbox provider; the own-domain path is
+	// the same fallback adapter as before.
+	const routedSender = createRoutedMailSender({
+		fallback: fallbackSender,
+		credentials: mail.services.credentials,
+		keys: mail.services.credentialKeys,
+		oauth: mail.services.oauth,
+		gmail: mail.services.gmail,
+	});
+
 	const sender =
 		options.sender !== undefined
 			? options.sender
-			: createResendMailSender(env.MAIL_RESEND_API_KEY) ??
-				createCloudflareMailSender(env.MAIL_EMAIL_SEND);
+			: fallbackSender || mail.services.oauth
+				? routedSender
+				: null;
 
-	const tools = { confirmations, sender };
+	const tools = { confirmations, sender, identityConfirmations };
 
 	const injected =
 		options.verifier !== undefined ||
 		options.confirmationVerifier !== undefined ||
+		options.identityConfirmationVerifier !== undefined ||
 		options.sender !== undefined;
 	if (injected) {
 		return {

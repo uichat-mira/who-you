@@ -19,8 +19,11 @@ export default defineConfig({
 			// Worker is decided by the zone's Email Routing rules, not by this file.
 			MAIL_DOMAIN: bindings.text("tzt2026.xyz"),
 		},
-		// Retention only deletes audit rows, delivery events and webhook nonces.
-		// User mail has no TTL, so this schedule cannot expire a message.
-		triggers: [triggers.scheduled({ schedule: "17 3 * * *" })],
+		// Daily: retention expiry, deliverability report.
+		// Every five minutes: third-party (Gmail) incremental sync only.
+		triggers: [
+			triggers.scheduled({ schedule: "17 3 * * *" }),
+			triggers.scheduled({ schedule: "*/5 * * * *" }),
+		],
 	},
 });

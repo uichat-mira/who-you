@@ -33,6 +33,9 @@ const MAIL_TOOL_NAMES = [
 	"whoyou_mail_draft_get",
 	"whoyou_mail_draft_list",
 	"whoyou_mail_send",
+	"whoyou_mailbox_list",
+	"whoyou_mailbox_link",
+	"whoyou_mailbox_unlink",
 	"whoyou_mail_export",
 	"whoyou_mail_message_delete",
 	"whoyou_mail_mailbox_delete",
@@ -41,6 +44,7 @@ const MAIL_TOOL_NAMES = [
 const READ_ONLY_TOOL_NAMES = new Set([
 	"whoyou_whoami",
 	"whoyou_mailbox_get",
+	"whoyou_mailbox_list",
 	"whoyou_mail_search",
 	"whoyou_mail_thread_get",
 	"whoyou_mail_message_get",
@@ -52,6 +56,7 @@ const READ_ONLY_TOOL_NAMES = new Set([
 const DESTRUCTIVE_TOOL_NAMES = new Set([
 	"whoyou_mail_draft_discard",
 	"whoyou_mail_send",
+	"whoyou_mailbox_unlink",
 	"whoyou_mail_message_delete",
 	"whoyou_mail_mailbox_delete",
 ]);

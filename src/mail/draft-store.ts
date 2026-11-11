@@ -30,6 +30,8 @@ export type SendReceipt = {
 	status: "sent" | "failed";
 	errorCode: string | null;
 	providerMessageId: string | null;
+	/** Provider that accepted the message; null for receipts created before S7c. */
+	provider: string | null;
 	recipientCount: number;
 	externalRecipientCount: number;
 	createdAt: number;
@@ -64,6 +66,7 @@ type ReceiptRow = {
 	status: "sent" | "failed";
 	error_code: string | null;
 	provider_message_id: string | null;
+	provider: string | null;
 	recipient_count: number;
 	external_recipient_count: number;
 	created_at: number;
@@ -113,6 +116,7 @@ const toReceipt = (row: ReceiptRow): SendReceipt => ({
 	status: row.status,
 	errorCode: row.error_code,
 	providerMessageId: row.provider_message_id,
+	provider: row.provider,
 	recipientCount: row.recipient_count,
 	externalRecipientCount: row.external_recipient_count,
 	createdAt: row.created_at,
@@ -121,7 +125,7 @@ const toReceipt = (row: ReceiptRow): SendReceipt => ({
 const RECEIPT_COLUMNS = `
 	r.id, r.account_id, r.draft_id, r.draft_version, r.content_hash,
 	r.idempotency_key, r.status, r.error_code, r.provider_message_id,
-	r.recipient_count, r.external_recipient_count, r.created_at`;
+	r.provider, r.recipient_count, r.external_recipient_count, r.created_at`;
 
 export class DraftRepository {
 	private readonly db: D1Database;
@@ -298,9 +302,9 @@ export class DraftRepository {
 			.prepare(
 				`INSERT INTO send_receipts (
 				 id, account_id, draft_id, draft_version, content_hash,
-				 idempotency_key, status, error_code, provider_message_id,
+				 idempotency_key, status, error_code, provider_message_id, provider,
 				 recipient_count, external_recipient_count, created_at
-				 ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+				 ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
 				 ON CONFLICT (account_id, idempotency_key) DO NOTHING`,
 			)
 			.bind(
@@ -313,6 +317,7 @@ export class DraftRepository {
 				receipt.status,
 				receipt.errorCode,
 				receipt.providerMessageId,
+				receipt.provider,
 				receipt.recipientCount,
 				receipt.externalRecipientCount,
 				receipt.createdAt,
