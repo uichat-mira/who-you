@@ -6,9 +6,9 @@ import type { DraftRepository, SendReceipt } from "./draft-store";
 import { sha256Hex } from "./hash";
 
 /**
- * Outbound port. The deployed adapter wraps the Cloudflare Email Service
- * `send_email` binding; tests inject a deterministic fake. Who You never
- * speaks SMTP or any other provider protocol directly.
+ * Outbound port. The deployed adapters are Resend (preferred) and the
+ * Cloudflare Email Service `send_email` binding; tests inject a deterministic
+ * fake. Who You never speaks SMTP or any other provider protocol directly.
  */
 export type OutboundMail = {
 	from: string;
@@ -49,6 +49,55 @@ export function createCloudflareMailSender(
 				...(message.html === null ? {} : { html: message.html }),
 			});
 			return { providerMessageId: result.messageId };
+		},
+	};
+}
+
+const RESEND_ENDPOINT = "https://api.resend.com/emails";
+
+const formatAddress = (entry: DraftAddress): string =>
+	entry.name ? `${entry.name} <${entry.address}>` : entry.address;
+
+/**
+ * Resend adapter. Resend authenticates the sending domain with SPF/DKIM and
+ * does not claim the domain's MX records, so the same domain can keep receiving
+ * through Cloudflare Email Routing while sending through Resend.
+ *
+ * Returns `null` when no key is configured so the send path reports
+ * `relay_unavailable` instead of pretending a message left the Worker.
+ */
+export function createResendMailSender(
+	apiKey: string | undefined,
+): MailSender | null {
+	const key = (apiKey ?? "").trim();
+	if (!key) return null;
+	return {
+		async send(message: OutboundMail): Promise<{ providerMessageId: string }> {
+			const response = await fetch(RESEND_ENDPOINT, {
+				method: "POST",
+				headers: {
+					authorization: `Bearer ${key}`,
+					"content-type": "application/json",
+				},
+				body: JSON.stringify({
+					from: message.from,
+					to: message.to.map(formatAddress),
+					...(message.cc.length ? { cc: message.cc.map(formatAddress) } : {}),
+					...(message.bcc.length ? { bcc: message.bcc.map(formatAddress) } : {}),
+					subject: message.subject,
+					text: message.text,
+					...(message.html === null ? {} : { html: message.html }),
+				}),
+			});
+			if (!response.ok) {
+				// Status only: a provider error body can echo recipients or content.
+				throw new Error(`resend_send_failed:${response.status}`);
+			}
+			const payload = (await response.json()) as { id?: unknown };
+			if (typeof payload.id !== "string" || payload.id.length === 0) {
+				throw new Error("resend_send_missing_id");
+			}
+			return { providerMessageId: payload.id };
 		},
 	};
 }
