@@ -20,7 +20,9 @@ import {
 } from "./microsoft-oauth";
 import { createGoogleOAuthClient, type GmailOAuthClient } from "./oauth-client";
 import { OAuthStateRepository } from "./oauth-state";
+import { RemoteTargetRepository } from "./remote-targets";
 import { resolveRetention, type RetentionEnv, type RetentionPolicy } from "./retention";
+import { createSocketTransport, type MailTransport } from "./socket-transport";
 import { MailRepository } from "./store";
 import { SyncStateRepository } from "./sync-state";
 
@@ -100,6 +102,10 @@ export type MailServices = {
 	microsoft: GraphClient | null;
 	/** The exact redirect URI registered with Microsoft, echoed on the callback. */
 	microsoftRedirectUri: string | null;
+	/** Socket transport for user-supplied IMAP/SMTP identities (S7e). */
+	transport: MailTransport;
+	/** IMAP/SMTP endpoint rows for `imap_smtp` identities (S7e). */
+	remoteTargets: RemoteTargetRepository;
 };
 
 export type MailServicesResult =
@@ -130,7 +136,10 @@ export function resolveCredentialKeys(env: WhoYouEnv): CredentialKeys | null {
 	};
 }
 
-export function createMailServices(env: WhoYouEnv): MailServicesResult {
+export function createMailServices(
+	env: WhoYouEnv,
+	options: { transport?: MailTransport } = {},
+): MailServicesResult {
 	if (!env.DB || !env.MAIL_BUCKET) {
 		return { ok: false, reason: "mail_storage_not_configured" };
 	}
@@ -159,6 +168,8 @@ export function createMailServices(env: WhoYouEnv): MailServicesResult {
 			microsoftOauth: microsoftConfig ? createMicrosoftOAuthClient(microsoftConfig) : null,
 			microsoft: microsoftConfig ? createGraphClient() : null,
 			microsoftRedirectUri: microsoftConfig?.redirectUri ?? null,
+			transport: options.transport ?? createSocketTransport(),
+			remoteTargets: new RemoteTargetRepository(env.DB),
 		},
 	};
 }

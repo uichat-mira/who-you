@@ -89,9 +89,10 @@ export async function runOAuthSyncSweep(
 		) => ((mailbox: MailboxRecord, now: number) => Promise<OAuthSyncSweepOutcome>) | null;
 	},
 	now: number = Date.now(),
+	options: { transport?: MailServices["transport"] } = {},
 ): Promise<OAuthSyncSweepSummary> {
 	const summary: OAuthSyncSweepSummary = { identities: 0, imported: 0, failed: 0 };
-	const resolved = createMailServices(env);
+	const resolved = createMailServices(env, options);
 	if (!resolved.ok) return summary;
 	const sweep = config.build(resolved.services);
 	if (!sweep) return summary;

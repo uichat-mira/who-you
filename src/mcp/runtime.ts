@@ -111,12 +111,17 @@ export function createWhoYouRuntime(
 		gmail: mail.services.gmail,
 		microsoftOauth: mail.services.microsoftOauth,
 		microsoft: mail.services.microsoft,
+		transport: mail.services.transport,
+		remoteTargets: mail.services.remoteTargets,
 	});
 
 	const sender =
 		options.sender !== undefined
 			? options.sender
-			: fallbackSender || mail.services.oauth || mail.services.microsoftOauth
+			: fallbackSender ||
+				  mail.services.oauth ||
+				  mail.services.microsoftOauth ||
+				  mail.services.transport
 				? routedSender
 				: null;
 
