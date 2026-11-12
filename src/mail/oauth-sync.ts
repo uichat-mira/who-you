@@ -17,6 +17,8 @@ export type OAuthSyncFailureCode =
 	| "provider_credentials_not_configured"
 	| "provider_reauth_required"
 	| "provider_unreachable"
+	| "provider_tls_required"
+	| "provider_auth_failed"
 	| "credential_unavailable"
 	| "sync_failed";
 

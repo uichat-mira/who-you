@@ -114,3 +114,20 @@ export {
 export { buildRfc822Message, encodeRawMessage } from "../src/mail/rfc822";
 export { resolveGmailOAuthConfig } from "../src/mail/gmail-link";
 export { decodeBase64Url, encodeBase64Url } from "../src/mail/base64url";
+export {
+	quoteImapString,
+	validateRemoteTarget,
+} from "../src/mail/remote-target";
+export {
+	ImapError,
+	fetchRawMessage,
+	openImapSession,
+	searchUids,
+} from "../src/mail/imap-client";
+export { SmtpError, sendSmtpMessage } from "../src/mail/smtp-client";
+export { CONNECT_TIMEOUT_MS, IO_TIMEOUT_MS, MailTransportError } from "../src/mail/socket-transport";
+export {
+	IMAP_BACKFILL_MAX_MESSAGES,
+	IMAP_BACKFILL_WINDOW_MS,
+	IMAP_SYNC_MAX_MESSAGES_PER_RUN,
+} from "../src/mail/imap-sync";

@@ -8,6 +8,7 @@ import {
 } from "./mail/download";
 import { handleGmailCallback, GMAIL_SYNC_CRON, runGmailSyncSweep } from "./mail/gmail-http";
 import { GMAIL_CALLBACK_PATH } from "./mail/gmail-link";
+import { runImapSyncSweep } from "./mail/imap-http";
 import { handleMicrosoftCallback, runMicrosoftSyncSweep } from "./mail/microsoft-http";
 import { MICROSOFT_CALLBACK_PATH } from "./mail/microsoft-link";
 import { runRetentionSweep } from "./mail/retention";
@@ -74,6 +75,7 @@ export default {
 		if (controller.cron === GMAIL_SYNC_CRON) {
 			await runGmailSyncSweep(env);
 			await runMicrosoftSyncSweep(env);
+			await runImapSyncSweep(env);
 			return;
 		}
 		const services = createMailServices(env);

@@ -21,6 +21,10 @@ import { syncMicrosoftMailbox } from "../src/mail/microsoft-sync";
 import { MICROSOFT_SCOPES, type MicrosoftOAuthClient } from "../src/mail/microsoft-oauth";
 import { encodeBase64Url } from "../src/mail/base64url";
 import { createRoutedMailSender } from "../src/mail/identity";
+import { linkImapIdentity } from "../src/mail/imap-link";
+import { syncImapMailbox } from "../src/mail/imap-sync";
+import type { MailConnection, MailTransport } from "../src/mail/socket-transport";
+import { MailTransportError } from "../src/mail/socket-transport";
 import { MailSendError, type MailSender } from "../src/mail/send";
 import type { MailboxRecord } from "../src/mail/store";
 import {
@@ -332,7 +336,7 @@ async function handleSendRoute(
 	request: Request,
 	env: TestEnv,
 	config: {
-		provider: "gmail" | "microsoft";
+		provider: "gmail" | "microsoft" | "imap_smtp";
 		subject: string;
 		buildSender: (
 			services: MailServices,
@@ -406,6 +410,8 @@ function buildRoutedSender(
 					gmail: createScriptedGmail("ok"),
 					microsoftOauth: null,
 					microsoft: null,
+					transport: null,
+					remoteTargets: null,
 				}
 			: {
 					fallback: null,
@@ -415,8 +421,169 @@ function buildRoutedSender(
 					gmail: null,
 					microsoftOauth: createFixtureMicrosoftOAuth(),
 					microsoft: createScriptedMicrosoft("ok"),
+					transport: null,
+					remoteTargets: null,
 				},
 	);
+}
+
+const FIXTURE_IMAP_RAW = [
+	"From: IMAP Sender <sender@example.org>",
+	"To: linked@example.net",
+	"Subject: IMAP fixture message",
+	"Message-ID: <imap-fixture-1@example.org>",
+	"Date: Mon, 10 Nov 2025 10:00:00 +0000",
+	"MIME-Version: 1.0",
+	'Content-Type: text/plain; charset="utf-8"',
+	"",
+	"Fixture body for the IMAP sync path.",
+	"",
+].join("\r\n");
+
+type ImapScript = "ok" | "empty" | "imap_auth_fail" | "uidvalidity_changed";
+type SmtpScript = "ok" | "no_starttls" | "auth_fail";
+
+type FakeTransportState = {
+	connectCalls: number;
+	authAttempts: number;
+	commands: string[];
+};
+
+type FakeTransport = MailTransport & { state: FakeTransportState };
+
+/**
+ * Scripted socket double for S7e. It answers the exact command grammar the SMTP
+ * and IMAP clients emit and never performs DNS or network I/O.
+ */
+function createFakeTransport(input: {
+	imapScript?: ImapScript;
+	smtpScript?: SmtpScript;
+	uidValidity?: number;
+}): FakeTransport {
+	const state: FakeTransportState = { connectCalls: 0, authAttempts: 0, commands: [] };
+	const imapScript = input.imapScript ?? "ok";
+	const smtpScript = input.smtpScript ?? "ok";
+	const uidValidity = input.uidValidity ?? 42;
+	return {
+		state,
+		async connect({ port }) {
+			state.connectCalls += 1;
+			const isImap = port === 993 || port === 143;
+			const queue: string[] = [];
+			const literals: Uint8Array[] = [];
+			let awaitingData = false;
+			let loginStage = 0;
+			const push = (...lines: string[]): void => {
+				queue.push(...lines);
+			};
+			if (isImap) push("* OK fake IMAP ready");
+			else push("220 fake ESMTP ready");
+
+			const write = async (data: string | Uint8Array): Promise<void> => {
+				const text = typeof data === "string" ? data : new TextDecoder().decode(data);
+				if (awaitingData) {
+					awaitingData = false;
+					push("250 2.0.0 queued");
+					return;
+				}
+				state.commands.push(text.trimEnd());
+				if (isImap) {
+					const space = text.indexOf(" ");
+					const tag = text.slice(0, space);
+					const command = text.slice(space + 1).trimEnd();
+					if (command.startsWith("CAPABILITY")) {
+						push(
+							"* CAPABILITY IMAP4rev1 STARTTLS",
+							`${tag} OK CAPABILITY completed`,
+						);
+					} else if (command.startsWith("STARTTLS")) {
+						push(`${tag} OK Begin TLS`);
+					} else if (command.startsWith("LOGIN")) {
+						push(
+							imapScript === "imap_auth_fail"
+								? `${tag} NO [AUTHENTICATIONFAILED] rejected`
+								: `${tag} OK LOGIN completed`,
+						);
+					} else if (command.startsWith("SELECT")) {
+						push(
+							"* FLAGS (\\Seen)",
+							`* OK [UIDVALIDITY ${uidValidity}] UIDs valid`,
+							"* OK [UIDNEXT 3] Predicted next UID",
+							`${tag} OK [READ-WRITE] SELECT completed`,
+						);
+					} else if (command.startsWith("UID SEARCH")) {
+						push(
+							imapScript === "empty" ? "* SEARCH" : "* SEARCH 1 2",
+							`${tag} OK SEARCH completed`,
+						);
+					} else if (command.startsWith("UID FETCH")) {
+						const uid = Number.parseInt(command.split(/\s+/)[2] ?? "1", 10);
+						const raw = new TextEncoder().encode(FIXTURE_IMAP_RAW);
+						push(`* 1 FETCH (UID ${uid} BODY[] {${raw.byteLength}}`);
+						literals.push(raw);
+						push(")", `${tag} OK FETCH completed`);
+					} else if (command.startsWith("LOGOUT")) {
+						push("* BYE", `${tag} OK LOGOUT completed`);
+					}
+					return;
+				}
+
+				if (loginStage === 1) {
+					loginStage = 2;
+					push("334 UGFzc3dvcmQ6");
+					return;
+				}
+				if (loginStage === 2) {
+					loginStage = 0;
+					push(smtpScript === "auth_fail" ? "535 5.7.8 rejected" : "235 2.7.0 accepted");
+					return;
+				}
+				if (text.startsWith("EHLO")) {
+					push(
+						...(smtpScript === "no_starttls"
+							? ["250-fake", "250 SIZE 100000"]
+							: ["250-fake", "250 STARTTLS"]),
+					);
+				} else if (text.startsWith("STARTTLS")) {
+					push("220 2.0.0 Ready to start TLS");
+				} else if (text.startsWith("AUTH PLAIN")) {
+					state.authAttempts += 1;
+					push(smtpScript === "auth_fail" ? "535 5.7.8 rejected" : "235 2.7.0 accepted");
+				} else if (text.startsWith("AUTH LOGIN")) {
+					state.authAttempts += 1;
+					loginStage = 1;
+					push("334 VXNlcm5hbWU6");
+				} else if (text.startsWith("MAIL FROM") || text.startsWith("RCPT TO")) {
+					push("250 2.1.0 OK");
+				} else if (text.startsWith("DATA")) {
+					awaitingData = true;
+					push("354 End data with <CR><LF>.<CR><LF>");
+				} else if (text.startsWith("QUIT")) {
+					push("221 2.0.0 Bye");
+				}
+			};
+
+			return {
+				async readLine() {
+					const line = queue.shift();
+					if (line === undefined) throw new MailTransportError();
+					return line;
+				},
+				async readBytes(length: number) {
+					const literal = literals.shift();
+					if (!literal || literal.byteLength < length) throw new MailTransportError();
+					return literal.subarray(0, length);
+				},
+				write,
+				async upgradeTls() {
+					return;
+				},
+				async close() {
+					return;
+				},
+			} satisfies MailConnection;
+		},
+	};
 }
 
 export default {
@@ -611,6 +778,8 @@ export default {
 						gmail: createScriptedGmail(input.script as GmailScript),
 						microsoftOauth: null,
 						microsoft: null,
+						transport: null,
+						remoteTargets: null,
 					}),
 			});
 		}
@@ -666,7 +835,99 @@ export default {
 							invalidGrant: input.invalidGrant,
 						}),
 						microsoft: createScriptedMicrosoft(input.script as MicrosoftScript),
+						transport: null,
+						remoteTargets: null,
 					}),
+			});
+		}
+
+		if (path === "/__imap/link") {
+			const input = (await request.json()) as Record<string, unknown>;
+			const resolved = createMailServices(env);
+			if (!resolved.ok || !resolved.services.credentialKeys) {
+				return Response.json({ error: "mail_storage_not_configured" }, { status: 503 });
+			}
+			const services = resolved.services;
+			const transport = createFakeTransport({
+				imapScript: (input.imapScript as ImapScript | undefined) ?? "ok",
+				uidValidity: Number(input.uidValidity ?? 42),
+			});
+			const result = await linkImapIdentity(
+				{
+					repository: services.repository,
+					credentials: services.credentials,
+					keys: services.credentialKeys,
+					syncStates: services.syncStates,
+					limits: services.limits,
+					remoteTargets: services.remoteTargets,
+					transport,
+					now: Date.now(),
+				},
+				{
+					accountId: String(input.accountId ?? ""),
+					address: String(input.address ?? ""),
+					username: String(input.username ?? ""),
+					imapHost: String(input.imapHost ?? ""),
+					imapPort: Number(input.imapPort ?? 0),
+					smtpHost: String(input.smtpHost ?? ""),
+					smtpPort: Number(input.smtpPort ?? 0),
+					appPassword: String(input.appPassword ?? ""),
+				},
+			);
+			return Response.json({
+				...result,
+				connectCalls: transport.state.connectCalls,
+				authAttempts: transport.state.authAttempts,
+			});
+		}
+
+		if (path === "/__imap/sync") {
+			return handleSyncRoute(request, env, async (services, keys, mailbox, script) => {
+				const transport = createFakeTransport({
+					imapScript: script as ImapScript,
+					uidValidity: script === "uidvalidity_changed" ? 43 : 42,
+				});
+				const outcome = await syncImapMailbox(
+					{
+						repository: services.repository,
+						limits: services.limits,
+						credentials: services.credentials,
+						keys,
+						syncStates: services.syncStates,
+						remoteTargets: services.remoteTargets,
+						transport,
+						now: Date.now(),
+					},
+					mailbox,
+				);
+				return {
+					...outcome,
+					connectCalls: transport.state.connectCalls,
+					authAttempts: transport.state.authAttempts,
+				};
+			});
+		}
+
+		if (path === "/__imap/send") {
+			return handleSendRoute(request, env, {
+				provider: "imap_smtp",
+				subject: "IMAP/SMTP outbound",
+				buildSender: (services, keys, input) => {
+					const transport = createFakeTransport({
+						smtpScript: input.script as SmtpScript,
+					});
+					return createRoutedMailSender({
+						fallback: null,
+						credentials: services.credentials,
+						keys,
+						oauth: null,
+						gmail: null,
+						microsoftOauth: null,
+						microsoft: null,
+						transport,
+						remoteTargets: services.remoteTargets,
+					});
+				},
 			});
 		}
 

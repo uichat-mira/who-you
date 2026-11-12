@@ -8,6 +8,7 @@ import {
 	listIdentities,
 	unlinkMailbox,
 } from "../mail/identity";
+import { linkImapIdentity, type ImapLinkFailureCode } from "../mail/imap-link";
 import { startMicrosoftLink } from "../mail/microsoft-link";
 import type { MailboxRecord } from "../mail/store";
 import type { WhoYouPrincipal } from "./auth";
@@ -41,6 +42,20 @@ const DESTRUCTIVE_WRITE = {
 export type IdentityToolDependencies = {
 	identityConfirmations: WhoYouIdentityConfirmationVerifier;
 };
+
+const IMAP_LINK_MESSAGES: Record<ImapLinkFailureCode, string> = {
+	invalid_target_host: "The host must be a plain hostname; IP literals and local names are rejected.",
+	invalid_target_port: "Only IMAP 993 (or 143) and SMTP 465/587 are accepted.",
+	provider_identity_mismatch: "The address must equal the SMTP login; relaying for another account is not allowed.",
+	provider_auth_failed: "The provider rejected the username or app password.",
+	provider_unreachable: "The provider could not be reached; nothing was stored.",
+	provider_tls_required: "The provider did not offer STARTTLS; plaintext submission is refused.",
+	credential_vault_unavailable: "The credential vault is not configured on this deployment.",
+	address_already_linked: "This address is already linked to another identity.",
+	link_failed: "The identity could not be linked; nothing was stored.",
+};
+
+const imapLinkMessage = (code: ImapLinkFailureCode): string => IMAP_LINK_MESSAGES[code];
 
 const identityJson = (mailbox: MailboxRecord, credentialStatus: string | null): Record<string, unknown> => ({
 	mailboxId: mailbox.id,
@@ -129,10 +144,18 @@ export function registerIdentityTools(
 		{
 			title: "Who You link a third-party identity",
 			description:
-				"Starts linking a Gmail or Microsoft mailbox with OAuth + PKCE. Requires an identity confirmation credential bound to action=link and the same provider. Returns a provider authorization URL that the user must open; the refresh token is stored only after the provider callback succeeds. Never share the URL.",
+				"Links a Gmail or Microsoft mailbox with OAuth + PKCE, or an IMAP/SMTP mailbox with a user-supplied host, port, username and app password. Requires an identity confirmation credential bound to action=link and the same provider. OAuth returns a provider authorization URL the user must open; IMAP/SMTP verifies the login and stores the password sealed, so no host or password is ever returned. Never share the authorization URL.",
 			inputSchema: z.object({
-				provider: z.enum(["gmail", "microsoft"]),
+				provider: z.enum(["gmail", "microsoft", "imap_smtp"]),
 				confirmationCredential: z.string().trim().min(1).max(8192),
+				/** imap_smtp only: the address, its SMTP login and the two endpoints. */
+				address: z.string().trim().min(1).max(320).optional(),
+				username: z.string().trim().min(1).max(320).optional(),
+				imapHost: z.string().trim().min(1).max(253).optional(),
+				imapPort: z.number().int().min(1).max(65535).optional(),
+				smtpHost: z.string().trim().min(1).max(253).optional(),
+				smtpPort: z.number().int().min(1).max(65535).optional(),
+				appPassword: z.string().min(1).max(4096).optional(),
 			}),
 			annotations: REVERSIBLE_WRITE,
 		},
@@ -143,6 +166,21 @@ export function registerIdentityTools(
 				return failure(
 					"provider_not_configured",
 					"The credential vault is not configured on this deployment.",
+				);
+			}
+			const suppliedImapField = [
+				args.address,
+				args.username,
+				args.imapHost,
+				args.imapPort,
+				args.smtpHost,
+				args.smtpPort,
+				args.appPassword,
+			].some((value) => value !== undefined);
+			if (args.provider !== "imap_smtp" && suppliedImapField) {
+				return failure(
+					"invalid_arguments",
+					"IMAP/SMTP endpoint fields are only accepted when provider is imap_smtp.",
 				);
 			}
 			if (args.provider === "gmail" && (!services.oauth || !services.gmailRedirectUri)) {
@@ -190,6 +228,57 @@ export function registerIdentityTools(
 				return failure(
 					"confirmation_replayed",
 					"This confirmation credential was already used; no second link was started.",
+				);
+			}
+
+			if (args.provider === "imap_smtp") {
+				const address = args.address?.trim().toLowerCase();
+				const username = args.username?.trim().toLowerCase();
+				if (
+					!address ||
+					!username ||
+					!args.imapHost ||
+					!args.smtpHost ||
+					!args.appPassword ||
+					args.imapPort === undefined ||
+					args.smtpPort === undefined
+				) {
+					return failure(
+						"invalid_arguments",
+						"provider=imap_smtp requires address, username, imapHost, imapPort, smtpHost, smtpPort and appPassword.",
+					);
+				}
+				const linked = await linkImapIdentity(
+					{
+						repository: services.repository,
+						credentials: services.credentials,
+						keys: services.credentialKeys,
+						syncStates: services.syncStates,
+						limits: services.limits,
+						remoteTargets: services.remoteTargets,
+						transport: services.transport,
+						now: Date.now(),
+					},
+					{
+						accountId,
+						address,
+						username,
+						imapHost: args.imapHost,
+						imapPort: args.imapPort,
+						smtpHost: args.smtpHost,
+						smtpPort: args.smtpPort,
+						appPassword: args.appPassword,
+					},
+				);
+				if (!linked.ok) return failure(linked.code, imapLinkMessage(linked.code));
+				return success(
+					`The IMAP/SMTP identity ${linked.address} was linked. Syncing starts from the last 30 days; no password or host is ever returned.`,
+					{
+						provider: "imap_smtp",
+						mailboxId: linked.mailboxId,
+						address: linked.address,
+						relinked: linked.relinked,
+					},
 				);
 			}
 
@@ -318,6 +407,7 @@ export function registerIdentityTools(
 					credentials: services.credentials,
 					keys: services.credentialKeys,
 					oauth: services.oauth,
+					remoteTargets: services.remoteTargets,
 				},
 				{ accountId, mailboxId: args.mailboxId, now: Date.now() },
 			);
