@@ -100,7 +100,14 @@ export type AuditAction =
 	| "delete_mailbox"
 	| "provision_mailbox"
 	| "link_mailbox"
-	| "unlink_mailbox";
+	| "unlink_mailbox"
+	| "job_create"
+	| "job_stage_update"
+	| "job_stage_accept"
+	| "job_annotate"
+	| "job_annotation_resolve"
+	| "job_pause"
+	| "job_resume";
 
 export type NewAuditEntry = {
 	id: string;

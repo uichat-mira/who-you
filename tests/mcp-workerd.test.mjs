@@ -27,6 +27,15 @@ const MAIL_TOOL_NAMES = [
 	"whoyou_mail_message_get",
 	"whoyou_mail_attachment_get",
 	"whoyou_mail_flag_set",
+	"whoyou_job_create",
+	"whoyou_job_list",
+	"whoyou_job_get",
+	"whoyou_job_stage_update",
+	"whoyou_job_annotate",
+	"whoyou_job_annotation_resolve",
+	"whoyou_job_stage_accept",
+	"whoyou_job_pause",
+	"whoyou_job_resume",
 	"whoyou_mail_draft_create",
 	"whoyou_mail_draft_update",
 	"whoyou_mail_draft_discard",
@@ -51,6 +60,8 @@ const READ_ONLY_TOOL_NAMES = new Set([
 	"whoyou_mail_attachment_get",
 	"whoyou_mail_draft_get",
 	"whoyou_mail_draft_list",
+	"whoyou_job_list",
+	"whoyou_job_get",
 ]);
 
 const DESTRUCTIVE_TOOL_NAMES = new Set([

@@ -21,6 +21,7 @@ import {
 import { createGoogleOAuthClient, type GmailOAuthClient } from "./oauth-client";
 import { OAuthStateRepository } from "./oauth-state";
 import { RemoteTargetRepository } from "./remote-targets";
+import { JobRepository } from "./job-store";
 import { resolveRetention, type RetentionEnv, type RetentionPolicy } from "./retention";
 import { createSocketTransport, type MailTransport } from "./socket-transport";
 import { MailRepository } from "./store";
@@ -106,6 +107,8 @@ export type MailServices = {
 	transport: MailTransport;
 	/** IMAP/SMTP endpoint rows for `imap_smtp` identities (S7e). */
 	remoteTargets: RemoteTargetRepository;
+	/** Mail job contract storage (S8b). */
+	jobs: JobRepository;
 };
 
 export type MailServicesResult =
@@ -170,6 +173,7 @@ export function createMailServices(
 			microsoftRedirectUri: microsoftConfig?.redirectUri ?? null,
 			transport: options.transport ?? createSocketTransport(),
 			remoteTargets: new RemoteTargetRepository(env.DB),
+			jobs: new JobRepository(env.DB),
 		},
 	};
 }

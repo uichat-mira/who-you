@@ -40,6 +40,7 @@ export const MIGRATIONS = [
 	...migrationStatements("migrations/0008_gmail_identity.sql"),
 	...migrationStatements("migrations/0009_imap_smtp_identity.sql"),
 	...migrationStatements("migrations/0010_mail_jobs.sql"),
+	...migrationStatements("migrations/0011_mail_job_audit.sql"),
 ];
 
 export const BASE_BINDINGS = {
