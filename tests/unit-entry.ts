@@ -152,3 +152,9 @@ export {
 	stageContentHash,
 	validateAnnotationAnchor,
 } from "../src/mail/job-state";
+export {
+	capLimit,
+	filterBySenders,
+	narrowFolder,
+	resolveJobScope,
+} from "../src/mail/job-scope";

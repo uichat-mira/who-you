@@ -451,4 +451,42 @@ export class JobRepository {
 			.all<RunRow>();
 		return (rows.results ?? []).map(toRun);
 	}
+
+	/**
+	 * Opens a run row. `run_no` is derived from the existing maximum so the
+	 * `(job_id, run_no)` uniqueness holds even when two attempts race; a losing
+	 * insert is retried once by the caller instead of reusing a number.
+	 */
+	async startRun(input: { id: string; jobId: string; now: number }): Promise<number> {
+		const row = await this.db
+			.prepare("SELECT COALESCE(MAX(run_no), 0) AS last FROM mail_job_runs WHERE job_id = ?")
+			.bind(input.jobId)
+			.first<{ last: number }>();
+		const runNo = (row?.last ?? 0) + 1;
+		await this.db
+			.prepare(
+				`INSERT INTO mail_job_runs (id, job_id, run_no, status, reason_code, started_at, finished_at)
+				 VALUES (?,?,?,'running',NULL,?,NULL)`,
+			)
+			.bind(input.id, input.jobId, runNo, input.now)
+			.run();
+		return runNo;
+	}
+
+	/** Closes a run with a fixed code; `reason_code` is never prose. */
+	async finishRun(input: {
+		jobId: string;
+		runNo: number;
+		status: "succeeded" | "failed";
+		reasonCode: string | null;
+		now: number;
+	}): Promise<void> {
+		await this.db
+			.prepare(
+				`UPDATE mail_job_runs SET status = ?, reason_code = ?, finished_at = ?
+				 WHERE job_id = ? AND run_no = ?`,
+			)
+			.bind(input.status, input.reasonCode, input.now, input.jobId, input.runNo)
+			.run();
+	}
 }

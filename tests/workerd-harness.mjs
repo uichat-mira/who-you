@@ -136,3 +136,62 @@ export async function seedTwoAccounts(db) {
 		});
 	}
 }
+
+/**
+ * Inserts one visible inbound message with its thread, and keeps the mailbox
+ * counters consistent. Shared so the suites do not each re-declare the same
+ * 25-column INSERT; addresses and subjects stay synthetic.
+ */
+export async function seedMessage(db, options) {
+	const mailboxId = options.mailboxId ?? "mbx_a";
+	const accountId = options.accountId ?? "account-a";
+	const threadId = options.threadId ?? `thr_${options.id}`;
+	const state = options.state ?? "visible";
+	const sizeBytes = options.sizeBytes ?? 100;
+	const subject = options.subject ?? "Hello";
+	const from = options.from ?? "alice@example.com";
+	const receivedAt = options.receivedAt ?? NOW;
+
+	await db
+		.prepare(
+			`INSERT INTO threads (id, mailbox_id, thread_key, root_message_id, last_message_at, message_count)
+			 VALUES (?,?,?,NULL,?,1)`,
+		)
+		.bind(threadId, mailboxId, threadId, receivedAt)
+		.run();
+	await db
+		.prepare(
+			`INSERT INTO messages (
+			 id, mailbox_id, thread_id, direction, internet_message_id, envelope_from, envelope_to,
+			 from_json, to_json, cc_json, subject, from_text, search_text, sent_at, received_at,
+			 size_bytes, snippet, attachment_count, auth_results, dmarc, state, quarantine_reason,
+			 raw_key, text_key, html_key
+			 ) VALUES (?,?,?, 'inbound', ?, ?, 'alpha@tomlab.cn', ?, '[]', '[]', ?, ?, ?, NULL, ?,
+			 ?, ?, ?, 'spf=pass', 'pass', ?, NULL, ?, NULL, NULL)`,
+		)
+		.bind(
+			options.id,
+			mailboxId,
+			threadId,
+			`${options.id}@example.com`,
+			from,
+			JSON.stringify([{ name: "", address: from }]),
+			subject,
+			from,
+			`${subject} ${options.bodyHint ?? "body"}`.toLowerCase(),
+			receivedAt,
+			sizeBytes,
+			options.snippet ?? "snippet",
+			options.attachmentCount ?? 0,
+			state,
+			`accounts/${accountId}/mailboxes/${mailboxId}/messages/${options.id}/raw.eml`,
+		)
+		.run();
+	await db
+		.prepare(
+			`UPDATE mailboxes SET message_count = message_count + 1, bytes_used = bytes_used + ?,
+			 quarantine_count = quarantine_count + ? WHERE id = ?`,
+		)
+		.bind(sizeBytes, state === "quarantined" ? 1 : 0, mailboxId)
+		.run();
+}

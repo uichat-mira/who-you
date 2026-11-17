@@ -17,6 +17,7 @@ import { createAbuseMonitor, createSendGate } from "../mail/deliverability";
 import { sendDraft, type MailSender } from "../mail/send";
 import type { WhoYouPrincipal } from "./auth";
 import { WHOYOU_MAIL_WRITE_SCOPE } from "./config";
+import { isJobRunnable } from "../mail/job-state";
 import { failure, success, type ToolResult } from "./mail";
 
 export const DRAFT_CREATE_TOOL = "whoyou_mail_draft_create";
@@ -428,6 +429,9 @@ export function registerDraftTools(
 					.min(1)
 					.max(128)
 					.regex(/^[A-Za-z0-9._:-]+$/),
+				// Optional: when supplied, the job must be active and must own the
+				// mailbox this draft belongs to. Omitted, the tool is unchanged.
+				jobId: SAFE_ID.optional(),
 			}),
 			annotations: SEND,
 		},
@@ -435,6 +439,26 @@ export function registerDraftTools(
 			const existing = await drafts.getDraft(accountId, args.draftId);
 			if (!existing) {
 				return failure("draft_not_found", "No such draft exists in your mailbox.");
+			}
+			// A job id is a gate, never an authority: it must be this account's job,
+			// it must be active, and its mailbox must be the draft's mailbox.
+			if (args.jobId) {
+				const job = await services.jobs.getJob(accountId, args.jobId);
+				if (!job) {
+					return failure("job_not_found", "No such job exists for this account.");
+				}
+				if (!isJobRunnable(job.status)) {
+					return failure(
+						"job_not_active",
+						"The job is not active, so it cannot send. Every stage must be accepted and long-term hosting enabled.",
+					);
+				}
+				if (job.mailboxId !== existing.mailboxId) {
+					return failure(
+						"job_mailbox_mismatch",
+						"The draft belongs to a different mailbox than the job.",
+					);
+				}
 			}
 			const mailbox = await repository.findMailboxById(accountId, existing.mailboxId);
 			const identity = mailbox
@@ -465,6 +489,23 @@ export function registerDraftTools(
 			if (!result.ok) return failure(result.code, result.detail);
 
 			const receipt = result.receipt;
+			// A run row records the attempt only when the caller bound it to a job.
+			// It carries a fixed code and never an address, subject or body.
+			if (args.jobId) {
+				const now = Date.now();
+				const runNo = await services.jobs.startRun({
+					id: `run_${crypto.randomUUID()}`,
+					jobId: args.jobId,
+					now,
+				});
+				await services.jobs.finishRun({
+					jobId: args.jobId,
+					runNo,
+					status: "succeeded",
+					reasonCode: null,
+					now,
+				});
+			}
 			return success(
 				[
 					"# Who You · send receipt",
