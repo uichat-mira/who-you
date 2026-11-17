@@ -28,6 +28,7 @@ import {
 	type WhoamiResult,
 } from "./capabilities";
 import { registerMailTools } from "./mail";
+import { registerJobTools } from "./jobs";
 import { registerLifecycleTools } from "./lifecycle";
 import { registerDraftTools, type DraftToolDependencies } from "./drafts";
 import { registerIdentityTools, type IdentityToolDependencies } from "./identities";
@@ -68,6 +69,7 @@ function buildMcpServer(
 	);
 
 	registerMailTools(server, principal, services);
+	registerJobTools(server, principal, services);
 	registerDraftTools(server, principal, services, tools);
 	registerIdentityTools(server, principal, services, tools);
 	registerLifecycleTools(server, principal, services);
