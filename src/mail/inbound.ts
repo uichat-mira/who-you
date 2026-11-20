@@ -99,6 +99,7 @@ export async function handleInboundEmail(
 		throw new Error("raw_read_failed");
 	}
 
+	const trustedHeader = message.headers.get("authentication-results");
 	const result = await ingestRawMail({
 		repository,
 		limits,
@@ -106,17 +107,20 @@ export async function handleInboundEmail(
 		raw,
 		envelopeFrom: message.from || null,
 		receivedAt: Date.now(),
+		trustedAuthHeaders: trustedHeader
+			? [{ key: "authentication-results", value: trustedHeader }]
+			: [],
 	});
 
 	if (!result.ok) {
-		if (result.reason === "raw_size_limit") {
+		if (result.reason === "raw_size_limit" || result.reason === "mime_structure_limit") {
 			message.setReject(REJECT_TOO_LARGE);
 			logInbound({
 				event: "whoyou_mail_inbound",
 				outcome: "rejected_too_large",
 				mailboxId: mailbox.id,
 				bytes: raw.byteLength,
-				reason: "raw_size_limit",
+				reason: result.reason,
 			});
 			return;
 		}

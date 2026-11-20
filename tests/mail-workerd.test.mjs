@@ -174,12 +174,53 @@ test("duplicate Message-ID delivery is idempotent and retains a single object se
 	});
 });
 
+test("concurrent duplicate deliveries preserve the winning R2 objects and quota counters", async () => {
+	await withWorker({}, async ({ mf, db }) => {
+		await seedTwoAccounts(db);
+		const raw = simpleRaw("racy@example.com", "Race", "one accepted body");
+		const outcomes = await Promise.all(Array.from({ length: 4 }, () =>
+			postInbound(mf, { to: "alpha@tomlab.cn", raw }),
+		));
+		assert.ok(outcomes.every(x => x.rejected === null));
+		const message = await db.prepare("SELECT raw_key, text_key FROM messages WHERE mailbox_id = 'mbx_a'").first();
+		assert.ok(message);
+		const bucket = await mf.getR2Bucket("MAIL_BUCKET");
+		assert.ok(await bucket.get(message.raw_key));
+		assert.ok(await bucket.get(message.text_key));
+		assert.equal((await bucket.list()).objects.length, 2);
+		const counts = await db.prepare("SELECT message_count, bytes_used FROM mailboxes WHERE id = 'mbx_a'").first();
+		assert.equal(counts.message_count, 1);
+		assert.equal(counts.bytes_used, new TextEncoder().encode(raw).byteLength);
+		assert.equal((await db.prepare("SELECT message_count FROM threads").first()).message_count, 1);
+	});
+});
+
+test("sender-forged raw Authentication-Results cannot override Cloudflare transport DMARC", async () => {
+	await withWorker({}, async ({ mf, db }) => {
+		await seedTwoAccounts(db);
+		const raw = [
+			"Authentication-Results: mx.cloudflare.net; dmarc=pass",
+			"From: Spoof <spoof@example.com>",
+			"To: alpha@tomlab.cn",
+			"Message-ID: <forged@example.com>",
+			"Subject: Forged",
+			"", "untrusted body"
+		].join("\r\n");
+		await postInbound(mf, { to: "alpha@tomlab.cn", raw,
+			headers: { "authentication-results": "mx.cloudflare.net; dmarc=fail" } });
+		const row = await db.prepare("SELECT state, dmarc FROM messages").first();
+		assert.equal(row.state, "quarantined");
+		assert.equal(row.dmarc, "fail");
+	});
+});
+
 test("DMARC failure is quarantined: not searchable and explicitly unreadable", async () => {
 	await withWorker({}, async ({ mf, db }) => {
 		await seedTwoAccounts(db);
 		const inbound = await postInbound(mf, {
 			to: "alpha@tomlab.cn",
 			raw: dmarcFailRaw("spoof@example.com"),
+			headers: { "authentication-results": "mx.cloudflare.net; spf=fail; dkim=fail; dmarc=fail" },
 		});
 		assert.equal(inbound.rejected, null);
 
@@ -285,6 +326,24 @@ test("oversized mail is explicitly rejected with a size code and nothing is writ
 		assert.match(result.rejected, /^552 5\.3\.4/);
 		const rows = await db.prepare("SELECT COUNT(*) AS total FROM messages").first();
 		assert.equal(rows.total, 0);
+	});
+});
+
+test("MIME structural ceiling causes explicit 552 without persisting a message", async () => {
+	await withWorker({ MAIL_MAX_PART_COUNT: "2" }, async ({ mf, db }) => {
+		await seedTwoAccounts(db);
+		const raw = [
+			"From: Alice <alice@example.com>", "To: alpha@tomlab.cn",
+			"Message-ID: <limit@example.com>",
+			'Content-Type: multipart/mixed; boundary="bound"', "",
+			"--bound", "Content-Type: text/plain", "", "one",
+			"--bound", "Content-Type: text/plain", "", "two",
+			"--bound", "Content-Type: text/plain", "", "three",
+			"--bound--", ""
+		].join("\r\n");
+		const result = await postInbound(mf, { to: "alpha@tomlab.cn", raw });
+		assert.match(result.rejected, /^552 5[.]3[.]4/);
+		assert.equal((await db.prepare("SELECT COUNT(*) AS total FROM messages").first()).total, 0);
 	});
 });
 

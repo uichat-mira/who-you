@@ -670,7 +670,8 @@ export class MailRepository {
 				.prepare(
 					`INSERT INTO threads (
 					 id, mailbox_id, thread_key, root_message_id, last_message_at, message_count
-				 ) VALUES (?,?,?,?,?,1)
+				 ) SELECT ?,?,?,?,?,1
+				 WHERE EXISTS (SELECT 1 FROM messages WHERE id = ?)
 				 ON CONFLICT (mailbox_id, thread_key) DO UPDATE SET
 					 last_message_at = MAX(last_message_at, excluded.last_message_at),
 					 message_count = message_count + 1`,
@@ -681,6 +682,7 @@ export class MailRepository {
 					thread.threadKey,
 					thread.rootMessageId,
 					thread.lastMessageAt,
+					message.id,
 				),
 			...attachments.map((attachment) =>
 				this.db
@@ -688,7 +690,8 @@ export class MailRepository {
 						`INSERT INTO attachments (
 						 id, message_id, mailbox_id, part_path, filename, mime_type,
 						 size_bytes, disposition, content_id, r2_key
-					 ) VALUES (?,?,?,?,?,?,?,?,?,?)
+					 ) SELECT ?,?,?,?,?,?,?,?,?,?
+					 WHERE EXISTS (SELECT 1 FROM messages WHERE id = ?)
 					 ON CONFLICT (message_id, part_path) DO NOTHING`,
 					)
 					.bind(
@@ -702,6 +705,7 @@ export class MailRepository {
 						attachment.disposition,
 						attachment.contentId,
 						attachment.r2Key,
+						message.id,
 					),
 			),
 			this.db
@@ -711,9 +715,9 @@ export class MailRepository {
 					     message_count = message_count + 1,
 					     quarantine_count = quarantine_count + ?,
 					     updated_at = ?
-					 WHERE id = ?`,
+					 WHERE id = ? AND EXISTS (SELECT 1 FROM messages WHERE id = ?)`,
 				)
-				.bind(message.sizeBytes, message.state === "quarantined" ? 1 : 0, receivedAt, message.mailboxId),
+				.bind(message.sizeBytes, message.state === "quarantined" ? 1 : 0, receivedAt, message.mailboxId, message.id),
 		];
 
 		const results = await this.db.batch(statements);

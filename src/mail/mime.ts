@@ -90,14 +90,16 @@ const normalizeVerdict = (value: string | undefined): string => {
  */
 export function parseAuthVerdict(headers: { key: string; value: string }[]): AuthVerdict {
 	const verdicts = new Map<string, string>();
-	for (const header of headers) {
-		if (header.key.toLowerCase() !== "authentication-results") continue;
+	// Cloudflare's receiver-side verdict is the first mx.cloudflare.net header;
+	// later headers can be sender controlled and must not overwrite it.
+	const first = headers.find(h => h.key.toLowerCase() === "authentication-results");
+	const trusted = first?.value.split(",")[0]?.trim() ?? "";
+	if (/^mx\.cloudflare\.net\s*;/i.test(trusted)) {
 		AUTH_METHOD.lastIndex = 0;
-		let match = AUTH_METHOD.exec(header.value);
+		let match = AUTH_METHOD.exec(trusted);
 		while (match) {
-			const method = match[1].toLowerCase();
-			verdicts.set(method, normalizeVerdict(match[2]));
-			match = AUTH_METHOD.exec(header.value);
+			verdicts.set(match[1].toLowerCase(), normalizeVerdict(match[2]));
+			match = AUTH_METHOD.exec(trusted);
 		}
 	}
 	const spf = verdicts.get("spf") ?? "none";
@@ -109,12 +111,7 @@ export function parseAuthVerdict(headers: { key: string; value: string }[]): Aut
 			: dmarcValue === "none"
 				? "none"
 				: "unknown";
-	return {
-		spf,
-		dkim,
-		dmarc,
-		summary: `spf=${spf};dkim=${dkim};dmarc=${dmarcValue ?? "unknown"}`,
-	};
+	return { spf, dkim, dmarc, summary: `spf=${spf};dkim=${dkim};dmarc=${dmarcValue ?? "unknown"}` };
 }
 
 const parseDate = (value: string | null): number | null => {
@@ -151,7 +148,8 @@ const toParsedMail = (parsed: RawMime, limits: MailLimits): ParsedMail => {
 		text: parsed.text,
 		html: parsed.html ? sanitizeHtml(parsed.html) : null,
 		attachments,
-		auth: parseAuthVerdict(parsed.headers),
+		// Raw MIME headers belong to the sender, not the receiving platform.
+		auth: parseAuthVerdict([]),
 	};
 };
 

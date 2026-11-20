@@ -2,6 +2,7 @@ import { sha256Hex } from "./hash";
 import type { MailLimits } from "./limits";
 import {
 	MailParseError,
+	parseAuthVerdict,
 	parseInboundMail,
 	type ParsedMail,
 	type ParseFailure,
@@ -104,7 +105,7 @@ const prepareInbound = async (
 	}
 };
 
-export type IngestFailure = "raw_size_limit" | "mailbox_quota" | "storage_write_failed";
+export type IngestFailure = "raw_size_limit" | "mime_structure_limit" | "mailbox_quota" | "storage_write_failed";
 
 export type IngestResult =
 	| {
@@ -127,6 +128,8 @@ export type IngestInput = {
 	receivedAt: number;
 	/** Provider sync may discover a message the identity itself sent. */
 	direction?: "inbound" | "outbound";
+	/** Trusted receiver-side authentication header, never sender-controlled MIME. */
+	trustedAuthHeaders?: { key: string; value: string }[];
 };
 
 /**
@@ -143,12 +146,22 @@ export async function ingestRawMail(input: IngestInput): Promise<IngestResult> {
 		return { ok: false, reason: "mailbox_quota" };
 	}
 
-	const prepared = await prepareInbound(raw, limits);
+	let prepared: Awaited<ReturnType<typeof prepareInbound>>;
+	try {
+		prepared = await prepareInbound(raw, limits);
+	} catch (error) {
+		if (error instanceof MailParseError && error.failure.kind === "limit") {
+			return { ok: false, reason: "mime_structure_limit" };
+		}
+		throw error;
+	}
 	const parsed = prepared.parsed;
 	const fallbackId =
 		readHeaderValue(raw, "message-id") ?? `sha256:${await sha256Hex(raw)}`;
 	const internetMessageId = parsed?.internetMessageId ?? fallbackId;
-	const messageId = `msg_${(await sha256Hex(`${mailbox.id}\n${internetMessageId}`)).slice(0, 32)}`;
+	// Unique attempt IDs isolate R2 objects during concurrent duplicate delivery;
+	// the D1 unique mailbox/Message-ID index still decides which attempt wins.
+	const messageId = `msg_${crypto.randomUUID().replace(/-/g, "")}`;
 
 	if (await repository.messageExists(mailbox.id, internetMessageId)) {
 		return {
@@ -162,14 +175,17 @@ export async function ingestRawMail(input: IngestInput): Promise<IngestResult> {
 		};
 	}
 
-	const dmarc = parsed?.auth.dmarc ?? "unknown";
+	// Only the receiving platform can vouch for authentication results.
+	// Provider-synced MIME has no Cloudflare transport assertion.
+	const trustedAuth = parseAuthVerdict(input.trustedAuthHeaders ?? []);
+	const dmarc = trustedAuth.dmarc;
 	const quarantineReason = prepared.parseFailure
 		? "parse_failure"
 		: dmarc === "fail"
 			? "dmarc_fail"
 			: null;
 	const state = quarantineReason ? "quarantined" : "visible";
-	const authResults = parsed?.auth.summary ?? "spf=none;dkim=none;dmarc=unknown";
+	const authResults = trustedAuth.summary;
 
 	const subject = parsed?.subject ?? "";
 	const from: MailAddressJson[] = parsed?.from.length
