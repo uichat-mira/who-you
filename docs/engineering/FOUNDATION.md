@@ -23,7 +23,7 @@
 Task card: `docs/task-cards/WHO-S1-inbound-read.md` on `docs/who-you-task-cards-v1`; design: `docs/product-design.md` v1.
 
 - Schema: `migrations/0001_mail.sql` (`mailboxes`, `threads`, `messages`, `attachments`). Apply with the D1 migration mechanism owned by the deploy surface; the test harness applies the same file via D1 `batch`.
-- Bindings: D1 `DB`, R2 `MAIL_BUCKET`, string `MAIL_DOMAIN`. `/mcp` is closed with `mail_storage_not_configured` when D1/R2 are absent, and `email()` fails transiently when storage or `MAIL_DOMAIN` is absent. `cloudflare.config.ts` deliberately does **not** declare D1/R2: the `cf` beta binding schema is unverified, and inventing it would be a false platform claim.
+- Bindings: D1 `DB`, R2 `MAIL_BUCKET`, string `MAIL_DOMAIN`. `/mcp` is closed with `mail_storage_not_configured` when D1/R2 are absent, and `email()` fails transiently when storage or `MAIL_DOMAIN` is absent. **Current config (2026-11-20):** `cloudflare.config.ts` declares D1 `DB` → `who-you-dev` and R2 `MAIL_BUCKET` → `who-you-dev-attachments`. These are configuration references, **not proof of an authorized or healthy production deployment**; they must be isolated and verified before any production deploy.
 - Limits: `MAIL_MAX_RAW_BYTES`, `MAIL_MAX_PART_COUNT`, `MAIL_MAX_NESTING_DEPTH`, `MAIL_MAX_HEADER_BYTES`, `MAIL_MAX_ATTACHMENTS`, `MAIL_MAX_ATTACHMENT_BYTES`, `MAIL_MAILBOX_QUOTA_BYTES`, `MAIL_BODY_MAX_CHARS`, `MAIL_ATTACHMENT_INLINE_BYTES` (S1), plus `MAIL_EXPORT_MAX_MESSAGES` and `MAIL_EXPORT_MAX_BYTES` (S3). Defaults live in `src/mail/limits.ts`; they are policy ceilings for this slice, not measured Email Routing limits.
 - Inbound MIME is read by `src/mail/raw-mime.ts`, a strict in-repo reader that enforces the caller's header, nesting, part and attachment ceilings and fails explicitly on structure it does not understand. No MIME library dependency is added in this slice; adopting a vetted library remains a separate product decision.
 - MCP read tools: `whoyou_mailbox_get`, `whoyou_mail_search`, `whoyou_mail_thread_get`, `whoyou_mail_message_get`, `whoyou_mail_attachment_get`. All reads are scoped by the token-derived account id; quarantined messages are excluded from search and fail explicitly on direct read. Mail content output carries `UNTRUSTED_EMAIL_CONTENT`.
@@ -114,3 +114,12 @@ The available integration cannot mutate repository rulesets, default branch, rev
 - add the delegated developer's exact GitHub handle with appropriate least privilege.
 
 These settings are **pending**, not declared complete.
+
+
+## Release-source and deployment reality (verified 2026-11-20)
+
+- The repository's GitHub Actions workflows (`ci.yml`, `mira-external-worker.yml`, `opencode-review.yml`) run validation, delegated work, or advisory review. **None automatically runs `cf deploy` on `prod` pushes.**
+- `package.json` exposes `npm run deploy` → `cf deploy`, but this is a **manual-capable command**, not an approved GitHub release pipeline. A Git source promotion must not be represented as a Worker deployment.
+- The currently checked-in Cloudflare configuration uses **development-named D1/R2 bindings** and contains scheduled mail jobs. Do not run it against production without identifying the actual Cloudflare account, bindings, secrets, migrations, test isolation, rollback path, and T4/T5 evidence.
+- S1–S8 and migrations 0001–0011 are in the source promotion candidate. The historical `prod`-only `.write-probe` is a permission-check artifact, not runtime functionality; normal PR promotion may retire it when reconciling the branches.
+- The `dev` SonarCloud branch quality gate reports New Code Reliability Rating D even when individual PR checks pass. Investigate or explicitly disposition this separately before real service release.
