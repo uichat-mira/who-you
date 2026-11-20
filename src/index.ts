@@ -15,12 +15,15 @@ import { runRetentionSweep } from "./mail/retention";
 import { DELIVERY_WEBHOOK_PATH, handleDeliveryWebhook } from "./mail/webhook";
 import { MCP_METADATA_PATH, MCP_RESOURCE_PATH } from "./mcp/config";
 import { createWhoYouRuntime } from "./mcp/runtime";
+import { handleWebRequest } from "./web/cloud-auth";
 
 const notFound = (): Response => Response.json({ error: "not_found" }, { status: 404 });
 
 export default {
 	async fetch(request: Request, env: WhoYouEnv): Promise<Response> {
 		const path = new URL(request.url).pathname;
+		const webResponse = await handleWebRequest(request, env);
+		if (webResponse) return webResponse;
 		// The relay callback is machine-to-machine only: it authenticates with an
 		// independent HMAC secret and never with an agent's MCP credential.
 		if (path === DELIVERY_WEBHOOK_PATH) {
