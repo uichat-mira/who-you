@@ -10,6 +10,12 @@ export type WhoYouPrincipal = {
 	accountId: string;
 	/** Stable consumer identity minted into the credential, never supplied by a tool argument. */
 	consumerId: string;
+	/**
+	 * Cloud Auth username, used only to derive the owned mailbox prefix. It is
+	 * descriptive, not authoritative: a token without it still authenticates, it
+	 * just cannot derive an address.
+	 */
+	username?: string;
 	scopes: string[];
 	/** Seconds since epoch, as in the JWT `exp` claim. */
 	expiresAt: number;
@@ -30,6 +36,8 @@ export type CloudAuthVerifierOptions = {
 	audience: string;
 	jwksUrl: URL;
 	consumerClaim: string;
+	/** Claim carrying the Cloud Auth username; absent means "cannot derive". */
+	usernameClaim?: string;
 	/** Test/integration injection point; production uses the configured remote JWKS. */
 	keySet?: JWTVerifyGetKey;
 	clockToleranceSeconds?: number;
@@ -67,6 +75,7 @@ export function createCloudAuthVerifier(
 	options: CloudAuthVerifierOptions,
 ): WhoYouTokenVerifier {
 	const keySet = options.keySet ?? createRemoteJWKSet(options.jwksUrl);
+	const usernameClaim = options.usernameClaim ?? "preferred_username";
 	return {
 		async verifyAccessToken(token: string): Promise<WhoYouPrincipal> {
 			let payload: Record<string, unknown>;
@@ -95,9 +104,19 @@ export function createCloudAuthVerifier(
 				throw invalidToken();
 			}
 
+			// A malformed username drops the claim instead of failing the token:
+			// provisioning then asks the user for a prefix rather than rejecting an
+			// otherwise valid credential.
+			const rawUsername = payload[usernameClaim];
+			const username =
+				typeof rawUsername === "string" && rawUsername.trim().length <= 64
+					? rawUsername.trim()
+					: undefined;
+
 			return {
 				accountId,
 				consumerId,
+				...(username ? { username } : {}),
 				scopes: tokenScopes(payload),
 				expiresAt,
 				issuer: options.issuer,
@@ -124,6 +143,7 @@ export function authInfoFromPrincipal(
 		extra: {
 			accountId: principal.accountId,
 			consumerId: principal.consumerId,
+			...(principal.username ? { username: principal.username } : {}),
 			issuer: principal.issuer,
 			audience: principal.audience,
 		},
@@ -139,6 +159,7 @@ export function principalFromAuthInfo(
 	const consumerId = extra?.consumerId;
 	const issuer = extra?.issuer;
 	const audience = extra?.audience;
+	const username = extra?.username;
 	if (
 		!authInfo ||
 		typeof accountId !== "string" ||
@@ -153,6 +174,7 @@ export function principalFromAuthInfo(
 	return {
 		accountId,
 		consumerId,
+		...(typeof username === "string" && username ? { username } : {}),
 		scopes: [...authInfo.scopes],
 		expiresAt: authInfo.expiresAt,
 		issuer,

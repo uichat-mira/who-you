@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
 	DEFAULT_MAIL_LIMITS,
 	MailParseError,
+	createResendMailSender,
 	mailObjectKeys,
 	normalizeDomain,
 	normalizeLocalPart,
@@ -128,16 +129,8 @@ test("Authentication-Results parsing records dmarc fail but never invents a pass
 	]);
 	assert.equal(uppercase.dmarc, "pass");
 	assert.equal(uppercase.spf, "softfail");
-
-	// Auth results not stamped by the Cloudflare receiving hop are hostile.
-	const foreign = parseAuthVerdict([
-		{ key: "Authentication-Results", value: "attacker.test; dmarc=pass" },
-	]);
-	assert.equal(foreign.dmarc, "unknown");
-	const forgedLater = parseAuthVerdict([
-		{ key: "Authentication-Results", value: "mx.cloudflare.net; dmarc=fail, mx.cloudflare.net; dmarc=pass" },
-	]);
-	assert.equal(forgedLater.dmarc, "fail");
+	assert.equal(parseAuthVerdict([{ key: "Authentication-Results", value: "evil.test; dmarc=pass" }]).dmarc, "unknown");
+	assert.equal(parseAuthVerdict([{ key: "Authentication-Results", value: "mx.cloudflare.net; dmarc=fail, mx.cloudflare.net; dmarc=pass" }]).dmarc, "fail");
 });
 
 test("HTML sanitizer drops executable surface and keeps inert structure", () => {
@@ -238,4 +231,64 @@ test("folded headers and RFC 2047 words decode to text instead of raw bytes", as
 test("object keys are scoped and escape account ids", () => {
 	const key = mailObjectKeys.raw("acct/a b", "mbx_1", "msg_1");
 	assert.equal(key, "accounts/acct%2Fa%20b/mailboxes/mbx_1/messages/msg_1/raw.eml");
+});
+
+const resendMessage = {
+	from: "hello@tzt2026.xyz",
+	to: [{ name: "Fox", address: "tzt1989@foxmail.com" }],
+	cc: [],
+	bcc: [],
+	subject: "Hi",
+	text: "body",
+	html: null,
+};
+
+const withFetch = async (stub, run) => {
+	const original = globalThis.fetch;
+	globalThis.fetch = stub;
+	try {
+		return await run();
+	} finally {
+		globalThis.fetch = original;
+	}
+};
+
+test("the Resend adapter stays closed without a key and posts a mapped payload", async () => {
+	assert.equal(createResendMailSender(undefined), null);
+	assert.equal(createResendMailSender("  "), null);
+
+	const calls = [];
+	const sender = createResendMailSender("re_test_key");
+	const result = await withFetch(
+		async (url, init) => {
+			calls.push({ url, init });
+			return new Response(JSON.stringify({ id: "em_123" }), { status: 200 });
+		},
+		() => sender.send(resendMessage),
+	);
+
+	assert.equal(result.providerMessageId, "em_123");
+	assert.equal(calls.length, 1);
+	assert.equal(calls[0].url, "https://api.resend.com/emails");
+	assert.equal(calls[0].init.headers.authorization, "Bearer re_test_key");
+	const body = JSON.parse(calls[0].init.body);
+	assert.equal(body.from, "hello@tzt2026.xyz");
+	assert.deepEqual(body.to, ["Fox <tzt1989@foxmail.com>"]);
+	assert.equal("cc" in body, false);
+	assert.equal("bcc" in body, false);
+	assert.equal("html" in body, false);
+});
+
+test("a rejected Resend response fails without echoing the provider body", async () => {
+	const sender = createResendMailSender("re_test_key");
+	await assert.rejects(
+		withFetch(
+			async () =>
+				new Response(JSON.stringify({ message: "recipient@example.com bounced" }), {
+					status: 422,
+				}),
+			() => sender.send(resendMessage),
+		),
+		(error) => error.message === "resend_send_failed:422",
+	);
 });

@@ -84,27 +84,22 @@ const normalizeVerdict = (value: string | undefined): string => {
 };
 
 /**
- * Only the first Cloudflare-inserted Authentication-Results header exposed by
- * ForwardableEmailMessage.headers is eligible for an authentication verdict.
- * Never pass raw MIME headers here: the sender can forge those. Cloudflare
- * documents the first header as its own, with authserv-id mx.cloudflare.net.
- * A missing, foreign or malformed first header remains unknown, not pass.
+ * Parses `Authentication-Results` only as a recorded verdict. The actual
+ * platform header source is still P0 (product design §10 #4); an absent header
+ * is recorded as `unknown`, never treated as a pass.
  */
 export function parseAuthVerdict(headers: { key: string; value: string }[]): AuthVerdict {
 	const verdicts = new Map<string, string>();
-	const firstHeader = headers.find(
-		(header) => header.key.toLowerCase() === "authentication-results",
-	);
-	// Fetch Headers may combine repeated Authentication-Results values with
-	// commas; never read later, sender-controlled headers.
-	const firstValue = firstHeader?.value.split(",")[0]?.trim() ?? "";
-	if (/^mx\.cloudflare\.net\s*;/i.test(firstValue)) {
+	// Cloudflare's receiver-side verdict is the first mx.cloudflare.net header;
+	// later headers can be sender controlled and must not overwrite it.
+	const first = headers.find(h => h.key.toLowerCase() === "authentication-results");
+	const trusted = first?.value.split(",")[0]?.trim() ?? "";
+	if (/^mx\.cloudflare\.net\s*;/i.test(trusted)) {
 		AUTH_METHOD.lastIndex = 0;
-		let match = AUTH_METHOD.exec(firstValue);
+		let match = AUTH_METHOD.exec(trusted);
 		while (match) {
-			const method = match[1].toLowerCase();
-			verdicts.set(method, normalizeVerdict(match[2]));
-			match = AUTH_METHOD.exec(firstValue);
+			verdicts.set(match[1].toLowerCase(), normalizeVerdict(match[2]));
+			match = AUTH_METHOD.exec(trusted);
 		}
 	}
 	const spf = verdicts.get("spf") ?? "none";
@@ -116,12 +111,7 @@ export function parseAuthVerdict(headers: { key: string; value: string }[]): Aut
 			: dmarcValue === "none"
 				? "none"
 				: "unknown";
-	return {
-		spf,
-		dkim,
-		dmarc,
-		summary: `spf=${spf};dkim=${dkim};dmarc=${dmarcValue ?? "unknown"}`,
-	};
+	return { spf, dkim, dmarc, summary: `spf=${spf};dkim=${dkim};dmarc=${dmarcValue ?? "unknown"}` };
 }
 
 const parseDate = (value: string | null): number | null => {
@@ -158,7 +148,7 @@ const toParsedMail = (parsed: RawMime, limits: MailLimits): ParsedMail => {
 		text: parsed.text,
 		html: parsed.html ? sanitizeHtml(parsed.html) : null,
 		attachments,
-		// MIME-supplied Authentication-Results are sender-controlled.
+		// Raw MIME headers belong to the sender, not the receiving platform.
 		auth: parseAuthVerdict([]),
 	};
 };

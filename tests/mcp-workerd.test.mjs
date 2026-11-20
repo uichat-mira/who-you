@@ -20,12 +20,57 @@ const FIXTURE_BINDINGS = {
 
 const MAIL_TOOL_NAMES = [
 	"whoyou_whoami",
+	"whoyou_mailbox_provision",
 	"whoyou_mailbox_get",
 	"whoyou_mail_search",
 	"whoyou_mail_thread_get",
 	"whoyou_mail_message_get",
 	"whoyou_mail_attachment_get",
+	"whoyou_mail_flag_set",
+	"whoyou_job_create",
+	"whoyou_job_list",
+	"whoyou_job_get",
+	"whoyou_job_stage_update",
+	"whoyou_job_annotate",
+	"whoyou_job_annotation_resolve",
+	"whoyou_job_stage_accept",
+	"whoyou_job_pause",
+	"whoyou_job_resume",
+	"whoyou_mail_draft_create",
+	"whoyou_mail_draft_update",
+	"whoyou_mail_draft_discard",
+	"whoyou_mail_draft_get",
+	"whoyou_mail_draft_list",
+	"whoyou_mail_send",
+	"whoyou_mailbox_list",
+	"whoyou_mailbox_link",
+	"whoyou_mailbox_unlink",
+	"whoyou_mail_export",
+	"whoyou_mail_message_delete",
+	"whoyou_mail_mailbox_delete",
 ];
+
+const READ_ONLY_TOOL_NAMES = new Set([
+	"whoyou_whoami",
+	"whoyou_mailbox_get",
+	"whoyou_mailbox_list",
+	"whoyou_mail_search",
+	"whoyou_mail_thread_get",
+	"whoyou_mail_message_get",
+	"whoyou_mail_attachment_get",
+	"whoyou_mail_draft_get",
+	"whoyou_mail_draft_list",
+	"whoyou_job_list",
+	"whoyou_job_get",
+]);
+
+const DESTRUCTIVE_TOOL_NAMES = new Set([
+	"whoyou_mail_draft_discard",
+	"whoyou_mail_send",
+	"whoyou_mailbox_unlink",
+	"whoyou_mail_message_delete",
+	"whoyou_mail_mailbox_delete",
+]);
 
 async function withWorker(scriptPath, bindings, run) {
 	const mf = new Miniflare({
@@ -78,10 +123,12 @@ test("a real workerd modern MCP client lists and calls the read-only whoami tool
 
 			const listed = await client.listTools();
 			assert.deepEqual(listed.tools.map((tool) => tool.name), MAIL_TOOL_NAMES);
-			// Every registered tool is a read; no send, draft or delete surface exists.
+			// Read tools stay non-destructive; write/send tools must not claim read-only.
 			for (const tool of listed.tools) {
-				assert.equal(tool.annotations?.readOnlyHint, true);
-				assert.equal(tool.annotations?.destructiveHint, false);
+				const readOnly = READ_ONLY_TOOL_NAMES.has(tool.name);
+				const destructive = DESTRUCTIVE_TOOL_NAMES.has(tool.name);
+				assert.equal(tool.annotations?.readOnlyHint, readOnly);
+				assert.equal(tool.annotations?.destructiveHint, destructive);
 			}
 
 			const whoami = await client.callTool({ name: "whoyou_whoami", arguments: {} });

@@ -10,6 +10,10 @@ export const MCP_RESOURCE_PATH = "/mcp";
 export const MCP_METADATA_PATH = "/.well-known/oauth-protected-resource/mcp";
 /** Read-only scope required by the global `/mcp` bearer gate. */
 export const WHOYOU_REQUIRED_SCOPE = "whoyou.read";
+/** Draft lifecycle write authority; never implied by read. */
+export const WHOYOU_MAIL_WRITE_SCOPE = "whoyou.mail.write";
+/** Send authority carried only by a draft-bound confirmation credential. */
+export const WHOYOU_MAIL_SEND_SCOPE = "whoyou.mail.send";
 /**
  * Planned local-ledger write scope. It is not issued or enforced by this slice;
  * M1 has no ledger tool yet (see docs/product-design.md §6.2).
@@ -29,6 +33,8 @@ export type McpEnv = {
 	MCP_AUDIENCE?: string;
 	MCP_REQUIRED_SCOPES?: string;
 	MCP_CONSUMER_CLAIM?: string;
+	/** Claim carrying the Cloud Auth username used to derive the mailbox prefix. */
+	MCP_USERNAME_CLAIM?: string;
 };
 
 export type McpConfig = {
@@ -42,6 +48,8 @@ export type McpConfig = {
 	audience: string;
 	requiredScopes: string[];
 	consumerClaim: string;
+	/** Optional by design: a token without it just cannot derive an address. */
+	usernameClaim: string;
 };
 
 export type McpConfigResult =
@@ -108,6 +116,11 @@ export function resolveMcpConfig(env: McpEnv): McpConfigResult {
 		return { ok: false, reason: "mcp_consumer_claim" };
 	}
 
+	const usernameClaim = env.MCP_USERNAME_CLAIM?.trim() || "preferred_username";
+	if (!claimName.test(usernameClaim)) {
+		return { ok: false, reason: "mcp_username_claim" };
+	}
+
 	return {
 		ok: true,
 		config: {
@@ -119,6 +132,7 @@ export function resolveMcpConfig(env: McpEnv): McpConfigResult {
 			audience,
 			requiredScopes: scopes,
 			consumerClaim,
+			usernameClaim,
 		},
 	};
 }

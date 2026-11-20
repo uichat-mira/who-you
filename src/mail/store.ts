@@ -1,22 +1,40 @@
-import { mailboxAddress, normalizeLocalPart } from "./address";
-import { sha256Hex } from "./hash";
-
 export type MailboxStatus = "active" | "disabled";
+
+/** Own-domain identities are provisioned by S6; third-party ones are linked by the user. */
+export type MailboxKind = "own_domain" | "third_party";
+
+export type MailboxProvider = "gmail" | "microsoft" | "imap_smtp";
 
 export type MailboxRecord = {
 	id: string;
 	accountId: string;
 	address: string;
 	localPart: string;
+	kind: MailboxKind;
+	/** Null for own-domain identities; always set for third-party ones. */
+	provider: MailboxProvider | null;
 	status: MailboxStatus;
 	quotaBytes: number;
 	bytesUsed: number;
 	messageCount: number;
 	quarantineCount: number;
+	/** Automatic deliverability/abuse pause; receiving stays enabled. */
+	sendPausedAt: number | null;
+	sendPausedReason: string | null;
 	createdAt: number;
 };
 
 export type MailAddressJson = { name: string; address: string };
+
+export type MessageFlags = {
+	read: boolean;
+	starred: boolean;
+	archived: boolean;
+	trashed: boolean;
+};
+
+/** Which mailbox view a search covers. `all` ignores the folder split. */
+export type MessageFolder = "inbox" | "archive" | "trash" | "all";
 
 export type MessageSummary = {
 	id: string;
@@ -36,15 +54,135 @@ export type MessageSummary = {
 	dmarc: string;
 	state: "visible" | "quarantined";
 	quarantineReason: string | null;
+	flags: MessageFlags;
+	flagVersion: number;
 };
 
 export type MessageRecord = MessageSummary & {
 	mailboxId: string;
 	envelopeFrom: string | null;
 	envelopeTo: string;
+	rawKey: string;
 	textKey: string | null;
 	htmlKey: string | null;
 };
+
+/** The message fields every outward view shares; callers add their own extras. */
+export const messageFields = (message: MessageSummary): Record<string, unknown> => ({
+	id: message.id,
+	threadId: message.threadId,
+	direction: message.direction,
+	internetMessageId: message.internetMessageId,
+	from: message.from,
+	to: message.to,
+	cc: message.cc,
+	subject: message.subject,
+	sentAt: message.sentAt,
+	receivedAt: message.receivedAt,
+	sizeBytes: message.sizeBytes,
+});
+
+export type ExportRecord = {
+	id: string;
+	accountId: string;
+	mailboxId: string;
+	exportDay: string;
+	messageCount: number;
+	skippedCount: number;
+	byteSize: number;
+	r2Key: string;
+	createdAt: number;
+};
+
+export type AuditAction =
+	| "export"
+	| "delete_message"
+	| "delete_mailbox"
+	| "provision_mailbox"
+	| "link_mailbox"
+	| "unlink_mailbox"
+	| "job_create"
+	| "job_stage_update"
+	| "job_stage_accept"
+	| "job_annotate"
+	| "job_annotation_resolve"
+	| "job_pause"
+	| "job_resume";
+
+export type NewAuditEntry = {
+	id: string;
+	accountId: string;
+	action: AuditAction;
+	targetId: string | null;
+	detail: string;
+	createdAt: number;
+};
+
+export type DeliveryEventType =
+	| "delivered"
+	| "soft_bounce"
+	| "hard_bounce"
+	| "complaint"
+	| "dsn";
+
+export type NewDeliveryEvent = {
+	id: string;
+	accountId: string;
+	sendReceiptId: string | null;
+	providerMessageId: string | null;
+	type: DeliveryEventType;
+	/** SHA-256 of the normalized recipient; the address itself is not stored. */
+	recipientHash: string;
+	recipientDomain: string;
+	status: string | null;
+	diagnosticCode: string | null;
+	occurredAt: number;
+	createdAt: number;
+};
+
+export type SuppressionReason = "hard_bounce" | "complaint";
+
+export type NewSuppression = {
+	accountId: string;
+	recipient: string;
+	reason: SuppressionReason;
+	sourceEventId: string | null;
+	createdAt: number;
+};
+
+export type SendPause = { pausedAt: number; reason: string | null };
+
+export type AbuseWindowCounts = {
+	sends: number;
+	hardBounces: number;
+	complaints: number;
+	externalRecipients: number;
+};
+
+export type DeliverabilityAlertKind =
+	| "hard_bounce_rate"
+	| "complaint_rate"
+	| "external_volume"
+	| "send_paused";
+
+export type NewDeliverabilityAlert = {
+	id: string;
+	accountId: string;
+	kind: DeliverabilityAlertKind;
+	detail: string;
+	createdAt: number;
+};
+
+export type DeliverabilityTotals = {
+	sends: number;
+	externalRecipients: number;
+	delivered: number;
+	softBounces: number;
+	hardBounces: number;
+	complaints: number;
+};
+
+export type ReceiptLookup = { id: string; accountId: string };
 
 export type AttachmentRecord = {
 	id: string;
@@ -64,6 +202,8 @@ export type NewMailbox = {
 	accountId: string;
 	address: string;
 	localPart: string;
+	kind: MailboxKind;
+	provider: MailboxProvider | null;
 	quotaBytes: number;
 	now: number;
 };
@@ -112,13 +252,12 @@ export type SearchFilters = {
 	until?: number;
 	hasAttachments?: boolean;
 	threadId?: string;
+	folder?: MessageFolder;
+	unreadOnly?: boolean;
+	starredOnly?: boolean;
 	limit: number;
 	cursor?: { receivedAt: number; id: string };
 };
-
-export type ProvisionResult =
-	| { ok: true; mailbox: MailboxRecord; created: boolean }
-	| { ok: false; reason: "invalid_local_part" | "reserved_local_part" | "mailbox_exists" | "address_conflict" };
 
 const objectPrefix = (accountId: string, mailboxId: string, messageId: string): string =>
 	`accounts/${encodeURIComponent(accountId)}/mailboxes/${encodeURIComponent(mailboxId)}/messages/${messageId}`;
@@ -153,11 +292,15 @@ type MailboxRow = {
 	account_id: string;
 	address: string;
 	local_part: string;
+	kind: MailboxKind;
+	provider: MailboxProvider | null;
 	status: MailboxStatus;
 	quota_bytes: number;
 	bytes_used: number;
 	message_count: number;
 	quarantine_count: number;
+	send_paused_at: number | null;
+	send_paused_reason: string | null;
 	created_at: number;
 };
 
@@ -182,8 +325,14 @@ type MessageRow = {
 	dmarc: string;
 	state: "visible" | "quarantined";
 	quarantine_reason: string | null;
+	raw_key: string;
 	text_key: string | null;
 	html_key: string | null;
+	is_read: number;
+	is_starred: number;
+	is_archived: number;
+	is_trashed: number;
+	flag_version: number;
 };
 
 type AttachmentRow = {
@@ -204,11 +353,15 @@ const toMailbox = (row: MailboxRow): MailboxRecord => ({
 	accountId: row.account_id,
 	address: row.address,
 	localPart: row.local_part,
+	kind: row.kind,
+	provider: row.provider,
 	status: row.status,
 	quotaBytes: row.quota_bytes,
 	bytesUsed: row.bytes_used,
 	messageCount: row.message_count,
 	quarantineCount: row.quarantine_count,
+	sendPausedAt: row.send_paused_at,
+	sendPausedReason: row.send_paused_reason,
 	createdAt: row.created_at,
 });
 
@@ -230,6 +383,13 @@ const toMessageSummary = (row: MessageRow): MessageSummary => ({
 	dmarc: row.dmarc,
 	state: row.state,
 	quarantineReason: row.quarantine_reason,
+	flags: {
+		read: row.is_read === 1,
+		starred: row.is_starred === 1,
+		archived: row.is_archived === 1,
+		trashed: row.is_trashed === 1,
+	},
+	flagVersion: row.flag_version,
 });
 
 const toMessageRecord = (row: MessageRow): MessageRecord => ({
@@ -237,6 +397,7 @@ const toMessageRecord = (row: MessageRow): MessageRecord => ({
 	mailboxId: row.mailbox_id,
 	envelopeFrom: row.envelope_from,
 	envelopeTo: row.envelope_to,
+	rawKey: row.raw_key,
 	textKey: row.text_key,
 	htmlKey: row.html_key,
 });
@@ -259,7 +420,48 @@ const MESSAGE_COLUMNS = `
 	m.envelope_from, m.envelope_to, m.from_json, m.to_json, m.cc_json,
 	m.subject, m.sent_at, m.received_at, m.size_bytes, m.snippet,
 	m.attachment_count, m.auth_results, m.dmarc, m.state, m.quarantine_reason,
-	m.text_key, m.html_key`;
+	m.raw_key, m.text_key, m.html_key,
+	m.is_read, m.is_starred, m.is_archived, m.is_trashed, m.flag_version`;
+
+type ExportRow = {
+	id: string;
+	account_id: string;
+	mailbox_id: string;
+	export_day: string;
+	message_count: number;
+	skipped_count: number;
+	byte_size: number;
+	r2_key: string;
+	created_at: number;
+};
+
+const toExport = (row: ExportRow): ExportRecord => ({
+	id: row.id,
+	accountId: row.account_id,
+	mailboxId: row.mailbox_id,
+	exportDay: row.export_day,
+	messageCount: row.message_count,
+	skippedCount: row.skipped_count,
+	byteSize: row.byte_size,
+	r2Key: row.r2_key,
+	createdAt: row.created_at,
+});
+
+const flagInt = (value: boolean): number => (value ? 1 : 0);
+
+const flagsEqual = (left: MessageFlags, right: MessageFlags): boolean =>
+	left.read === right.read &&
+	left.starred === right.starred &&
+	left.archived === right.archived &&
+	left.trashed === right.trashed;
+
+export type FlagUpdateResult =
+	| { ok: true; message: MessageSummary; changed: boolean }
+	| {
+			ok: false;
+			reason: "message_not_found" | "message_quarantined" | "flag_version_conflict";
+			currentVersion?: number;
+	  };
 
 export class MailRepository {
 	private readonly db: D1Database;
@@ -273,8 +475,9 @@ export class MailRepository {
 	async findMailboxByAddress(address: string): Promise<MailboxRecord | null> {
 		const row = await this.db
 			.prepare(
-				`SELECT id, account_id, address, local_part, status, quota_bytes, bytes_used,
-				 message_count, quarantine_count, created_at
+				`SELECT id, account_id, address, local_part, kind, provider, status,
+				 quota_bytes, bytes_used, message_count, quarantine_count,
+				 send_paused_at, send_paused_reason, created_at
 				 FROM mailboxes WHERE address = ? LIMIT 1`,
 			)
 			.bind(address)
@@ -282,25 +485,77 @@ export class MailRepository {
 		return row ? toMailbox(row) : null;
 	}
 
+	/**
+	 * The account's own-domain identity. Third-party identities are deliberately
+	 * excluded so every existing S1–S6 caller keeps addressing one mailbox.
+	 */
 	async findMailboxByAccount(accountId: string): Promise<MailboxRecord | null> {
 		const row = await this.db
 			.prepare(
-				`SELECT id, account_id, address, local_part, status, quota_bytes, bytes_used,
-				 message_count, quarantine_count, created_at
-				 FROM mailboxes WHERE account_id = ? LIMIT 1`,
+				`SELECT id, account_id, address, local_part, kind, provider, status,
+				 quota_bytes, bytes_used, message_count, quarantine_count,
+				 send_paused_at, send_paused_reason, created_at
+				 FROM mailboxes WHERE account_id = ? AND kind = 'own_domain'
+				 ORDER BY created_at LIMIT 1`,
 			)
 			.bind(accountId)
 			.first<MailboxRow>();
 		return row ? toMailbox(row) : null;
 	}
 
+	/** Looks up one identity owned by the account; never crosses account boundary. */
+	async findMailboxById(accountId: string, mailboxId: string): Promise<MailboxRecord | null> {
+		const row = await this.db
+			.prepare(
+				`SELECT id, account_id, address, local_part, kind, provider, status,
+				 quota_bytes, bytes_used, message_count, quarantine_count,
+				 send_paused_at, send_paused_reason, created_at
+				 FROM mailboxes WHERE account_id = ? AND id = ? LIMIT 1`,
+			)
+			.bind(accountId, mailboxId)
+			.first<MailboxRow>();
+		return row ? toMailbox(row) : null;
+	}
+
+	/** Sync sweep input: active third-party identities of one provider. */
+	async listMailboxesByProvider(provider: MailboxProvider, limit: number): Promise<MailboxRecord[]> {
+		const { results } = await this.db
+			.prepare(
+				`SELECT id, account_id, address, local_part, kind, provider, status,
+				 quota_bytes, bytes_used, message_count, quarantine_count,
+				 send_paused_at, send_paused_reason, created_at
+				 FROM mailboxes
+				 WHERE kind = 'third_party' AND provider = ? AND status = 'active'
+				 ORDER BY created_at LIMIT ?`,
+			)
+			.bind(provider, limit)
+			.all<MailboxRow>();
+		return results.map(toMailbox);
+	}
+
+	/** Every identity the account holds, own-domain first. */
+	async listMailboxesByAccount(accountId: string): Promise<MailboxRecord[]> {
+		const { results } = await this.db
+			.prepare(
+				`SELECT id, account_id, address, local_part, kind, provider, status,
+				 quota_bytes, bytes_used, message_count, quarantine_count,
+				 send_paused_at, send_paused_reason, created_at
+				 FROM mailboxes WHERE account_id = ?
+				 ORDER BY kind, created_at`,
+			)
+			.bind(accountId)
+			.all<MailboxRow>();
+		return results.map(toMailbox);
+	}
+
 	async insertMailbox(mailbox: NewMailbox): Promise<boolean> {
 		const result = await this.db
 			.prepare(
 				`INSERT INTO mailboxes (
-				 id, account_id, address, local_part, status, quota_bytes,
-				 bytes_used, message_count, quarantine_count, created_at, updated_at
-				 ) VALUES (?,?,?,?, 'active', ?, 0, 0, 0, ?, ?)
+				 id, account_id, address, local_part, kind, provider, status,
+				 quota_bytes, bytes_used, message_count, quarantine_count,
+				 created_at, updated_at
+				 ) VALUES (?,?,?,?,?,?, 'active', ?, 0, 0, 0, ?, ?)
 				 ON CONFLICT (address) DO NOTHING`,
 			)
 			.bind(
@@ -308,10 +563,30 @@ export class MailRepository {
 				mailbox.accountId,
 				mailbox.address,
 				mailbox.localPart,
+				mailbox.kind,
+				mailbox.provider,
 				mailbox.quotaBytes,
 				mailbox.now,
 				mailbox.now,
 			)
+			.run();
+		return (result.meta.changes ?? 0) > 0;
+	}
+
+	/** Spends an identity confirmation nonce exactly once. */
+	async consumeIdentityNonce(input: {
+		nonce: string;
+		accountId: string;
+		action: "link" | "unlink";
+		now: number;
+	}): Promise<boolean> {
+		const result = await this.db
+			.prepare(
+				`INSERT INTO identity_confirmation_nonces (nonce, account_id, action, consumed_at)
+				 VALUES (?,?,?,?)
+				 ON CONFLICT (nonce) DO NOTHING`,
+			)
+			.bind(input.nonce, input.accountId, input.action, input.now)
 			.run();
 		return (result.meta.changes ?? 0) > 0;
 	}
@@ -344,8 +619,7 @@ export class MailRepository {
 	/**
 	 * Writes message metadata, thread continuity, attachments and mailbox usage
 	 * in one D1 batch. The message insert is `ON CONFLICT DO NOTHING`, so a
-	 * concurrent duplicate delivery cannot create a second row. A fresh attempt
-	 * id makes the dependent statements conditional on the winning insert.
+	 * concurrent duplicate delivery cannot create a second row.
 	 */
 	async insertMessage(
 		message: NewMessage,
@@ -451,8 +725,25 @@ export class MailRepository {
 	}
 
 	async search(accountId: string, filters: SearchFilters): Promise<MessageSummary[]> {
+		const folder = filters.folder ?? "inbox";
 		const clauses = ["b.account_id = ?", "m.state = 'visible'"];
 		const bindings: (string | number)[] = [accountId];
+		// Trash is its own view: a normal search must not resurface deleted mail.
+		// Quarantine stays excluded everywhere because those messages are not
+		// visible to the account until an operator releases them.
+		if (folder === "inbox") {
+			clauses.push("m.is_trashed = 0", "m.is_archived = 0");
+		} else if (folder === "archive") {
+			clauses.push("m.is_trashed = 0", "m.is_archived = 1");
+		} else if (folder === "trash") {
+			clauses.push("m.is_trashed = 1");
+		}
+		if (filters.unreadOnly) {
+			clauses.push("m.is_read = 0");
+		}
+		if (filters.starredOnly) {
+			clauses.push("m.is_starred = 1");
+		}
 		if (filters.direction) {
 			clauses.push("m.direction = ?");
 			bindings.push(filters.direction);
@@ -568,73 +859,551 @@ export class MailRepository {
 			.first<AttachmentRow>();
 		return row ? toAttachment(row) : null;
 	}
+
+	/**
+	 * Attachment lookup for signed download. Unlike `listAttachments` it also
+	 * returns quarantined messages, because the route must fail explicitly
+	 * (`message_quarantined`) instead of pretending the object never existed.
+	 */
+	async findAttachmentForDownload(
+		accountId: string,
+		messageId: string,
+		attachmentId: string,
+	): Promise<{ attachment: AttachmentRecord; state: "visible" | "quarantined" } | null> {
+		const row = await this.db
+			.prepare(
+				`SELECT a.id, a.message_id, a.mailbox_id, a.part_path, a.filename, a.mime_type,
+				 a.size_bytes, a.disposition, a.content_id, a.r2_key, m.state
+				 FROM attachments a
+				 JOIN messages m ON m.id = a.message_id
+				 JOIN mailboxes b ON b.id = m.mailbox_id
+				 WHERE b.account_id = ? AND m.id = ? AND a.id = ?
+				 LIMIT 1`,
+			)
+			.bind(accountId, messageId, attachmentId)
+			.first<AttachmentRow & { state: "visible" | "quarantined" }>();
+		if (!row) return null;
+		return { attachment: toAttachment(row), state: row.state };
+	}
+
+	async readObject(key: string): Promise<{ body: ReadableStream; size: number } | null> {
+		const object = await this.bucket.get(key);
+		if (!object) return null;
+		return { body: object.body, size: object.size };
+	}
+
+	/**
+	 * Optimistic, idempotent flag write.
+	 *
+	 * A repeated identical write returns the current message without bumping the
+	 * version, and a concurrent identical write that loses the CAS re-reads and
+	 * reports `changed: false` instead of a spurious conflict.
+	 */
+	async updateFlags(
+		accountId: string,
+		messageId: string,
+		patch: Partial<MessageFlags>,
+		expectedVersion: number | undefined,
+		now: number,
+	): Promise<FlagUpdateResult> {
+		const lookup = async (): Promise<MessageRow | null> =>
+			this.db
+				.prepare(
+					`SELECT ${MESSAGE_COLUMNS}
+					 FROM messages m
+					 JOIN mailboxes b ON b.id = m.mailbox_id
+					 WHERE b.account_id = ? AND m.id = ?
+					 LIMIT 1`,
+				)
+				.bind(accountId, messageId)
+				.first<MessageRow>();
+
+		const row = await lookup();
+		if (!row) return { ok: false, reason: "message_not_found" };
+		if (row.state === "quarantined") return { ok: false, reason: "message_quarantined" };
+
+		const current = toMessageSummary(row);
+		const target: MessageFlags = { ...current.flags, ...patch };
+		const unchanged = flagsEqual(current.flags, target);
+		if (expectedVersion !== undefined && expectedVersion !== current.flagVersion) {
+			return unchanged
+				? { ok: true, message: current, changed: false }
+				: { ok: false, reason: "flag_version_conflict", currentVersion: current.flagVersion };
+		}
+		if (unchanged) return { ok: true, message: current, changed: false };
+
+		const result = await this.db
+			.prepare(
+				`UPDATE messages
+				 SET is_read = ?, is_starred = ?, is_archived = ?, is_trashed = ?,
+				 flag_version = flag_version + 1, flags_updated_at = ?
+				 WHERE id = ? AND mailbox_id = ? AND flag_version = ?`,
+			)
+			.bind(
+				flagInt(target.read),
+				flagInt(target.starred),
+				flagInt(target.archived),
+				flagInt(target.trashed),
+				now,
+				current.id,
+				row.mailbox_id,
+				current.flagVersion,
+			)
+			.run();
+		if ((result.meta.changes ?? 0) === 0) {
+			const latest = await lookup();
+			if (!latest) return { ok: false, reason: "message_not_found" };
+			const latestSummary = toMessageSummary(latest);
+			if (flagsEqual(latestSummary.flags, target)) {
+				return { ok: true, message: latestSummary, changed: false };
+			}
+			return {
+				ok: false,
+				reason: "flag_version_conflict",
+				currentVersion: latestSummary.flagVersion,
+			};
+		}
+
+		const updated = await lookup();
+		return updated
+			? { ok: true, message: toMessageSummary(updated), changed: true }
+			: { ok: false, reason: "message_not_found" };
+	}
+
+	async listExportMessages(accountId: string, limit: number): Promise<MessageRecord[]> {
+		const rows = await this.db
+			.prepare(
+				`SELECT ${MESSAGE_COLUMNS}
+				 FROM messages m
+				 JOIN mailboxes b ON b.id = m.mailbox_id
+				 WHERE b.account_id = ?
+				 ORDER BY m.received_at ASC, m.id ASC
+				 LIMIT ?`,
+			)
+			.bind(accountId, limit)
+			.all<MessageRow>();
+		return (rows.results ?? []).map(toMessageRecord);
+	}
+
+	async findExport(accountId: string, exportId: string): Promise<ExportRecord | null> {
+		const row = await this.db
+			.prepare(
+				`SELECT id, account_id, mailbox_id, export_day, message_count, skipped_count,
+				 byte_size, r2_key, created_at
+				 FROM mail_exports WHERE account_id = ? AND id = ? LIMIT 1`,
+			)
+			.bind(accountId, exportId)
+			.first<ExportRow>();
+		return row ? toExport(row) : null;
+	}
+
+	async findExportForDay(accountId: string, exportDay: string): Promise<ExportRecord | null> {
+		const row = await this.db
+			.prepare(
+				`SELECT id, account_id, mailbox_id, export_day, message_count, skipped_count,
+				 byte_size, r2_key, created_at
+				 FROM mail_exports WHERE account_id = ? AND export_day = ? LIMIT 1`,
+			)
+			.bind(accountId, exportDay)
+			.first<ExportRow>();
+		return row ? toExport(row) : null;
+	}
+
+	/** `false` means the per-account daily slot was already taken. */
+	async insertExport(record: ExportRecord): Promise<boolean> {
+		const result = await this.db
+			.prepare(
+				`INSERT INTO mail_exports (
+				 id, account_id, mailbox_id, export_day, message_count, skipped_count,
+				 byte_size, r2_key, created_at
+				 ) VALUES (?,?,?,?,?,?,?,?,?)
+				 ON CONFLICT (account_id, export_day) DO NOTHING`,
+			)
+			.bind(
+				record.id,
+				record.accountId,
+				record.mailboxId,
+				record.exportDay,
+				record.messageCount,
+				record.skippedCount,
+				record.byteSize,
+				record.r2Key,
+				record.createdAt,
+			)
+			.run();
+		return (result.meta.changes ?? 0) > 0;
+	}
+
+	async insertAudit(entry: NewAuditEntry): Promise<void> {
+		await this.db
+			.prepare(
+				`INSERT INTO mail_audit_log (id, account_id, action, target_id, detail, created_at)
+				 VALUES (?,?,?,?,?,?)`,
+			)
+			.bind(
+				entry.id,
+				entry.accountId,
+				entry.action,
+				entry.targetId,
+				entry.detail,
+				entry.createdAt,
+			)
+			.run();
+	}
+
+	async deleteAuditBefore(cutoff: number): Promise<number> {
+		const result = await this.db
+			.prepare("DELETE FROM mail_audit_log WHERE created_at < ?")
+			.bind(cutoff)
+			.run();
+		return result.meta.changes ?? 0;
+	}
+
+	async listAttachmentKeys(mailboxId: string, messageId: string): Promise<string[]> {
+		const rows = await this.db
+			.prepare("SELECT r2_key FROM attachments WHERE mailbox_id = ? AND message_id = ?")
+			.bind(mailboxId, messageId)
+			.all<{ r2_key: string }>();
+		return (rows.results ?? []).map((row) => row.r2_key);
+	}
+
+	/** Removes one message and its attachments. Must run after R2 deletion. */
+	async deleteMessageRows(options: {
+		mailboxId: string;
+		messageId: string;
+		threadId: string;
+		sizeBytes: number;
+		wasQuarantined: boolean;
+		audit: NewAuditEntry;
+		now: number;
+	}): Promise<number> {
+		const results = await this.db.batch([
+			this.db
+				.prepare("DELETE FROM attachments WHERE mailbox_id = ? AND message_id = ?")
+				.bind(options.mailboxId, options.messageId),
+			this.db
+				.prepare("DELETE FROM messages WHERE mailbox_id = ? AND id = ?")
+				.bind(options.mailboxId, options.messageId),
+			this.db
+				.prepare(
+					`UPDATE mailboxes
+					 SET bytes_used = MAX(0, bytes_used - ?),
+					 message_count = MAX(0, message_count - 1),
+					 quarantine_count = MAX(0, quarantine_count - ?),
+					 updated_at = ?
+					 WHERE id = ?`,
+				)
+				.bind(
+					options.sizeBytes,
+					options.wasQuarantined ? 1 : 0,
+					options.now,
+					options.mailboxId,
+				),
+			this.db
+				.prepare(
+					"UPDATE threads SET message_count = MAX(0, message_count - 1) WHERE id = ? AND mailbox_id = ?",
+				)
+				.bind(options.threadId, options.mailboxId),
+			this.db
+				.prepare(
+					`INSERT INTO mail_audit_log (id, account_id, action, target_id, detail, created_at)
+					 VALUES (?,?,?,?,?,?)`,
+				)
+				.bind(
+					options.audit.id,
+					options.audit.accountId,
+					options.audit.action,
+					options.audit.targetId,
+					options.audit.detail,
+					options.audit.createdAt,
+				),
+		]);
+		const deleted = results[1]?.meta.changes ?? 0;
+		return deleted;
+	}
+
+	async listMailboxObjectKeys(mailboxId: string): Promise<string[]> {
+		const statements = [
+			this.db
+				.prepare(
+					`SELECT raw_key AS key FROM messages WHERE mailbox_id = ?
+					 UNION ALL SELECT text_key AS key FROM messages WHERE mailbox_id = ? AND text_key IS NOT NULL
+					 UNION ALL SELECT html_key AS key FROM messages WHERE mailbox_id = ? AND html_key IS NOT NULL`,
+				)
+				.bind(mailboxId, mailboxId, mailboxId),
+			this.db.prepare("SELECT r2_key AS key FROM attachments WHERE mailbox_id = ?").bind(mailboxId),
+			this.db.prepare("SELECT r2_key AS key FROM mail_exports WHERE mailbox_id = ?").bind(mailboxId),
+		];
+		const results = await this.db.batch(statements);
+		const keys: string[] = [];
+		for (const result of results) {
+			for (const row of (result.results ?? []) as { key: string }[]) {
+				keys.push(row.key);
+			}
+		}
+		return keys;
+	}
+
+	/**
+	 * Removes one linked identity and its synced copies. Must run after R2
+	 * deletion. Account-wide evidence (audit, receipts, suppressions) survives
+	 * because only this identity was unlinked.
+	 */
+	async deleteMailboxScoped(mailboxId: string): Promise<void> {
+		await this.db.batch([
+			this.db.prepare("DELETE FROM attachments WHERE mailbox_id = ?").bind(mailboxId),
+			this.db.prepare("DELETE FROM messages WHERE mailbox_id = ?").bind(mailboxId),
+			this.db.prepare("DELETE FROM threads WHERE mailbox_id = ?").bind(mailboxId),
+			this.db.prepare("DELETE FROM mail_exports WHERE mailbox_id = ?").bind(mailboxId),
+			this.db.prepare("DELETE FROM mail_drafts WHERE mailbox_id = ?").bind(mailboxId),
+			this.db.prepare("DELETE FROM mailbox_sync_state WHERE mailbox_id = ?").bind(mailboxId),
+			this.db.prepare("DELETE FROM provider_credentials WHERE mailbox_id = ?").bind(mailboxId),
+			this.db.prepare("DELETE FROM mailboxes WHERE id = ?").bind(mailboxId),
+		]);
+	}
+
+	/**
+	 * Removes every row owned by the mailbox. Must run after R2 deletion. The
+	 * audit history for this account is erased too: an account deletion is a
+	 * data-subject erasure, not a retention checkpoint.
+	 */
+	async deleteMailboxRows(mailboxId: string, accountId: string): Promise<void> {
+		await this.db.batch([
+			this.db.prepare("DELETE FROM attachments WHERE mailbox_id = ?").bind(mailboxId),
+			this.db.prepare("DELETE FROM messages WHERE mailbox_id = ?").bind(mailboxId),
+			this.db.prepare("DELETE FROM threads WHERE mailbox_id = ?").bind(mailboxId),
+			this.db.prepare("DELETE FROM mail_exports WHERE mailbox_id = ?").bind(mailboxId),
+			this.db.prepare("DELETE FROM mail_drafts WHERE mailbox_id = ?").bind(mailboxId),
+			this.db.prepare("DELETE FROM confirmation_nonces WHERE account_id = ?").bind(accountId),
+			this.db.prepare("DELETE FROM send_receipts WHERE account_id = ?").bind(accountId),
+			this.db.prepare("DELETE FROM delivery_events WHERE account_id = ?").bind(accountId),
+			this.db.prepare("DELETE FROM suppressions WHERE account_id = ?").bind(accountId),
+			this.db.prepare("DELETE FROM deliverability_alerts WHERE account_id = ?").bind(accountId),
+			this.db.prepare("DELETE FROM mail_audit_log WHERE account_id = ?").bind(accountId),
+			this.db.prepare("DELETE FROM mailbox_sync_state WHERE mailbox_id = ?").bind(mailboxId),
+			this.db.prepare("DELETE FROM provider_credentials WHERE account_id = ?").bind(accountId),
+			this.db.prepare("DELETE FROM identity_confirmation_nonces WHERE account_id = ?").bind(accountId),
+			this.db.prepare("DELETE FROM oauth_link_states WHERE account_id = ?").bind(accountId),
+			this.db.prepare("DELETE FROM mailboxes WHERE id = ?").bind(mailboxId),
+		]);
+	}
+
+	async insertDeliveryEvent(event: NewDeliveryEvent): Promise<boolean> {
+		const result = await this.db
+			.prepare(
+				`INSERT INTO delivery_events (
+				 id, account_id, send_receipt_id, provider_message_id, type,
+				 recipient_hash, recipient_domain, status, diagnostic_code,
+				 occurred_at, created_at
+				 ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+				 ON CONFLICT (id) DO NOTHING`,
+			)
+			.bind(
+				event.id,
+				event.accountId,
+				event.sendReceiptId,
+				event.providerMessageId,
+				event.type,
+				event.recipientHash,
+				event.recipientDomain,
+				event.status,
+				event.diagnosticCode,
+				event.occurredAt,
+				event.createdAt,
+			)
+			.run();
+		return (result.meta.changes ?? 0) > 0;
+	}
+
+	/** `false` means the recipient was already suppressed. */
+	async insertSuppression(suppression: NewSuppression): Promise<boolean> {
+		const result = await this.db
+			.prepare(
+				`INSERT INTO suppressions (
+				 account_id, recipient, reason, source_event_id, created_at
+				 ) VALUES (?,?,?,?,?)
+				 ON CONFLICT (account_id, recipient) DO NOTHING`,
+			)
+			.bind(
+				suppression.accountId,
+				suppression.recipient,
+				suppression.reason,
+				suppression.sourceEventId,
+				suppression.createdAt,
+			)
+			.run();
+		return (result.meta.changes ?? 0) > 0;
+	}
+
+	async findSuppressedRecipients(
+		accountId: string,
+		recipients: string[],
+	): Promise<string[]> {
+		if (!recipients.length) return [];
+		const unique = [...new Set(recipients)];
+		const placeholders = unique.map(() => "?").join(",");
+		const rows = await this.db
+			.prepare(
+				`SELECT recipient FROM suppressions
+				 WHERE account_id = ? AND recipient IN (${placeholders})`,
+			)
+			.bind(accountId, ...unique)
+			.all<{ recipient: string }>();
+		return (rows.results ?? []).map((row) => row.recipient);
+	}
+
+	async findSendPause(accountId: string): Promise<SendPause | null> {
+		const row = await this.db
+			.prepare(
+				`SELECT send_paused_at, send_paused_reason FROM mailboxes
+				 WHERE account_id = ? LIMIT 1`,
+			)
+			.bind(accountId)
+			.first<{ send_paused_at: number | null; send_paused_reason: string | null }>();
+		if (!row || row.send_paused_at === null) return null;
+		return { pausedAt: row.send_paused_at, reason: row.send_paused_reason };
+	}
+
+	/** Only the first trip wire pauses; repeat signals keep the original reason. */
+	async pauseSend(accountId: string, reason: string, now: number): Promise<boolean> {
+		const result = await this.db
+			.prepare(
+				`UPDATE mailboxes
+				 SET send_paused_at = ?, send_paused_reason = ?, updated_at = ?
+				 WHERE account_id = ? AND send_paused_at IS NULL`,
+			)
+			.bind(now, reason, now, accountId)
+			.run();
+		return (result.meta.changes ?? 0) > 0;
+	}
+
+	async insertDeliverabilityAlert(alert: NewDeliverabilityAlert): Promise<void> {
+		await this.db
+			.prepare(
+				`INSERT INTO deliverability_alerts (id, account_id, kind, detail, created_at)
+				 VALUES (?,?,?,?,?)
+				 ON CONFLICT (id) DO NOTHING`,
+			)
+			.bind(alert.id, alert.accountId, alert.kind, alert.detail, alert.createdAt)
+			.run();
+	}
+
+	async abuseWindow(accountId: string, since: number): Promise<AbuseWindowCounts> {
+		const row = await this.db
+			.prepare(
+				`SELECT
+				 (SELECT COUNT(*) FROM send_receipts WHERE account_id = ? AND created_at >= ?) AS sends,
+				 (SELECT COUNT(*) FROM delivery_events
+				  WHERE account_id = ? AND type = 'hard_bounce' AND occurred_at >= ?) AS hard_bounces,
+				 (SELECT COUNT(*) FROM delivery_events
+				  WHERE account_id = ? AND type = 'complaint' AND occurred_at >= ?) AS complaints,
+				 (SELECT COALESCE(SUM(external_recipient_count), 0) FROM send_receipts
+				  WHERE account_id = ? AND created_at >= ?) AS external_recipients`,
+			)
+			.bind(accountId, since, accountId, since, accountId, since, accountId, since)
+			.first<{
+				sends: number;
+				hard_bounces: number;
+				complaints: number;
+				external_recipients: number;
+			}>();
+		return {
+			sends: row?.sends ?? 0,
+			hardBounces: row?.hard_bounces ?? 0,
+			complaints: row?.complaints ?? 0,
+			externalRecipients: row?.external_recipients ?? 0,
+		};
+	}
+
+	async findReceiptByProviderMessageId(
+		providerMessageId: string,
+	): Promise<ReceiptLookup | null> {
+		const row = await this.db
+			.prepare(
+				`SELECT id, account_id FROM send_receipts
+				 WHERE provider_message_id = ? LIMIT 1`,
+			)
+			.bind(providerMessageId)
+			.first<{ id: string; account_id: string }>();
+		return row ? { id: row.id, accountId: row.account_id } : null;
+	}
+
+	async deliverabilityTotals(since: number): Promise<DeliverabilityTotals> {
+		const row = await this.db
+			.prepare(
+				`SELECT
+				 (SELECT COUNT(*) FROM send_receipts WHERE created_at >= ?) AS sends,
+				 (SELECT COALESCE(SUM(external_recipient_count), 0) FROM send_receipts
+				  WHERE created_at >= ?) AS external_recipients,
+				 (SELECT COUNT(*) FROM delivery_events WHERE type = 'delivered' AND occurred_at >= ?) AS delivered,
+				 (SELECT COUNT(*) FROM delivery_events WHERE type = 'soft_bounce' AND occurred_at >= ?) AS soft_bounces,
+				 (SELECT COUNT(*) FROM delivery_events WHERE type = 'hard_bounce' AND occurred_at >= ?) AS hard_bounces,
+				 (SELECT COUNT(*) FROM delivery_events WHERE type = 'complaint' AND occurred_at >= ?) AS complaints`,
+			)
+			.bind(since, since, since, since, since, since)
+			.first<{
+				sends: number;
+				external_recipients: number;
+				delivered: number;
+				soft_bounces: number;
+				hard_bounces: number;
+				complaints: number;
+			}>();
+		return {
+			sends: row?.sends ?? 0,
+			externalRecipients: row?.external_recipients ?? 0,
+			delivered: row?.delivered ?? 0,
+			softBounces: row?.soft_bounces ?? 0,
+			hardBounces: row?.hard_bounces ?? 0,
+			complaints: row?.complaints ?? 0,
+		};
+	}
+
+	async countSuppressions(): Promise<number> {
+		const row = await this.db
+			.prepare("SELECT COUNT(*) AS total FROM suppressions")
+			.first<{ total: number }>();
+		return row?.total ?? 0;
+	}
+
+	async countPausedAccounts(): Promise<number> {
+		const row = await this.db
+			.prepare("SELECT COUNT(*) AS total FROM mailboxes WHERE send_paused_at IS NOT NULL")
+			.first<{ total: number }>();
+		return row?.total ?? 0;
+	}
+
+	async insertWebhookNonce(nonce: string, now: number): Promise<boolean> {
+		const result = await this.db
+			.prepare(
+				`INSERT INTO internal_webhook_nonces (nonce, created_at) VALUES (?,?)
+				 ON CONFLICT (nonce) DO NOTHING`,
+			)
+			.bind(nonce, now)
+			.run();
+		return (result.meta.changes ?? 0) > 0;
+	}
+
+	async deleteWebhookNoncesBefore(cutoff: number): Promise<number> {
+		const result = await this.db
+			.prepare("DELETE FROM internal_webhook_nonces WHERE created_at < ?")
+			.bind(cutoff)
+			.run();
+		return result.meta.changes ?? 0;
+	}
+
+	async deleteDeliveryEventsBefore(cutoff: number): Promise<number> {
+		const result = await this.db
+			.prepare("DELETE FROM delivery_events WHERE occurred_at < ?")
+			.bind(cutoff)
+			.run();
+		return result.meta.changes ?? 0;
+	}
 }
 
 /**
- * Idempotent S1 address provisioning. The account-creation caller does not
- * exist yet; the Cloud Auth account-provisioning contract is a separate task.
- * Re-provisioning the same account and address returns the existing row.
+ * S1 address provisioning used to live here. S6 owns it now: the address is
+ * derived from the Cloud Auth username (or supplied by the user) and a collision
+ * is reported instead of retried with a suffix. See `./provision.ts`.
  */
-export async function provisionMailbox(
-	repository: MailRepository,
-	options: {
-		accountId: string;
-		localPart: string;
-		domain: string;
-		quotaBytes: number;
-		now: number;
-	},
-): Promise<ProvisionResult> {
-	const normalized = normalizeLocalPart(options.localPart);
-	if (!normalized.ok) return { ok: false, reason: normalized.reason };
 
-	const existing = await repository.findMailboxByAccount(options.accountId);
-	if (existing) {
-		return existing.address === mailboxAddress(normalized.localPart, options.domain)
-			? { ok: true, mailbox: existing, created: false }
-			: { ok: false, reason: "mailbox_exists" };
-	}
-
-	const base = normalized.localPart;
-	for (let attempt = 0; attempt < 8; attempt += 1) {
-		const candidate =
-			attempt === 0
-				? base
-				: `${base.slice(0, 27)}-${(await sha256Hex(`${options.accountId}:${attempt}`)).slice(0, 4)}`;
-		const id = `mbx_${(await sha256Hex(`${options.accountId}\n${candidate}`)).slice(0, 32)}`;
-		const address = mailboxAddress(candidate, options.domain);
-		const inserted = await repository.insertMailbox({
-			id,
-			accountId: options.accountId,
-			address,
-			localPart: candidate,
-			quotaBytes: options.quotaBytes,
-			now: options.now,
-		});
-		if (inserted) {
-			return {
-				ok: true,
-				created: true,
-				mailbox: {
-					id,
-					accountId: options.accountId,
-					address,
-					localPart: candidate,
-					status: "active",
-					quotaBytes: options.quotaBytes,
-					bytesUsed: 0,
-					messageCount: 0,
-					quarantineCount: 0,
-					createdAt: options.now,
-				},
-			};
-		}
-		const raced = await repository.findMailboxByAccount(options.accountId);
-		if (raced) {
-			return raced.address === address
-				? { ok: true, mailbox: raced, created: false }
-				: { ok: false, reason: "mailbox_exists" };
-		}
-	}
-	return { ok: false, reason: "address_conflict" };
-}
