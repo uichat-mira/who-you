@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
 import { Miniflare } from "miniflare";
 
-const ORIGIN = "https://who-you-tomz-preview.dangjingtao.workers.dev";
+const ORIGIN = "https://who-you.tomz.io";
 const AUTH = "https://cloud-auth.tomzlab.cn";
 const bindings = {
   WHOYOU_WEB_SESSION_KEY: Buffer.alloc(32, 7).toString("base64url"),
@@ -25,6 +25,8 @@ async function withPreview(run, overrides = {}) {
 
 test("Web login shows a human entrance without exposing a credential", async () => {
   await withPreview(async (mf) => {
+    const oldHost = await mf.dispatchFetch("https://who-you-tomz-preview.dangjingtao.workers.dev/");
+    assert.equal(oldHost.status, 404);
     const r = await mf.dispatchFetch(ORIGIN + "/");
     assert.equal(r.status, 200);
     assert.equal(r.headers.get("cache-control"), "no-store");

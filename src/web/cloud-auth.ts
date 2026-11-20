@@ -2,7 +2,7 @@ import type { WhoYouEnv } from "../mail/config";
 import { createWhoYouRuntime } from "../mcp/runtime";
 
 const CLIENT_ID = "who-you-web";
-const CALLBACK = "https://who-you-tomz-preview.dangjingtao.workers.dev/auth/callback";
+const CALLBACK = "https://who-you.tomz.io/auth/callback";
 const ORIGIN = new URL(CALLBACK).origin;
 const STATE_COOKIE = "__Host-who_you_oauth";
 const SESSION_COOKIE = "__Host-who_you_session";
