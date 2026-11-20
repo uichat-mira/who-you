@@ -5,7 +5,7 @@ import { URLSearchParams } from "node:url";
 import { Miniflare } from "miniflare";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 
-const ORIGIN = "https://who-you-tomz-preview.dangjingtao.workers.dev";
+const ORIGIN = "https://who-you.tomz.io";
 const AUTH = "https://cloud-auth.tomzlab.cn";
 const jwksUrl = AUTH + "/.well-known/jwks.json";
 const issuedUrl = AUTH + "/v1/service-credentials";
