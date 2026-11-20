@@ -39,6 +39,8 @@ export type WhoYouEnv = McpEnv &
 		DB?: D1Database;
 		MAIL_BUCKET?: R2Bucket;
 		MAIL_DOMAIN?: string;
+		/** Base64url-encoded 32-byte AES-GCM key for the browser-only Cloud Auth session. */
+		WHOYOU_WEB_SESSION_KEY?: string;
 		/** Cloudflare Email Service binding; send is closed when it is absent. */
 		MAIL_EMAIL_SEND?: SendEmail;
 		/**
