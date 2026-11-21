@@ -112,6 +112,20 @@ async function seal(key: CryptoKey, data: Flow | Session | MailOAuthFlow | MailO
   bytes.set(iv); bytes.set(encrypted, iv.length);
   return encode(bytes);
 }
+async function rememberMailOAuthResult(
+  headers: Headers,
+  key: CryptoKey,
+  state: string,
+  notice: GmailCallbackNotice,
+): Promise<void> {
+  addCookie(headers, MAIL_OAUTH_RESULT_COOKIE, await seal(key, {
+    provider: "gmail",
+    state,
+    notice,
+    expiresAt: Date.now() + 60_000,
+  }), 60);
+}
+
 async function unseal(key: CryptoKey, raw: string | null): Promise<unknown> {
   if (!raw || raw.length > 6000) return null;
   try {
@@ -780,12 +794,7 @@ export async function handleWebRequest(request: Request, env: WhoYouEnv): Promis
         || flow.sessionBinding !== await sessionBinding(currentSession)) {
       if (await discardWebGmailState(env, flow.state)) {
         addCookie(h, MAIL_OAUTH_COOKIE, "", 0);
-        addCookie(h, MAIL_OAUTH_RESULT_COOKIE, await seal(key, {
-          provider: "gmail",
-          state: flow.state,
-          notice: "gmail_link_failed",
-          expiresAt: Date.now() + 60_000,
-        }), 60);
+        await rememberMailOAuthResult(h, key, flow.state, "gmail_link_failed");
       }
       return redirect("/account/mailboxes?notice=gmail_link_failed", h);
     }
@@ -796,12 +805,7 @@ export async function handleWebRequest(request: Request, env: WhoYouEnv): Promis
         ? "gmail_denied" : "gmail_link_failed";
       if (discarded) {
         addCookie(h, MAIL_OAUTH_COOKIE, "", 0);
-        addCookie(h, MAIL_OAUTH_RESULT_COOKIE, await seal(key, {
-          provider: "gmail",
-          state: flow.state,
-          notice,
-          expiresAt: Date.now() + 60_000,
-        }), 60);
+        await rememberMailOAuthResult(h, key, flow.state, notice);
       }
       return redirect(`/account/mailboxes?notice=${notice}`, h);
     }
@@ -823,12 +827,7 @@ export async function handleWebRequest(request: Request, env: WhoYouEnv): Promis
       ? (payload.relinked === true ? "gmail_relinked" : "gmail_connected")
       : payload.error === "provider_reauth_required"
         ? "gmail_denied" : "gmail_link_failed";
-    addCookie(h, MAIL_OAUTH_RESULT_COOKIE, await seal(key, {
-      provider: "gmail",
-      state: flow.state,
-      notice,
-      expiresAt: Date.now() + 60_000,
-    }), 60);
+    await rememberMailOAuthResult(h, key, flow.state, notice);
     return redirect(`/account/mailboxes?notice=${notice}`, h);
   }
 
