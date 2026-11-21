@@ -1,5 +1,9 @@
 import type { WhoYouEnv } from "../mail/config";
 import { createWhoYouRuntime } from "../mcp/runtime";
+import { normalizeDomain } from "../mail/address";
+import { resolveCredentialKeys } from "../mail/config";
+import { resolveGmailOAuthConfig } from "../mail/gmail-link";
+import { resolveMicrosoftOAuthConfig } from "../mail/microsoft-link";
 
 const CLIENT_ID = "who-you-web";
 const CALLBACK = "https://who-you.tomz.io/auth/callback";
@@ -16,7 +20,8 @@ type ToolCallResult =
   | { ok: false; reason: "not_configured"; detail: string };
 
 type MailboxAvailability =
-  | "ready"
+  | "configured"
+  | "service_unavailable"
   | "disabled"
   | "reauth_required"
   | "credential_unavailable"
@@ -207,24 +212,35 @@ async function readIdentity(env: WhoYouEnv, session: Session): Promise<unknown |
     ? { accountId: id.accountId, consumerId: id.consumerId, scopes: id.scopes } : null;
 }
 
+/**
+ * Availability is a *local capability/configuration* statement, not a claim
+ * that a remote provider was successfully contacted. A linked credential row
+ * is never proof that its decryption key or OAuth client exists in this Worker.
+ */
 const mailboxAvailability = (
   kind: "own_domain" | "third_party",
   status: "active" | "disabled",
   credentialStatus: WebMailbox["credentialStatus"],
+  provider: WebMailbox["provider"],
+  env: WhoYouEnv,
 ): MailboxAvailability => {
   if (status === "disabled") return "disabled";
-  if (kind === "own_domain") return "ready";
-  switch (credentialStatus) {
-    case "active": return "ready";
-    case "reauth_required": return "reauth_required";
-    case "unreadable":
-    case "revoked": return "credential_unavailable";
-    default: return "credential_missing";
+  if (kind === "own_domain") {
+    return normalizeDomain(env.MAIL_DOMAIN ?? "") ? "configured" : "service_unavailable";
   }
+  if (credentialStatus === "reauth_required") return "reauth_required";
+  if (credentialStatus === "unreadable" || credentialStatus === "revoked") {
+    return "credential_unavailable";
+  }
+  if (credentialStatus !== "active") return "credential_missing";
+  if (!resolveCredentialKeys(env)) return "credential_unavailable";
+  if (provider === "gmail" && !resolveGmailOAuthConfig(env)) return "service_unavailable";
+  if (provider === "microsoft" && !resolveMicrosoftOAuthConfig(env)) return "service_unavailable";
+  return "configured";
 };
 
 /** Whitelists the server list into the six fields the browser is allowed to see. */
-function projectMailboxes(value: unknown): WebMailbox[] | null {
+function projectMailboxes(value: unknown, env: WhoYouEnv): WebMailbox[] | null {
   if (typeof value !== "object" || value === null) return null;
   const identities = (value as { identities?: unknown }).identities;
   if (!Array.isArray(identities)) return null;
@@ -247,7 +263,7 @@ function projectMailboxes(value: unknown): WebMailbox[] | null {
       kind: item.kind,
       provider: item.provider,
       credentialStatus,
-      availability: mailboxAvailability(item.kind, item.status, credentialStatus),
+      availability: mailboxAvailability(item.kind, item.status, credentialStatus, item.provider, env),
     });
   }
   return projected;
@@ -267,8 +283,16 @@ async function handleMailboxList(
       ? jsonError(503, "mailboxes_unavailable", headers(), { reason: listed.detail })
       : jsonError(502, "authentication_link_unavailable");
   }
-  const mailboxes = projectMailboxes(listed.structured);
+  const mailboxes = projectMailboxes(listed.structured, env);
   if (!mailboxes) return jsonError(502, "mailbox_list_invalid");
+  // Storage bindings alone do not mean this preview can actually manage mail.
+  // With no account identities and no configured provider/own-domain capability,
+  // an empty D1 is not evidence that a usable mail service is available.
+  if (mailboxes.length === 0 && !normalizeDomain(env.MAIL_DOMAIN ?? "")
+      && !resolveCredentialKeys(env)) {
+    return jsonError(503, "mailboxes_unavailable", headers(),
+      { reason: "mail_service_not_configured" });
+  }
   const h = headers(); h.set("content-type", "application/json; charset=utf-8");
   return new Response(JSON.stringify({ mailboxes }), { headers: h });
 }

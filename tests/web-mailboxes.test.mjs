@@ -75,7 +75,7 @@ const outbound = async (request) => {
 	return Response.json({ error: "unexpected_upstream", url: request.url }, { status: 404 });
 };
 
-function createWorker({ storage = true } = {}) {
+function createWorker({ storage = true, mailConfigured = true, gmailConfigured = true } = {}) {
 	return new Miniflare({
 		modules: true,
 		scriptPath: "dist/worker.mjs",
@@ -87,6 +87,15 @@ function createWorker({ storage = true } = {}) {
 			CLOUD_AUTH_ISSUER: AUTH,
 			CLOUD_AUTH_JWKS_URL: JWKS_URL,
 			MCP_AUDIENCE: "mira:who-you",
+            ...(mailConfigured ? {
+              MAIL_DOMAIN: "tomlab.cn",
+              MAIL_CREDENTIAL_KEK: Buffer.alloc(32, 9).toString("base64"),
+              ...(gmailConfigured ? {
+                GMAIL_OAUTH_CLIENT_ID: "synthetic-test-client",
+                GMAIL_OAUTH_CLIENT_SECRET: "synthetic-test-secret",
+                GMAIL_OAUTH_REDIRECT_URI: ORIGIN + "/mail/oauth/gmail/callback",
+              } : {}),
+            } : {}),
 		},
 		...(storage ? { d1Databases: ["DB"], r2Buckets: ["MAIL_BUCKET"] } : {}),
 		outboundService: outbound,
@@ -257,7 +266,7 @@ test("a signed-in account receives only its own mailboxes with minimal fields", 
 				kind: "third_party",
 				provider: "gmail",
 				credentialStatus: "active",
-				availability: "ready",
+				availability: "configured",
 			},
 			{
 				mailboxId: "mbx_ms",
@@ -273,7 +282,7 @@ test("a signed-in account receives only its own mailboxes with minimal fields", 
 				kind: "own_domain",
 				provider: null,
 				credentialStatus: null,
-				availability: "ready",
+				availability: "configured",
 			},
 		]);
 		for (const entry of body.mailboxes) assert.deepEqual(Object.keys(entry).sort(), EXPECTED_KEYS);
@@ -374,4 +383,63 @@ test("a deployment without mail storage reports mailboxes unavailable, not empty
 	} finally {
 		await mf.dispose();
 	}
+});
+
+
+test("a stored active credential is not usable without the deployment KEK/provider bindings", async () => {
+  const mf = createWorker({ mailConfigured: false });
+  try {
+    const db = await mf.getD1Database("DB");
+    await db.batch(MIGRATIONS.map((statement) => db.prepare(statement)));
+    await seedAccounts(db);
+    const response = await mf.dispatchFetch(ORIGIN + "/api/mailboxes", {
+      headers: { cookie: await login(mf, "code-e2e") },
+    });
+    assert.equal(response.status, 200);
+    const { mailboxes } = await response.json();
+    const byId = Object.fromEntries(mailboxes.map((m) => [m.mailboxId, m]));
+    assert.equal(byId.mbx_own.availability, "service_unavailable");
+    assert.equal(byId.mbx_gmail.credentialStatus, "active");
+    assert.equal(byId.mbx_gmail.availability, "credential_unavailable");
+    assert.equal(byId.mbx_ms.availability, "reauth_required");
+  } finally {
+    await mf.dispose();
+  }
+});
+
+test("an active Gmail record without a registered OAuth provider is not ready", async () => {
+  const mf = createWorker({ gmailConfigured: false });
+  try {
+    const db = await mf.getD1Database("DB");
+    await db.batch(MIGRATIONS.map((statement) => db.prepare(statement)));
+    await seedAccounts(db);
+    const response = await mf.dispatchFetch(ORIGIN + "/api/mailboxes", {
+      headers: { cookie: await login(mf, "code-e2e") },
+    });
+    assert.equal(response.status, 200);
+    const { mailboxes } = await response.json();
+    const gmail = mailboxes.find((m) => m.mailboxId === "mbx_gmail");
+    assert.equal(gmail.credentialStatus, "active");
+    assert.equal(gmail.availability, "service_unavailable");
+  } finally {
+    await mf.dispose();
+  }
+});
+
+test("a configured D1/R2 preview with no mail service does not pretend an empty list is an enabled mailbox product", async () => {
+  const mf = createWorker({ mailConfigured: false });
+  try {
+    const db = await mf.getD1Database("DB");
+    await db.batch(MIGRATIONS.map((statement) => db.prepare(statement)));
+    const response = await mf.dispatchFetch(ORIGIN + "/api/mailboxes", {
+      headers: { cookie: await login(mf, "code-empty") },
+    });
+    assert.equal(response.status, 503);
+    assert.deepEqual(await response.json(), {
+      error: "mailboxes_unavailable",
+      reason: "mail_service_not_configured",
+    });
+  } finally {
+    await mf.dispose();
+  }
 });
