@@ -443,3 +443,88 @@ test("a configured D1/R2 preview with no mail service does not pretend an empty 
     await mf.dispose();
   }
 });
+
+test("the mailbox page renders the signed-in account's real list with explicit states", async () => {
+	const mf = createWorker();
+	try {
+		const db = await mf.getD1Database("DB");
+		await db.batch(MIGRATIONS.map((statement) => db.prepare(statement)));
+		await seedAccounts(db);
+		const response = await mf.dispatchFetch(ORIGIN + "/account/mailboxes", {
+			headers: { cookie: await login(mf, "code-e2e") },
+		});
+		assert.equal(response.status, 200);
+		assert.equal(response.headers.get("cache-control"), "no-store");
+		const body = await response.text();
+		assert.match(body, /alpha@tomlab\.cn/);
+		assert.match(body, /user@gmail\.com/);
+		assert.match(body, /broken@outlook\.com/);
+		assert.match(body, /自有域邮箱/);
+		assert.match(body, /Gmail/);
+		assert.match(body, /Microsoft/);
+		assert.match(body, /IMAP\/SMTP/);
+		assert.match(body, /本地配置就绪/);
+		assert.match(body, /仅表示狐邮当前运行环境的必要依赖已配置/);
+		assert.match(body, /需要重新授权/);
+		assert.match(body, /有授权记录（不代表已可收发）/);
+		assert.doesNotMatch(body, /beta@tomlab\.cn/);
+		assert.doesNotMatch(body, /account-e2e|account-other/);
+		assert.doesNotMatch(body, /example\.com|demo@|placeholder@/i);
+		assert.match(body, /<button type="button" disabled[^>]*>解绑邮箱（尚未开放）<\/button>/);
+		assert.doesNotMatch(body, /action="\/account\/mailboxes"/);
+	} finally {
+		await mf.dispose();
+	}
+});
+
+test("the mailbox page explains an empty account without inventing mailboxes", async () => {
+	const mf = createWorker();
+	try {
+		const db = await mf.getD1Database("DB");
+		await db.batch(MIGRATIONS.map((statement) => db.prepare(statement)));
+		await seedAccounts(db);
+		const response = await mf.dispatchFetch(ORIGIN + "/account/mailboxes", {
+			headers: { cookie: await login(mf, "code-empty") },
+		});
+		assert.equal(response.status, 200);
+		const body = await response.text();
+		assert.match(body, /当前账号还没有登记邮箱/);
+		assert.doesNotMatch(body, /alpha@tomlab\.cn|beta@tomlab\.cn|user@gmail\.com/);
+		assert.doesNotMatch(body, /<li class="mailbox">/);
+	} finally {
+		await mf.dispose();
+	}
+});
+
+test("the mailbox page reports service failure instead of a fake empty list", async () => {
+	const mf = createWorker({ storage: false });
+	try {
+		const response = await mf.dispatchFetch(ORIGIN + "/account/mailboxes", {
+			headers: { cookie: await login(mf, "code-e2e") },
+		});
+		assert.equal(response.status, 200);
+		const body = await response.text();
+		assert.match(body, /邮箱服务尚未配置或暂时不可用/);
+		assert.doesNotMatch(body, /当前账号还没有登记邮箱/);
+		assert.doesNotMatch(body, /mail_storage_not_configured/);
+	} finally {
+		await mf.dispose();
+	}
+});
+
+test("an unauthenticated mailbox page redirects to login and never leaks a list", async () => {
+	const mf = createWorker();
+	try {
+		const db = await mf.getD1Database("DB");
+		await db.batch(MIGRATIONS.map((statement) => db.prepare(statement)));
+		await seedAccounts(db);
+		const response = await mf.dispatchFetch(ORIGIN + "/account/mailboxes", {
+			redirect: "manual",
+		});
+		assert.equal(response.status, 303);
+		assert.equal(response.headers.get("location"), "/");
+		assert.doesNotMatch(await response.text(), /alpha@tomlab\.cn|user@gmail\.com/);
+	} finally {
+		await mf.dispose();
+	}
+});
