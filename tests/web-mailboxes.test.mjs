@@ -168,6 +168,19 @@ async function login(mf, code) {
 	return session.split(";")[0];
 }
 
+async function startGmailFlow(mf, cookie) {
+	const started = await mf.dispatchFetch(ORIGIN + "/account/mailboxes/gmail/link", {
+		method: "POST",
+		redirect: "manual",
+		headers: { cookie, origin: ORIGIN },
+	});
+	assert.equal(started.status, 303, await started.text());
+	const authorization = new URL(started.headers.get("location"));
+	const state = authorization.searchParams.get("state");
+	assert.ok(state);
+	return { started, authorization, state, flowCookie: cookies(started) };
+}
+
 async function expiredSessionCookie() {
 	const key = await webcrypto.subtle.importKey(
 		"raw",
@@ -786,16 +799,7 @@ test("concurrent Web Gmail callbacks preserve the winning result", async () => {
 		await db.batch(MIGRATIONS.map((statement) => db.prepare(statement)));
 		const ownerCookie = await login(mf, "code-empty");
 
-		const started = await mf.dispatchFetch(ORIGIN + "/account/mailboxes/gmail/link", {
-			method: "POST",
-			redirect: "manual",
-			headers: { cookie: ownerCookie, origin: ORIGIN },
-		});
-		assert.equal(started.status, 303, await started.text());
-		const authorization = new URL(started.headers.get("location"));
-		const state = authorization.searchParams.get("state");
-		assert.ok(state);
-		const flowCookie = cookies(started);
+		const { state, flowCookie } = await startGmailFlow(mf, ownerCookie);
 		const callbackUrl =
 			ORIGIN + "/mail/oauth/gmail/callback?" +
 			new URLSearchParams({ state, code: "synthetic-provider-code" });
@@ -870,14 +874,7 @@ test("Web Gmail mutations fail closed on CSRF/auth and provider denial", async (
 			"/?reason=sign_in_required&returnTo=%2Faccount%2Fmailboxes",
 		);
 
-		const started = await mf.dispatchFetch(ORIGIN + "/account/mailboxes/gmail/link", {
-			method: "POST",
-			redirect: "manual",
-			headers: { cookie, origin: ORIGIN },
-		});
-		const authorization = new URL(started.headers.get("location"));
-		const state = authorization.searchParams.get("state");
-		const flowCookie = cookies(started);
+		const { state, flowCookie } = await startGmailFlow(mf, cookie);
 		const otherCookie = await login(mf, "code-other");
 		const wrongSession = await mf.dispatchFetch(
 			ORIGIN + "/mail/oauth/gmail/callback?" +
@@ -903,15 +900,10 @@ test("Web Gmail mutations fail closed on CSRF/auth and provider denial", async (
 		assert.deepEqual(await replayAfterWrongSession.json(), { error: "invalid_state" });
 		assert.equal(trace.googleTokenExchanges ?? 0, 0);
 
-		const deniedStart = await mf.dispatchFetch(ORIGIN + "/account/mailboxes/gmail/link", {
-			method: "POST",
-			redirect: "manual",
-			headers: { cookie, origin: ORIGIN },
-		});
-		const deniedAuthorization = new URL(deniedStart.headers.get("location"));
-		const deniedState = deniedAuthorization.searchParams.get("state");
-		assert.ok(deniedState);
-		const deniedFlowCookie = cookies(deniedStart);
+		const {
+			state: deniedState,
+			flowCookie: deniedFlowCookie,
+		} = await startGmailFlow(mf, cookie);
 		const denied = await mf.dispatchFetch(
 			ORIGIN + "/mail/oauth/gmail/callback?" +
 				new URLSearchParams({ state: deniedState, error: "access_denied" }),
