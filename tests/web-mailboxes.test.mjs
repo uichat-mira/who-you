@@ -502,7 +502,7 @@ test("the mailbox page reports service failure instead of a fake empty list", as
 		const response = await mf.dispatchFetch(ORIGIN + "/account/mailboxes", {
 			headers: { cookie: await login(mf, "code-e2e") },
 		});
-		assert.equal(response.status, 200);
+		assert.equal(response.status, 503);
 		const body = await response.text();
 		assert.match(body, /邮箱服务尚未配置或暂时不可用/);
 		assert.doesNotMatch(body, /当前账号还没有登记邮箱/);

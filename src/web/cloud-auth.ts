@@ -118,7 +118,7 @@ function escapeText(s: string): string {
   return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;",
     '"': "&quot;", "'": "&#39;" })[c]!);
 }
-function page(content: string, outgoing = headers()): Response {
+function page(content: string, outgoing = headers(), status = 200): Response {
   const h = outgoing;
   h.set("content-type", "text/html; charset=utf-8");
   h.set("content-security-policy",
@@ -141,7 +141,7 @@ code{overflow-wrap:anywhere}.topnav{margin-bottom:12px}.topnav a{background:none
 .notice{background:#f4f6fa;border:1px solid #dbe2ef;border-radius:8px;padding:14px}
 .notice.error{background:#fdf2f2;border-color:#f0c9c9}
 small{color:#777}
-@media (max-width:420px){body{padding:3vh .75rem}main{padding:20px}h1{font-size:26px}}</style></head><body><main><h1>狐邮 · Who You</h1>${content}</main></body></html>`, { headers: h });
+@media (max-width:420px){body{padding:3vh .75rem}main{padding:20px}h1{font-size:26px}}</style></head><body><main><h1>狐邮 · Who You</h1>${content}</main></body></html>`, { status, headers: h });
 }
 function baseUrl(env: WhoYouEnv): string | null {
   try {
@@ -519,8 +519,11 @@ export async function handleWebRequest(request: Request, env: WhoYouEnv): Promis
   if (!isSession(session))
     return path === "/account" || path === "/account/mailboxes"
       ? redirect("/") : jsonError(401, "sign_in_required");
-  if (path === "/account/mailboxes")
-    return page(renderMailboxesPage(await fetchMailboxList(env, session)));
+  if (path === "/account/mailboxes") {
+    const outcome = await fetchMailboxList(env, session);
+    return page(renderMailboxesPage(outcome), headers(),
+      outcome.ok ? 200 : outcome.error === "mailboxes_unavailable" ? 503 : 502);
+  }
   if (path === "/api/mailboxes") return handleMailboxList(request, env, session, u);
   let identity: unknown;
   try { identity = await readIdentity(env, session); }
