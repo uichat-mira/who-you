@@ -4,8 +4,9 @@ Read the **current** `uichat-mira/.github@main/AGENTS.md`, then the current Issu
 
 ## Delegation and authority
 
-- Who You / 狐邮 is the proposed cloud continuation of Mira Desktop's mail center.
-- **Product is intentionally undefined at bootstrap.** Old President + Trae own product exploration and implementation proposals. Do not invent user journeys, protocols, message retention, provider support, or migration commitments.
+- Who You / 狐邮 is an independent **MCP Server** for mail capabilities and a cloud continuation of Mira Desktop's mail-center functionality. Cloud Auth owns identity/credential issuance; Mira clients consume Who You over MCP.
+- The approved **cross-product responsibilities and entry-UI ownership** are recorded only in [docs/product-design.md](docs/product-design.md) (2026-11-21 maintainer decision). This supersedes the bootstrap assertion that the product is wholly undefined. Existing mail business, provider, retention and client migration contracts still belong to their respective Issues and explicit approvals; do not invent missing functionality.
+- Old President + Trae may continue product exploration and implementation proposals; those proposals do not silently supersede the approved boundaries.
 - GitHub Issues own approved work contracts; this repo does not grant AI agents blanket authority to create/close Issues, merge, deploy, or change Organization governance.
 - Builders open small, independently verifiable Draft PRs into `dev`; maintainers/reviewers decide acceptance separately.
 - AI Review is advisory and read-only. An AI finding or green CI is not a human approval or product acceptance.

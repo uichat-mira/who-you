@@ -1,5 +1,10 @@
 # Who You — infrastructure handoff (not a product design)
 
+> **历史工程交接说明（写于 2026-11-09）· 不是当前部署状态文档。** 本文后文出现的「尚未部署」「没有 Worker」「未接入 DNS」「未发过一封邮件」等描述应按当时的时间截面阅读，不得用于否定 2026-11-21 已实测的 Cloud Auth → `who-you.tomz.io` Web 登录、MCP `whoyou_whoami` 与 Cloudflare 预览部署。当前产品定位及页面入口以 [产品边界](../product-design.md) 为准；当前技术能力以源码、实际 Cloudflare Worker 绑定及部署记录为准。**已部署的登录/MCP 不代表真实邮箱收发已经上线。**
+>
+> 早期引用的 `docs/product-design.md v1` 原文未在当前 `dev/prod` 找到；2026-11-21 重建的同名文档仅拥有已裁决的产品边界，**不含原 v1 的章节号**。以下 S1–S4 施工事实与假设均保留作历史档案。
+
+
 **Status (2026-11-09): repository bootstrap plus S1 inbound, S2 draft/send, S3 state/lifecycle and S4 deliverability/abuse code slices.** No Cloudflare deployment, DNS record, Email Routing rule, D1 database or R2 bucket documented here exists as evidence of an active service.
 
 ## Confirmed starting point
