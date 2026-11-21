@@ -767,7 +767,8 @@ export async function handleWebRequest(request: Request, env: WhoYouEnv): Promis
     const flow = await unseal(key, rawFlowCookie);
     const currentSession = await unseal(key, getCookie(request, SESSION_COOKIE));
     if (!isMailOAuthFlow(flow)) {
-      addCookie(h, MAIL_OAUTH_COOKIE, "", 0);
+      // Keep an unreadable Web flow cookie until its natural expiry so this
+      // browser cannot fall through to the raw provider callback meanwhile.
       return redirect("/account/mailboxes?notice=gmail_link_failed", h);
     }
     if (flow.state !== state) {
@@ -789,20 +790,23 @@ export async function handleWebRequest(request: Request, env: WhoYouEnv): Promis
       return redirect("/account/mailboxes?notice=gmail_link_failed", h);
     }
 
-    addCookie(h, MAIL_OAUTH_COOKIE, "", 0);
     if (u.searchParams.has("error") || !u.searchParams.get("code")) {
-      await discardWebGmailState(env, flow.state);
+      const discarded = await discardWebGmailState(env, flow.state);
       const notice: GmailCallbackNotice = u.searchParams.has("error")
         ? "gmail_denied" : "gmail_link_failed";
-      addCookie(h, MAIL_OAUTH_RESULT_COOKIE, await seal(key, {
-        provider: "gmail",
-        state: flow.state,
-        notice,
-        expiresAt: Date.now() + 60_000,
-      }), 60);
+      if (discarded) {
+        addCookie(h, MAIL_OAUTH_COOKIE, "", 0);
+        addCookie(h, MAIL_OAUTH_RESULT_COOKIE, await seal(key, {
+          provider: "gmail",
+          state: flow.state,
+          notice,
+          expiresAt: Date.now() + 60_000,
+        }), 60);
+      }
       return redirect(`/account/mailboxes?notice=${notice}`, h);
     }
 
+    addCookie(h, MAIL_OAUTH_COOKIE, "", 0);
     const completed = await handleGmailCallback(request, env);
     let payload: { relinked?: unknown; error?: unknown } = {};
     try { payload = await completed.json() as { relinked?: unknown; error?: unknown }; }
