@@ -103,7 +103,7 @@ async function importSessionKey(raw: string | undefined): Promise<CryptoKey | nu
     return crypto.subtle.importKey("raw", bytes, "AES-GCM", false, ["encrypt", "decrypt"]);
   } catch { return null; }
 }
-async function seal(key: CryptoKey, data: Flow | Session | MailOAuthFlow): Promise<string> {
+async function seal(key: CryptoKey, data: Flow | Session | MailOAuthFlow | MailOAuthResult): Promise<string> {
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const encrypted = new Uint8Array(await crypto.subtle.encrypt(
     { name: "AES-GCM", iv, additionalData: new TextEncoder().encode(ORIGIN) },
