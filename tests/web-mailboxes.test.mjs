@@ -168,6 +168,19 @@ async function login(mf, code) {
 	return session.split(";")[0];
 }
 
+async function startGmailFlow(mf, cookie) {
+	const started = await mf.dispatchFetch(ORIGIN + "/account/mailboxes/gmail/link", {
+		method: "POST",
+		redirect: "manual",
+		headers: { cookie, origin: ORIGIN },
+	});
+	assert.equal(started.status, 303, await started.text());
+	const authorization = new URL(started.headers.get("location"));
+	const state = authorization.searchParams.get("state");
+	assert.ok(state);
+	return { started, authorization, state, flowCookie: cookies(started) };
+}
+
 async function expiredSessionCookie() {
 	const key = await webcrypto.subtle.importKey(
 		"raw",
@@ -632,6 +645,26 @@ test("Web Gmail link -> provider callback -> list -> unlink is account-bound and
 		assert.equal(trace.googleTokenExchanges, 1);
 		assert.equal(trace.gmailProfiles, 1);
 
+		const resultCookie = callback.headers
+			.getSetCookie()
+			.find((value) => value.startsWith("__Host-who_you_mail_oauth_result="));
+		assert.ok(resultCookie);
+		const repeatedCallback = await mf.dispatchFetch(
+			ORIGIN + "/mail/oauth/gmail/callback?" +
+				new URLSearchParams({ state, code: "synthetic-provider-code" }),
+			{
+				redirect: "manual",
+				headers: { cookie: ownerCookie + "; " + resultCookie.split(";")[0] },
+			},
+		);
+		assert.equal(repeatedCallback.status, 303, await repeatedCallback.text());
+		assert.equal(
+			repeatedCallback.headers.get("location"),
+			"/account/mailboxes?notice=gmail_connected",
+		);
+		assert.equal(trace.googleTokenExchanges, 1);
+		assert.equal(trace.gmailProfiles, 1);
+
 		const page = await mf.dispatchFetch(
 			ORIGIN + "/account/mailboxes?notice=gmail_connected",
 			{ headers: { cookie: ownerCookie } },
@@ -758,6 +791,56 @@ test("Web Gmail link -> provider callback -> list -> unlink is account-bound and
 	}
 });
 
+test("concurrent Web Gmail callbacks preserve the winning result", async () => {
+	const trace = {};
+	const mf = createWorker({ trace });
+	try {
+		const db = await mf.getD1Database("DB");
+		await db.batch(MIGRATIONS.map((statement) => db.prepare(statement)));
+		const ownerCookie = await login(mf, "code-empty");
+
+		const { state, flowCookie } = await startGmailFlow(mf, ownerCookie);
+		const callbackUrl =
+			ORIGIN + "/mail/oauth/gmail/callback?" +
+			new URLSearchParams({ state, code: "synthetic-provider-code" });
+
+		const [first, second] = await Promise.all([
+			mf.dispatchFetch(callbackUrl, {
+				redirect: "manual",
+				headers: { cookie: ownerCookie + "; " + flowCookie },
+			}),
+			mf.dispatchFetch(callbackUrl, {
+				redirect: "manual",
+				headers: { cookie: ownerCookie + "; " + flowCookie },
+			}),
+		]);
+
+		const locations = [first.headers.get("location"), second.headers.get("location")].sort();
+		assert.deepEqual(locations, [
+			"/account/mailboxes",
+			"/account/mailboxes?notice=gmail_connected",
+		]);
+		assert.equal(trace.googleTokenExchanges, 1);
+		assert.equal(trace.gmailProfiles, 1);
+		const resultCookies = [first, second].flatMap((response) =>
+			response.headers
+				.getSetCookie()
+				.filter((value) => value.startsWith("__Host-who_you_mail_oauth_result=")),
+		);
+		assert.equal(resultCookies.length, 1);
+
+		const listed = await mf.dispatchFetch(ORIGIN + "/api/mailboxes", {
+			headers: { cookie: ownerCookie },
+		});
+		assert.equal(listed.status, 200);
+		assert.ok(
+			(await listed.json()).mailboxes.some((entry) => entry.address === "linked@gmail.com"),
+		);
+	} finally {
+		await mf.dispose();
+	}
+});
+
 test("Web Gmail mutations fail closed on CSRF/auth and provider denial", async () => {
 	const trace = {};
 	const mf = createWorker({ trace });
@@ -791,14 +874,7 @@ test("Web Gmail mutations fail closed on CSRF/auth and provider denial", async (
 			"/?reason=sign_in_required&returnTo=%2Faccount%2Fmailboxes",
 		);
 
-		const started = await mf.dispatchFetch(ORIGIN + "/account/mailboxes/gmail/link", {
-			method: "POST",
-			redirect: "manual",
-			headers: { cookie, origin: ORIGIN },
-		});
-		const authorization = new URL(started.headers.get("location"));
-		const state = authorization.searchParams.get("state");
-		const flowCookie = cookies(started);
+		const { state, flowCookie } = await startGmailFlow(mf, cookie);
 		const otherCookie = await login(mf, "code-other");
 		const wrongSession = await mf.dispatchFetch(
 			ORIGIN + "/mail/oauth/gmail/callback?" +
@@ -815,16 +891,38 @@ test("Web Gmail mutations fail closed on CSRF/auth and provider denial", async (
 		);
 		assert.equal(trace.googleTokenExchanges ?? 0, 0);
 
+		const replayAfterWrongSession = await mf.dispatchFetch(
+			ORIGIN + "/mail/oauth/gmail/callback?" +
+				new URLSearchParams({ state, code: "must-not-exchange" }),
+			{ redirect: "manual" },
+		);
+		assert.equal(replayAfterWrongSession.status, 400);
+		assert.deepEqual(await replayAfterWrongSession.json(), { error: "invalid_state" });
+		assert.equal(trace.googleTokenExchanges ?? 0, 0);
+
+		const {
+			state: deniedState,
+			flowCookie: deniedFlowCookie,
+		} = await startGmailFlow(mf, cookie);
 		const denied = await mf.dispatchFetch(
 			ORIGIN + "/mail/oauth/gmail/callback?" +
-				new URLSearchParams({ state, error: "access_denied" }),
+				new URLSearchParams({ state: deniedState, error: "access_denied" }),
 			{
 				redirect: "manual",
-				headers: { cookie: cookie + "; " + flowCookie },
+				headers: { cookie: cookie + "; " + deniedFlowCookie },
 			},
 		);
 		assert.equal(denied.status, 303);
 		assert.equal(denied.headers.get("location"), "/account/mailboxes?notice=gmail_denied");
+		assert.equal(trace.googleTokenExchanges ?? 0, 0);
+
+		const replayAfterDenied = await mf.dispatchFetch(
+			ORIGIN + "/mail/oauth/gmail/callback?" +
+				new URLSearchParams({ state: deniedState, code: "must-not-exchange" }),
+			{ redirect: "manual" },
+		);
+		assert.equal(replayAfterDenied.status, 400);
+		assert.deepEqual(await replayAfterDenied.json(), { error: "invalid_state" });
 		assert.equal(trace.googleTokenExchanges ?? 0, 0);
 
 		const rawCallback = await mf.dispatchFetch(
