@@ -778,6 +778,65 @@ test("Web Gmail link -> provider callback -> list -> unlink is account-bound and
 	}
 });
 
+test("concurrent Web Gmail callbacks preserve the winning result", async () => {
+	const trace = {};
+	const mf = createWorker({ trace });
+	try {
+		const db = await mf.getD1Database("DB");
+		await db.batch(MIGRATIONS.map((statement) => db.prepare(statement)));
+		const ownerCookie = await login(mf, "code-empty");
+
+		const started = await mf.dispatchFetch(ORIGIN + "/account/mailboxes/gmail/link", {
+			method: "POST",
+			redirect: "manual",
+			headers: { cookie: ownerCookie, origin: ORIGIN },
+		});
+		assert.equal(started.status, 303, await started.text());
+		const authorization = new URL(started.headers.get("location"));
+		const state = authorization.searchParams.get("state");
+		assert.ok(state);
+		const flowCookie = cookies(started);
+		const callbackUrl =
+			ORIGIN + "/mail/oauth/gmail/callback?" +
+			new URLSearchParams({ state, code: "synthetic-provider-code" });
+
+		const [first, second] = await Promise.all([
+			mf.dispatchFetch(callbackUrl, {
+				redirect: "manual",
+				headers: { cookie: ownerCookie + "; " + flowCookie },
+			}),
+			mf.dispatchFetch(callbackUrl, {
+				redirect: "manual",
+				headers: { cookie: ownerCookie + "; " + flowCookie },
+			}),
+		]);
+
+		const locations = [first.headers.get("location"), second.headers.get("location")].sort();
+		assert.deepEqual(locations, [
+			"/account/mailboxes",
+			"/account/mailboxes?notice=gmail_connected",
+		]);
+		assert.equal(trace.googleTokenExchanges, 1);
+		assert.equal(trace.gmailProfiles, 1);
+		const resultCookies = [first, second].flatMap((response) =>
+			response.headers
+				.getSetCookie()
+				.filter((value) => value.startsWith("__Host-who_you_mail_oauth_result=")),
+		);
+		assert.equal(resultCookies.length, 1);
+
+		const listed = await mf.dispatchFetch(ORIGIN + "/api/mailboxes", {
+			headers: { cookie: ownerCookie },
+		});
+		assert.equal(listed.status, 200);
+		assert.ok(
+			(await listed.json()).mailboxes.some((entry) => entry.address === "linked@gmail.com"),
+		);
+	} finally {
+		await mf.dispose();
+	}
+});
+
 test("Web Gmail mutations fail closed on CSRF/auth and provider denial", async () => {
 	const trace = {};
 	const mf = createWorker({ trace });
@@ -835,16 +894,43 @@ test("Web Gmail mutations fail closed on CSRF/auth and provider denial", async (
 		);
 		assert.equal(trace.googleTokenExchanges ?? 0, 0);
 
+		const replayAfterWrongSession = await mf.dispatchFetch(
+			ORIGIN + "/mail/oauth/gmail/callback?" +
+				new URLSearchParams({ state, code: "must-not-exchange" }),
+			{ redirect: "manual" },
+		);
+		assert.equal(replayAfterWrongSession.status, 400);
+		assert.deepEqual(await replayAfterWrongSession.json(), { error: "invalid_state" });
+		assert.equal(trace.googleTokenExchanges ?? 0, 0);
+
+		const deniedStart = await mf.dispatchFetch(ORIGIN + "/account/mailboxes/gmail/link", {
+			method: "POST",
+			redirect: "manual",
+			headers: { cookie, origin: ORIGIN },
+		});
+		const deniedAuthorization = new URL(deniedStart.headers.get("location"));
+		const deniedState = deniedAuthorization.searchParams.get("state");
+		assert.ok(deniedState);
+		const deniedFlowCookie = cookies(deniedStart);
 		const denied = await mf.dispatchFetch(
 			ORIGIN + "/mail/oauth/gmail/callback?" +
-				new URLSearchParams({ state, error: "access_denied" }),
+				new URLSearchParams({ state: deniedState, error: "access_denied" }),
 			{
 				redirect: "manual",
-				headers: { cookie: cookie + "; " + flowCookie },
+				headers: { cookie: cookie + "; " + deniedFlowCookie },
 			},
 		);
 		assert.equal(denied.status, 303);
 		assert.equal(denied.headers.get("location"), "/account/mailboxes?notice=gmail_denied");
+		assert.equal(trace.googleTokenExchanges ?? 0, 0);
+
+		const replayAfterDenied = await mf.dispatchFetch(
+			ORIGIN + "/mail/oauth/gmail/callback?" +
+				new URLSearchParams({ state: deniedState, code: "must-not-exchange" }),
+			{ redirect: "manual" },
+		);
+		assert.equal(replayAfterDenied.status, 400);
+		assert.deepEqual(await replayAfterDenied.json(), { error: "invalid_state" });
 		assert.equal(trace.googleTokenExchanges ?? 0, 0);
 
 		const rawCallback = await mf.dispatchFetch(
