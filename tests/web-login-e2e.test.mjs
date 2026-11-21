@@ -80,6 +80,7 @@ test("real workerd: Web OAuth callback -> server-side credential -> verified who
     assert.match(body, /狐邮 MCP 已连接/);
     assert.match(body, /account-e2e/);
     assert.match(body, /whoyou.read/);
+    assert.match(body, /href="\/account\/mailboxes"/);
     assert.doesNotMatch(body, /mira-device-session-test-only-placeholder-secret/);
     assert.ok(counters.token >= 1);
     assert.ok(counters.issue >= 1);

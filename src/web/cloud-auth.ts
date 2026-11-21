@@ -118,7 +118,7 @@ function escapeText(s: string): string {
   return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;",
     '"': "&quot;", "'": "&#39;" })[c]!);
 }
-function page(content: string, outgoing = headers()): Response {
+function page(content: string, outgoing = headers(), status = 200): Response {
   const h = outgoing;
   h.set("content-type", "text/html; charset=utf-8");
   h.set("content-security-policy",
@@ -127,8 +127,21 @@ function page(content: string, outgoing = headers()): Response {
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>狐邮 · Who You</title>
 <style>body{background:#f8f8f8;color:#272727;font:16px/1.65 system-ui;padding:6vh 1rem}
 main{max-width:460px;margin:auto;padding:36px;background:white;border:1px solid #e9e9e9;border-radius:12px}
-h1{font:normal 32px Georgia,serif}p{color:#555}a,button{display:inline-block;background:#252525;color:white;text-decoration:none;border:0;border-radius:6px;padding:9px 16px;font:inherit;cursor:pointer}
-code{overflow-wrap:anywhere}small{color:#777}</style></head><body><main><h1>狐邮 · Who You</h1>${content}</main></body></html>`, { headers: h });
+h1{font:normal 32px Georgia,serif}h2{font-size:20px;margin:28px 0 10px}p{color:#555}
+a,button{display:inline-flex;align-items:center;min-height:44px;box-sizing:border-box;background:#252525;color:white;text-decoration:none;border:0;border-radius:6px;padding:9px 16px;font:inherit;cursor:pointer}
+a:focus-visible,button:focus-visible{outline:3px solid #1a5fd0;outline-offset:2px}
+button[disabled]{background:#e2e2e2;color:#666;cursor:not-allowed}
+code{overflow-wrap:anywhere}.topnav{margin-bottom:12px}.topnav a{background:none;color:#1a5fd0;padding:0}
+.mailboxes,.providers{list-style:none;margin:0;padding:0}
+.mailbox,.providers li{border:1px solid #e9e9e9;border-radius:8px;padding:14px;margin:0 0 12px}
+.address{overflow-wrap:anywhere;margin:0 0 6px}.meta{margin:0 0 6px;color:#333}
+.hint{color:#666;font-size:14px;margin:4px 0 0}
+.pill{display:inline-block;border:1px solid currentColor;border-radius:999px;padding:1px 10px;font-size:14px;line-height:1.5}
+.pill.ok{color:#1d6b32}.pill.warn{color:#8a5300}.pill.bad{color:#a11c1c}.pill.muted{color:#666}
+.notice{background:#f4f6fa;border:1px solid #dbe2ef;border-radius:8px;padding:14px}
+.notice.error{background:#fdf2f2;border-color:#f0c9c9}
+small{color:#777}
+@media (max-width:420px){body{padding:3vh .75rem}main{padding:20px}h1{font-size:26px}}</style></head><body><main><h1>狐邮 · Who You</h1>${content}</main></body></html>`, { status, headers: h });
 }
 function baseUrl(env: WhoYouEnv): string | null {
   try {
@@ -269,6 +282,34 @@ function projectMailboxes(value: unknown, env: WhoYouEnv): WebMailbox[] | null {
   return projected;
 }
 
+type MailboxListOutcome =
+  | { ok: true; mailboxes: WebMailbox[] }
+  | {
+    ok: false;
+    error: "authentication_link_unavailable" | "mailbox_list_invalid" | "mailboxes_unavailable";
+    reason?: string;
+  };
+
+async function fetchMailboxList(env: WhoYouEnv, session: Session): Promise<MailboxListOutcome> {
+  const listed = await callWhoYouTool(env, session, "whoyou_mailbox_list", {});
+  if (!listed.ok) {
+    return listed.reason === "not_configured"
+      ? { ok: false, error: "mailboxes_unavailable", reason: listed.detail }
+      : { ok: false, error: "authentication_link_unavailable" };
+  }
+  const mailboxes = projectMailboxes(listed.structured, env);
+  if (!mailboxes) return { ok: false, error: "mailbox_list_invalid" };
+  // Storage bindings alone do not mean this preview can actually manage mail.
+  // With no account identities and no configured provider/own-domain capability,
+  // an empty D1 is not evidence that a usable mail service is available.
+  if (mailboxes.length === 0 && !normalizeDomain(env.MAIL_DOMAIN ?? "")
+      && !resolveCredentialKeys(env)) {
+    return { ok: false, error: "mailboxes_unavailable",
+      reason: "mail_service_not_configured" };
+  }
+  return { ok: true, mailboxes };
+}
+
 async function handleMailboxList(
   request: Request,
   env: WhoYouEnv,
@@ -277,30 +318,140 @@ async function handleMailboxList(
 ): Promise<Response> {
   if ([...url.searchParams.keys()].length > 0) return jsonError(400, "unexpected_parameter");
   if (request.headers.has("authorization")) return jsonError(400, "unexpected_authorization");
-  const listed = await callWhoYouTool(env, session, "whoyou_mailbox_list", {});
-  if (!listed.ok) {
-    return listed.reason === "not_configured"
-      ? jsonError(503, "mailboxes_unavailable", headers(), { reason: listed.detail })
-      : jsonError(502, "authentication_link_unavailable");
-  }
-  const mailboxes = projectMailboxes(listed.structured, env);
-  if (!mailboxes) return jsonError(502, "mailbox_list_invalid");
-  // Storage bindings alone do not mean this preview can actually manage mail.
-  // With no account identities and no configured provider/own-domain capability,
-  // an empty D1 is not evidence that a usable mail service is available.
-  if (mailboxes.length === 0 && !normalizeDomain(env.MAIL_DOMAIN ?? "")
-      && !resolveCredentialKeys(env)) {
-    return jsonError(503, "mailboxes_unavailable", headers(),
-      { reason: "mail_service_not_configured" });
+  const outcome = await fetchMailboxList(env, session);
+  if (!outcome.ok) {
+    return outcome.error === "mailboxes_unavailable"
+      ? jsonError(503, "mailboxes_unavailable", headers(), { reason: outcome.reason ?? "" })
+      : jsonError(502, outcome.error);
   }
   const h = headers(); h.set("content-type", "application/json; charset=utf-8");
-  return new Response(JSON.stringify({ mailboxes }), { headers: h });
+  return new Response(JSON.stringify({ mailboxes: outcome.mailboxes }), { headers: h });
+}
+
+const PROVIDER_LABELS: Record<NonNullable<WebMailbox["provider"]>, string> = {
+  gmail: "Gmail",
+  microsoft: "Microsoft",
+  imap_smtp: "IMAP/SMTP",
+};
+
+const AVAILABILITY_LABELS: Record<MailboxAvailability,
+  { label: string; tone: "ok" | "warn" | "bad"; hint: string }> = {
+  configured: {
+    label: "本地配置就绪",
+    tone: "ok",
+    hint: "仅表示狐邮当前运行环境的必要依赖已配置，不代表已完成真实连接或可以收发邮件。",
+  },
+  service_unavailable: {
+    label: "服务不可用",
+    tone: "bad",
+    hint: "当前运行环境缺少该邮箱类型所需的配置，暂时无法使用。",
+  },
+  disabled: {
+    label: "已停用",
+    tone: "bad",
+    hint: "该邮箱已被停用，不会参与同步或收信。",
+  },
+  reauth_required: {
+    label: "需要重新授权",
+    tone: "warn",
+    hint: "该邮箱的授权已失效，需要重新完成邮箱授权才能继续同步。",
+  },
+  credential_unavailable: {
+    label: "凭据不可用",
+    tone: "bad",
+    hint: "狐邮当前无法解密或读取该邮箱的授权凭据。",
+  },
+  credential_missing: {
+    label: "尚未授权",
+    tone: "warn",
+    hint: "该邮箱还没有保存可用的授权凭据。",
+  },
+};
+
+function mailboxKindLabel(mailbox: WebMailbox): string {
+  if (mailbox.kind === "own_domain") return "自有域邮箱";
+  return mailbox.provider ? PROVIDER_LABELS[mailbox.provider] : "第三方邮箱";
+}
+
+function credentialLabel(mailbox: WebMailbox): string {
+  if (mailbox.kind === "own_domain") return "自有域邮箱不需要第三方授权";
+  switch (mailbox.credentialStatus) {
+    case "active": return "有授权记录（不代表已可收发）";
+    case "reauth_required": return "授权需要更新";
+    case "unreadable": return "授权记录无法读取";
+    case "revoked": return "授权已撤销";
+    default: return "没有授权记录";
+  }
+}
+
+function renderMailbox(mailbox: WebMailbox): string {
+  const availability = AVAILABILITY_LABELS[mailbox.availability];
+  return `<li class="mailbox">
+<p class="address"><strong>${escapeText(mailbox.address)}</strong></p>
+<p class="meta">${escapeText(mailboxKindLabel(mailbox))}</p>
+<p class="meta"><span class="pill ${availability.tone}">${escapeText(availability.label)}</span>
+${escapeText(credentialLabel(mailbox))}</p>
+<p class="hint">${escapeText(availability.hint)}</p>
+</li>`;
+}
+
+type MailboxListError = "authentication_link_unavailable"
+  | "mailbox_list_invalid" | "mailboxes_unavailable";
+
+function mailboxFailureMessage(error: MailboxListError): string {
+  switch (error) {
+    case "mailboxes_unavailable":
+      return "邮箱服务尚未配置或暂时不可用，当前无法列出邮箱。";
+    case "mailbox_list_invalid":
+      return "邮箱列表响应异常，暂时无法显示。";
+    default:
+      return "无法获取邮箱列表，登录状态可能已失效。";
+  }
+}
+
+function renderMailboxesPage(outcome: MailboxListOutcome): string {
+  const mailboxSection = outcome.ok
+    ? (outcome.mailboxes.length
+      ? `<ul class="mailboxes">${outcome.mailboxes.map(renderMailbox).join("")}</ul>`
+      : `<div class="notice"><p>当前账号还没有登记邮箱。</p>
+<p>添加邮箱入口尚未开放；开通后这里会显示真实邮箱及其连接状态。</p></div>`)
+    : `<div class="notice error" role="alert">
+<p>${escapeText(mailboxFailureMessage(outcome.error))}</p>
+<p><a href="/account/mailboxes">重试</a> <a href="/auth/start">重新登录</a></p></div>`;
+  return `<nav class="topnav"><a href="/account">← 返回账号页</a></nav>
+<p>当前 Mira 云账号已登录。以下是狐邮为当前账号登记的邮箱。</p>
+<section aria-labelledby="mailbox-list">
+<h2 id="mailbox-list">我的邮箱</h2>
+${mailboxSection}
+</section>
+<section aria-labelledby="add-mailbox">
+<h2 id="add-mailbox">添加邮箱</h2>
+<p>以下入口尚未开放，当前不会发起授权或任何网络请求。</p>
+<ul class="providers">
+<li><strong>自有域邮箱</strong> <span class="pill muted">尚未开放</span>
+<p class="hint">使用狐邮域名下的地址。需要先在服务端开通域名与邮件路由。</p></li>
+<li><strong>Gmail</strong> <span class="pill muted">尚未开放</span>
+<p class="hint">通过 Google OAuth 授权狐邮读取邮件。</p></li>
+<li><strong>Microsoft</strong> <span class="pill muted">尚未开放</span>
+<p class="hint">通过 Microsoft OAuth 授权狐邮读取邮件。</p></li>
+<li><strong>IMAP/SMTP</strong> <span class="pill muted">尚未开放</span>
+<p class="hint">使用 IMAP/SMTP 服务器与授权码接入。</p></li>
+</ul>
+</section>
+<section aria-labelledby="unlink-mailbox">
+<h2 id="unlink-mailbox">解绑邮箱</h2>
+<p>解绑会删除狐邮服务器上该邮箱的本地同步副本并停止后续同步，但不会删除邮箱服务商中的原始邮件。</p>
+<p>该操作尚未开放，当前无法提交。</p>
+<button type="button" disabled aria-disabled="true">解绑邮箱（尚未开放）</button>
+</section>
+<form method="post" action="/auth/logout"><button type="submit">退出登录</button></form>
+<p><small>“本地配置就绪”只说明狐邮运行环境已准备好必要依赖，既不代表邮箱连接成功，也不代表可以收发邮件。</small></p>`;
 }
 
 /** Isolated browser login/BFF. The existing /mcp bearer gate is unchanged. */
 export async function handleWebRequest(request: Request, env: WhoYouEnv): Promise<Response | null> {
   const u = new URL(request.url), path = u.pathname;
-  if (!["/", "/auth/start", "/auth/callback", "/auth/logout", "/account", "/api/whoami", "/api/mailboxes"].includes(path)) return null;
+  if (!["/", "/auth/start", "/auth/callback", "/auth/logout", "/account", "/account/mailboxes", "/api/whoami", "/api/mailboxes"].includes(path)) return null;
   if (u.origin !== ORIGIN) return jsonError(404, "not_found");
   const key = await importSessionKey(env.WHOYOU_WEB_SESSION_KEY), base = baseUrl(env);
   if (!key || !base) return jsonError(503, "web_login_not_configured");
@@ -366,7 +517,13 @@ export async function handleWebRequest(request: Request, env: WhoYouEnv): Promis
   if (request.method !== "GET") return jsonError(405, "method_not_allowed");
   const session = await unseal(key, getCookie(request, SESSION_COOKIE));
   if (!isSession(session))
-    return path === "/account" ? redirect("/") : jsonError(401, "sign_in_required");
+    return path === "/account" || path === "/account/mailboxes"
+      ? redirect("/") : jsonError(401, "sign_in_required");
+  if (path === "/account/mailboxes") {
+    const outcome = await fetchMailboxList(env, session);
+    return page(renderMailboxesPage(outcome), headers(),
+      outcome.ok ? 200 : outcome.error === "mailboxes_unavailable" ? 503 : 502);
+  }
   if (path === "/api/mailboxes") return handleMailboxList(request, env, session, u);
   let identity: unknown;
   try { identity = await readIdentity(env, session); }
@@ -380,6 +537,7 @@ export async function handleWebRequest(request: Request, env: WhoYouEnv): Promis
   return page(`<p>已通过 Cloud Auth 身份验证，狐邮 MCP 已连接。</p>
 <p>账号：<code>${escapeText(id.accountId)}</code></p>
 <p>权限：${id.scopes.map(escapeText).join("、")}</p>
+<p><a href="/account/mailboxes">管理邮箱</a></p>
 <form method="post" action="/auth/logout"><button type="submit">退出登录</button></form>
 <p><small>这是云认证接线验收页，尚未启用邮件收发。</small></p>`);
 }
