@@ -1,12 +1,15 @@
 # WHO-S6：自有域名邮箱按 Cloud Auth 用户名开通
 
-状态：**待启动 · 依赖 Cloud Auth 可用**
+
+> **历史任务卡（非当前产品/发布状态）**：本卡的 v1 章节号、阻塞条件和当时的未部署判断只按编写时间理解。现行产品职责与接入 UI 归属以 [唯一产品边界](../product-design.md) 为准；实际能力须核对代码、运行环境和现行 GitHub Issue。新文档不是原 v1 的恢复版本。
+
+历史状态（原文编写时）：**待启动 · 依赖 Cloud Auth 可用**
 
 负责人：待指派
 
 执行仓库：`uichat-mira/who-you`
 
-设计依据：[`docs/product-design.md`](../product-design.md) v1 §6、[`docs/engineering/FOUNDATION.md`](../engineering/FOUNDATION.md)。
+历史设计引用（原 v1 章节号已失效，保留用于溯源）：[`docs/product-design.md`](../product-design.md) v1 §6、[`docs/engineering/FOUNDATION.md`](../engineering/FOUNDATION.md)。
 
 ## 背景
 

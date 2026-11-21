@@ -1,12 +1,15 @@
 # WHO-S5：Desktop / Mobile 接线、确认 UI、与现有邮件中心关系
 
-状态：**待启动 · 依赖 S2–S4**
+
+> **历史任务卡（非当前产品/发布状态）**：本卡的 v1 章节号、阻塞条件和当时的未部署判断只按编写时间理解。现行产品职责与接入 UI 归属以 [唯一产品边界](../product-design.md) 为准；实际能力须核对代码、运行环境和现行 GitHub Issue。新文档不是原 v1 的恢复版本。
+
+历史状态（原文编写时）：**待启动 · 依赖 S2–S4**
 
 负责人：待指派
 
 执行仓库：`uichat-mira/who-you`（服务端契约）+ `mira-desktop` / `mira-mobile`（客户端接线，需各自合同）
 
-设计依据：[`docs/product-design.md`](../product-design.md) v1 §1、§7.3、§12。
+历史设计引用（原 v1 章节号已失效，保留用于溯源）：[`docs/product-design.md`](../product-design.md) v1 §1、§7.3、§12。
 
 ## 背景
 
