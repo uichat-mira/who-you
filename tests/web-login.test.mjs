@@ -31,7 +31,9 @@ test("Web login shows a human entrance without exposing a credential", async () 
     assert.equal(r.status, 200);
     assert.equal(r.headers.get("cache-control"), "no-store");
     const body = await r.text();
+    assert.match(body, /连接 Mira 云账号/);
     assert.match(body, /使用 Mira 云账号登录/);
+    assert.match(body, /登录只确认你的 Mira 云账号身份/);
     assert.doesNotMatch(body, /sessionToken|Bearer |client_secret/);
   });
 });
@@ -62,12 +64,36 @@ test("OAuth start pins HTTPS callback, PKCE-S256 and a short HttpOnly state", as
       { headers: { cookie: cookieHeader }, redirect: "manual" },
     );
     assert.equal(callback.status, 200);
-    assert.match(await callback.text(), /登录已过期或验证失败/);
+    assert.match(await callback.text(), /登录没有完成/);
   });
 });
 
 test("Web routes fail closed without session key, valid encrypted cookie or same-origin logout", async () => {
   await withPreview(async (mf) => {
+    const guardedAccount = await mf.dispatchFetch(ORIGIN + "/account", { redirect: "manual" });
+    assert.equal(guardedAccount.status, 303);
+    assert.equal(guardedAccount.headers.get("location"),
+      "/?reason=sign_in_required&returnTo=%2Faccount");
+
+    const guardedMailboxes = await mf.dispatchFetch(ORIGIN + "/account/mailboxes", {
+      redirect: "manual",
+    });
+    assert.equal(guardedMailboxes.status, 303);
+    assert.equal(guardedMailboxes.headers.get("location"),
+      "/?reason=sign_in_required&returnTo=%2Faccount%2Fmailboxes");
+
+    const gate = await mf.dispatchFetch(ORIGIN +
+      "/?reason=sign_in_required&returnTo=%2Faccount%2Fmailboxes");
+    const gateBody = await gate.text();
+    assert.match(gateBody, /这个页面需要先登录/);
+    assert.match(gateBody, /returnTo=%2Faccount%2Fmailboxes/);
+
+    const malicious = await mf.dispatchFetch(ORIGIN +
+      "/?reason=sign_in_required&returnTo=https%3A%2F%2Fevil.invalid");
+    const maliciousBody = await malicious.text();
+    assert.doesNotMatch(maliciousBody, /evil\.invalid/);
+    assert.match(maliciousBody, /returnTo=%2Faccount/);
+
     const unauth = await mf.dispatchFetch(ORIGIN + "/api/whoami");
     assert.equal(unauth.status, 401);
     const fake = await mf.dispatchFetch(ORIGIN + "/api/whoami", {
