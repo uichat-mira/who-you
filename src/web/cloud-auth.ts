@@ -1,7 +1,6 @@
-import type { WhoYouEnv } from "../mail/config";
+import { createMailServices, resolveCredentialKeys, type WhoYouEnv } from "../mail/config";
 import { createWhoYouRuntime } from "../mcp/runtime";
 import { normalizeDomain } from "../mail/address";
-import { resolveCredentialKeys } from "../mail/config";
 import { handleGmailCallback } from "../mail/gmail-http";
 import { GMAIL_CALLBACK_PATH, resolveGmailOAuthConfig } from "../mail/gmail-link";
 import { GOOGLE_AUTHORIZATION_ENDPOINT } from "../mail/oauth-client";
@@ -179,6 +178,15 @@ async function sessionBinding(session: Session): Promise<string> {
     new TextEncoder().encode(session.sessionToken),
   );
   return encode(new Uint8Array(digest));
+}
+async function discardWebGmailState(env: WhoYouEnv, state: string): Promise<boolean> {
+  const resolved = createMailServices(env);
+  if (!resolved.ok) return false;
+  try {
+    return await resolved.services.oauthStates.consume(state, Date.now()) !== null;
+  } catch {
+    return false;
+  }
 }
 function escapeText(s: string): string {
   return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;",
@@ -746,27 +754,66 @@ export async function handleWebRequest(request: Request, env: WhoYouEnv): Promis
 
   if (path === GMAIL_CALLBACK_PATH) {
     const state = u.searchParams.get("state");
-    const rawFlowCookie = getCookie(request, MAIL_OAUTH_COOKIE);
-    if (rawFlowCookie === null) {
-      const prior = await unseal(key, getCookie(request, MAIL_OAUTH_RESULT_COOKIE));
-      if (isMailOAuthResult(prior) && prior.state === state) {
-        return redirect(`/account/mailboxes?notice=${prior.notice}`);
-      }
-      return null;
+    const h = headers();
+    const prior = await unseal(key, getCookie(request, MAIL_OAUTH_RESULT_COOKIE));
+    if (isMailOAuthResult(prior) && prior.state === state) {
+      addCookie(h, MAIL_OAUTH_COOKIE, "", 0);
+      return redirect(`/account/mailboxes?notice=${prior.notice}`, h);
     }
+
+    const rawFlowCookie = getCookie(request, MAIL_OAUTH_COOKIE);
+    if (rawFlowCookie === null) return null;
 
     const flow = await unseal(key, rawFlowCookie);
     const currentSession = await unseal(key, getCookie(request, SESSION_COOKIE));
-    const h = headers(); addCookie(h, MAIL_OAUTH_COOKIE, "", 0);
-    if (!isMailOAuthFlow(flow) || !isSession(currentSession)
-        || flow.state !== state
-        || flow.sessionBinding !== await sessionBinding(currentSession)) {
+    if (!isMailOAuthFlow(flow)) {
+      addCookie(h, MAIL_OAUTH_COOKIE, "", 0);
       return redirect("/account/mailboxes?notice=gmail_link_failed", h);
     }
+    if (flow.state !== state) {
+      // Do not destroy the legitimate pending flow because an unrelated callback
+      // reached this browser. Keeping the sealed flow cookie prevents raw fallback.
+      return redirect("/account/mailboxes?notice=gmail_link_failed", h);
+    }
+    if (!isSession(currentSession)
+        || flow.sessionBinding !== await sessionBinding(currentSession)) {
+      if (await discardWebGmailState(env, flow.state)) {
+        addCookie(h, MAIL_OAUTH_COOKIE, "", 0);
+        addCookie(h, MAIL_OAUTH_RESULT_COOKIE, await seal(key, {
+          provider: "gmail",
+          state: flow.state,
+          notice: "gmail_link_failed",
+          expiresAt: Date.now() + 60_000,
+        }), 60);
+      }
+      return redirect("/account/mailboxes?notice=gmail_link_failed", h);
+    }
+
+    addCookie(h, MAIL_OAUTH_COOKIE, "", 0);
+    if (u.searchParams.has("error") || !u.searchParams.get("code")) {
+      await discardWebGmailState(env, flow.state);
+      const notice: GmailCallbackNotice = u.searchParams.has("error")
+        ? "gmail_denied" : "gmail_link_failed";
+      addCookie(h, MAIL_OAUTH_RESULT_COOKIE, await seal(key, {
+        provider: "gmail",
+        state: flow.state,
+        notice,
+        expiresAt: Date.now() + 60_000,
+      }), 60);
+      return redirect(`/account/mailboxes?notice=${notice}`, h);
+    }
+
     const completed = await handleGmailCallback(request, env);
     let payload: { relinked?: unknown; error?: unknown } = {};
     try { payload = await completed.json() as { relinked?: unknown; error?: unknown }; }
     catch { payload = {}; }
+
+    // A concurrent duplicate can lose the single-use state race. It must not
+    // overwrite the winner's result cookie or turn a successful link into a
+    // visible failure. The mailbox page itself is the authoritative outcome.
+    if (!completed.ok && payload.error === "invalid_state") {
+      return redirect("/account/mailboxes", h);
+    }
 
     const notice: GmailCallbackNotice = completed.ok
       ? (payload.relinked === true ? "gmail_relinked" : "gmail_connected")
