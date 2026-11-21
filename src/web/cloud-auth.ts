@@ -284,6 +284,10 @@ async function issueWhoYouCredential(
   }
 }
 
+const READ_CREDENTIAL_REQUEST: WhoYouCredentialRequest = {
+  audience: "mira:who-you",
+};
+
 /**
  * Calls one MCP tool with a server-side service credential derived from the
  * browser session. The credential never leaves this Worker: the browser only
@@ -294,7 +298,7 @@ async function callWhoYouTool(
   session: Session,
   name: string,
   args: Record<string, unknown>,
-  credentialRequest: WhoYouCredentialRequest = { audience: "mira:who-you" },
+  credentialRequest: WhoYouCredentialRequest = READ_CREDENTIAL_REQUEST,
 ): Promise<ToolCallResult> {
   const issued = await issueWhoYouCredential(env, session, credentialRequest);
   if (!issued.ok) {
