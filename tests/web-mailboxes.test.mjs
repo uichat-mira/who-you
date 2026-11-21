@@ -522,7 +522,8 @@ test("an unauthenticated mailbox page redirects to login and never leaks a list"
 			redirect: "manual",
 		});
 		assert.equal(response.status, 303);
-		assert.equal(response.headers.get("location"), "/");
+		assert.equal(response.headers.get("location"),
+			"/?reason=sign_in_required&returnTo=%2Faccount%2Fmailboxes");
 		assert.doesNotMatch(await response.text(), /alpha@tomlab\.cn|user@gmail\.com/);
 	} finally {
 		await mf.dispose();
