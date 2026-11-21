@@ -17,7 +17,7 @@
 | --- | --- | --- | --- |
 | `https://cloud-auth.tomzlab.cn/account/services` | Cloud Auth | 「狐邮 Who You」关联服务入口，呈现**有可靠依据**的连接/授权状态，提供进入狐邮的链接；服务范围或撤销动作须有真正的后端授权事实，不能用“已签发过 JWT”伪造长期授权 | 现有「关联服务」页已存在，**狐邮条目及其独立授权 UI 尚未实现** |
 | `https://who-you.tomz.io/account` | Who You | 已登录的云账号认证联调页；显示当前账号及 `whoyou.read`，可退出登录 | **已部署** Web 登录、Cloud Auth OAuth 回调、只读 `whoyou_whoami` 验证；不是邮箱列表或发信 UI |
-| `https://who-you.tomz.io/account/mailboxes` | Who You | **建议的后续页面路由**：列出邮箱、添加 Gmail / Microsoft / IMAP-SMTP、自有域地址的管理入口、同步/重授权/解绑状态；具体表单依邮箱合同和已部署能力实现 | **未实现**，不得展示虚假的可操作连接或模拟成功 |
+| `https://who-you.tomz.io/account/mailboxes` | Who You | 邮箱配置页：列出当前账号邮箱，承载第三方邮箱连接、重授权与解绑；具体操作必须由已实现的邮箱合同和真实部署能力支撑 | **已实现账号隔离的邮箱列表与状态页；OPS-041 接入 Gmail 连接 / 重授权 / 解绑源码链路。真实 Gmail 可用性仍取决于生产 provider bindings、KEK 与单账号 T4；Microsoft / IMAP-SMTP Web 入口未开放** |
 | Mira 的 MCP 连接设置 | Mira 各客户端 | 发现/连接狐邮 MCP Server，使用 Cloud Auth 签发的受限凭证；必要时跳至狐邮管理邮箱 | 产品责任已确认，**客户端 UI 和端到端消费验收须分别核对，不能假定已经存在** |
 
 **三层归属一句话**：Cloud Auth 管「谁在登录、能否签发服务凭证」；Who You 管「哪些邮箱及凭据归属当前账号、邮件工具如何工作」；Mira 管「用哪些授权的 MCP 工具完成用户任务」。
@@ -25,7 +25,7 @@
 ## 3. 可证明的实现和部署边界（2026-11-21 核对）
 
 - **Cloud Auth 代码**：`packages/contracts/src/oauth.ts` 注册 `who-you-web` / `web`，精确回调 `https://who-you.tomz.io/auth/callback`；原 Desktop、Mobile 客户端仍在。OAuth 是 PKCE S256 授权码登录；`/v1/service-credentials` 对已验证且绑定设备的 Cloud Session 签发 `mira:who-you` 受众的短期票据，默认 `whoyou.read`。
-- **Who You 代码**：`src/web/cloud-auth.ts` 处理首页、`/auth/start`、`/auth/callback`、`/account`、`/api/whoami`、退出；`src/index.ts` 同时承载原 `/mcp`、认证元数据和已有邮件接口。Web 登录侧不把服务 JWT 暴露给浏览器。
+- **Who You 代码**：`src/web/cloud-auth.ts` 处理首页、Cloud Auth 登录/退出、`/account`、`/account/mailboxes`、邮箱列表 BFF，以及 Gmail 连接/重授权/解绑的 Web 接线；真实 Gmail OAuth/PKCE、凭据密封与删除仍复用 `src/mail/` / `src/mcp/` 的现有合同。浏览器不接触 Cloud Session 原文、服务 JWT 或 identity-confirmation JWT。`src/index.ts` 同时承载 `/mcp`、认证元数据和既有邮件接口。
 - **部署**：已验证的用户入口是 `who-you.tomz.io`，指向独立 Worker `who-you-tomz-preview`；Cloud Auth 仍运行在其自管服务器。Worker 当前使用隔离 D1/R2，浏览器会话有 Secret，**无定时 Cron**。此处运行的是受限的身份/MCP 预览，不能与 `cloudflare.config.ts` 所描述的另一套可能包含 `MAIL_DOMAIN`、邮件路由和 Cron 的部署相混淆。
 - **真实验收范围**：用户已在浏览器看到登录后 `/account` 显示 Cloud Auth 身份、MCP 连接成功与 `whoyou.read`；独立公网检查涵盖 TLS、OAuth 跳转、未认证 401、旧域名回调被拒绝。此证据**不能证明**登录退出已完整验收、邮箱服务商凭据已配置、第三方邮箱已真实同步或真实邮件已发送。
 - **已有代码不等于线上功能**：`src/mail/` 中有自有域邮件、Gmail、Microsoft、IMAP/SMTP 等业务代码及测试；在上述独立 Worker 未配置对应提供商凭据、邮件域名与定时器时，不能把这些代码描述成已开通的邮箱服务。
