@@ -632,6 +632,26 @@ test("Web Gmail link -> provider callback -> list -> unlink is account-bound and
 		assert.equal(trace.googleTokenExchanges, 1);
 		assert.equal(trace.gmailProfiles, 1);
 
+		const resultCookie = callback.headers
+			.getSetCookie()
+			.find((value) => value.startsWith("__Host-who_you_mail_oauth_result="));
+		assert.ok(resultCookie);
+		const repeatedCallback = await mf.dispatchFetch(
+			ORIGIN + "/mail/oauth/gmail/callback?" +
+				new URLSearchParams({ state, code: "synthetic-provider-code" }),
+			{
+				redirect: "manual",
+				headers: { cookie: ownerCookie + "; " + resultCookie.split(";")[0] },
+			},
+		);
+		assert.equal(repeatedCallback.status, 303, await repeatedCallback.text());
+		assert.equal(
+			repeatedCallback.headers.get("location"),
+			"/account/mailboxes?notice=gmail_connected",
+		);
+		assert.equal(trace.googleTokenExchanges, 1);
+		assert.equal(trace.gmailProfiles, 1);
+
 		const page = await mf.dispatchFetch(
 			ORIGIN + "/account/mailboxes?notice=gmail_connected",
 			{ headers: { cookie: ownerCookie } },
