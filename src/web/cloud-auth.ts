@@ -1,5 +1,9 @@
 import type { WhoYouEnv } from "../mail/config";
 import { createWhoYouRuntime } from "../mcp/runtime";
+import { normalizeDomain } from "../mail/address";
+import { resolveCredentialKeys } from "../mail/config";
+import { resolveGmailOAuthConfig } from "../mail/gmail-link";
+import { resolveMicrosoftOAuthConfig } from "../mail/microsoft-link";
 
 const CLIENT_ID = "who-you-web";
 const CALLBACK = "https://who-you.tomz.io/auth/callback";
@@ -9,6 +13,28 @@ const SESSION_COOKIE = "__Host-who_you_session";
 const INSTALL_COOKIE = "__Host-who_you_installation";
 type Flow = { state: string; verifier: string; installation: string; at: number };
 type Session = { sessionToken: string; expiresAt: string };
+
+type ToolCallResult =
+  | { ok: true; structured: unknown }
+  | { ok: false; reason: "authentication_link_unavailable" }
+  | { ok: false; reason: "not_configured"; detail: string };
+
+type MailboxAvailability =
+  | "configured"
+  | "service_unavailable"
+  | "disabled"
+  | "reauth_required"
+  | "credential_unavailable"
+  | "credential_missing";
+
+type WebMailbox = {
+  mailboxId: string;
+  address: string;
+  kind: "own_domain" | "third_party";
+  provider: "gmail" | "microsoft" | "imap_smtp" | null;
+  credentialStatus: "active" | "reauth_required" | "unreadable" | "revoked" | null;
+  availability: MailboxAvailability;
+};
 
 function encode(bytes: Uint8Array): string {
   return btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
@@ -30,9 +56,10 @@ function getCookie(req: Request, name: string): string | null {
 function addCookie(h: Headers, name: string, value: string, age: number): void {
   h.append("set-cookie", `${name}=${value}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=${age}`);
 }
-function jsonError(status: number, message: string, outgoing = headers()): Response {
+function jsonError(status: number, message: string, outgoing = headers(),
+  extra?: Record<string, string>): Response {
   const h = outgoing; h.set("content-type", "application/json");
-  return new Response(JSON.stringify({ error: message }), { status, headers: h });
+  return new Response(JSON.stringify({ error: message, ...extra }), { status, headers: h });
 }
 function redirect(location: string, h = headers()): Response {
   h.set("location", location);
@@ -110,33 +137,52 @@ function baseUrl(env: WhoYouEnv): string | null {
       ? u.origin : null;
   } catch { return null; }
 }
-async function readIdentity(env: WhoYouEnv, session: Session): Promise<unknown | null> {
+/**
+ * Calls one MCP tool with a server-side service credential derived from the
+ * browser session. The credential never leaves this Worker: the browser only
+ * holds the sealed session cookie.
+ */
+async function callWhoYouTool(
+  env: WhoYouEnv,
+  session: Session,
+  name: string,
+  args: Record<string, unknown>,
+): Promise<ToolCallResult> {
   const base = baseUrl(env);
-  if (!base) return null;
-  const r = await fetch(new URL("/v1/service-credentials", base), {
-    method: "POST", headers: {
-      authorization: `Bearer ${session.sessionToken}`,
-      "content-type": "application/json",
-    }, body: JSON.stringify({ audience: "mira:who-you" }),
-  });
-  if (!r.ok) return null;
-  const issued = await r.json() as { token?: string };
-  if (typeof issued.token !== "string") return null;
+  if (!base) return { ok: false, reason: "not_configured", detail: "cloud_auth_issuer" };
+  let issued: { token?: string };
+  try {
+    const r = await fetch(new URL("/v1/service-credentials", base), {
+      method: "POST", headers: {
+        authorization: `Bearer ${session.sessionToken}`,
+        "content-type": "application/json",
+      }, body: JSON.stringify({ audience: "mira:who-you" }),
+    });
+    if (!r.ok) return { ok: false, reason: "authentication_link_unavailable" };
+    issued = await r.json() as { token?: string };
+  } catch {
+    return { ok: false, reason: "authentication_link_unavailable" };
+  }
+  if (typeof issued.token !== "string") return { ok: false, reason: "authentication_link_unavailable" };
+
   const runtime = createWhoYouRuntime(env);
-  if (!runtime.ok || !env.MCP_RESOURCE_URL) return null;
+  if (!runtime.ok) return { ok: false, reason: "not_configured", detail: runtime.reason };
+  if (!env.MCP_RESOURCE_URL) return { ok: false, reason: "not_configured", detail: "mcp_resource_url" };
+  // The runtime is cached per isolate and shared with `/mcp`; closing it after
+  // one BFF call would break every later call in the same isolate.
   try {
     const reply = await runtime.runtime.fetch(new Request(env.MCP_RESOURCE_URL, {
       method: "POST", headers: {
         authorization: `Bearer ${issued.token}`,
         "content-type": "application/json", accept: "application/json, text/event-stream",
         "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/call",
-        "Mcp-Name": "whoyou_whoami",
+        "Mcp-Name": name,
         // This is a trusted in-process request, not a browser-supplied Host.
         host: new URL(env.MCP_RESOURCE_URL).host,
       }, body: JSON.stringify({
         jsonrpc: "2.0", id: 1, method: "tools/call",
         params: {
-          name: "whoyou_whoami", arguments: {},
+          name, arguments: args,
           _meta: {
             "io.modelcontextprotocol/protocolVersion": "2026-07-28",
             "io.modelcontextprotocol/clientInfo": { name: "who-you-web", version: "0.1" },
@@ -145,20 +191,116 @@ async function readIdentity(env: WhoYouEnv, session: Session): Promise<unknown |
         },
       }),
     }));
-    if (!reply.ok) return null;
-    const body = await reply.json() as { result?: { structuredContent?: unknown } };
-    const id = body.result?.structuredContent as Partial<{ accountId: string;
-      consumerId: string; scopes: unknown[] }> | undefined;
-    return typeof id?.accountId === "string" && typeof id.consumerId === "string"
-      && Array.isArray(id.scopes) && id.scopes.every((x) => typeof x === "string")
-      ? { accountId: id.accountId, consumerId: id.consumerId, scopes: id.scopes } : null;
-  } finally { await runtime.runtime.close(); }
+    if (!reply.ok) return { ok: false, reason: "authentication_link_unavailable" };
+    const body = await reply.json() as {
+      result?: { structuredContent?: unknown; isError?: boolean };
+    };
+    if (body.result?.isError) return { ok: false, reason: "authentication_link_unavailable" };
+    return { ok: true, structured: body.result?.structuredContent };
+  } catch {
+    return { ok: false, reason: "authentication_link_unavailable" };
+  }
+}
+
+async function readIdentity(env: WhoYouEnv, session: Session): Promise<unknown | null> {
+  const called = await callWhoYouTool(env, session, "whoyou_whoami", {});
+  if (!called.ok) return null;
+  const id = called.structured as Partial<{ accountId: string;
+    consumerId: string; scopes: unknown[] }> | undefined;
+  return typeof id?.accountId === "string" && typeof id.consumerId === "string"
+    && Array.isArray(id.scopes) && id.scopes.every((x) => typeof x === "string")
+    ? { accountId: id.accountId, consumerId: id.consumerId, scopes: id.scopes } : null;
+}
+
+/**
+ * Availability is a *local capability/configuration* statement, not a claim
+ * that a remote provider was successfully contacted. A linked credential row
+ * is never proof that its decryption key or OAuth client exists in this Worker.
+ */
+const mailboxAvailability = (
+  kind: "own_domain" | "third_party",
+  status: "active" | "disabled",
+  credentialStatus: WebMailbox["credentialStatus"],
+  provider: WebMailbox["provider"],
+  env: WhoYouEnv,
+): MailboxAvailability => {
+  if (status === "disabled") return "disabled";
+  if (kind === "own_domain") {
+    return normalizeDomain(env.MAIL_DOMAIN ?? "") ? "configured" : "service_unavailable";
+  }
+  if (credentialStatus === "reauth_required") return "reauth_required";
+  if (credentialStatus === "unreadable" || credentialStatus === "revoked") {
+    return "credential_unavailable";
+  }
+  if (credentialStatus !== "active") return "credential_missing";
+  if (!resolveCredentialKeys(env)) return "credential_unavailable";
+  if (provider === "gmail" && !resolveGmailOAuthConfig(env)) return "service_unavailable";
+  if (provider === "microsoft" && !resolveMicrosoftOAuthConfig(env)) return "service_unavailable";
+  return "configured";
+};
+
+/** Whitelists the server list into the six fields the browser is allowed to see. */
+function projectMailboxes(value: unknown, env: WhoYouEnv): WebMailbox[] | null {
+  if (typeof value !== "object" || value === null) return null;
+  const identities = (value as { identities?: unknown }).identities;
+  if (!Array.isArray(identities)) return null;
+  const projected: WebMailbox[] = [];
+  for (const entry of identities) {
+    if (typeof entry !== "object" || entry === null) return null;
+    const item = entry as Record<string, unknown>;
+    if (typeof item.mailboxId !== "string" || typeof item.address !== "string") return null;
+    if (item.kind !== "own_domain" && item.kind !== "third_party") return null;
+    if (item.provider !== null && item.provider !== "gmail"
+      && item.provider !== "microsoft" && item.provider !== "imap_smtp") return null;
+    if (item.status !== "active" && item.status !== "disabled") return null;
+    const credentialStatus = item.credentialStatus;
+    if (credentialStatus !== null && credentialStatus !== "active"
+      && credentialStatus !== "reauth_required" && credentialStatus !== "unreadable"
+      && credentialStatus !== "revoked") return null;
+    projected.push({
+      mailboxId: item.mailboxId,
+      address: item.address,
+      kind: item.kind,
+      provider: item.provider,
+      credentialStatus,
+      availability: mailboxAvailability(item.kind, item.status, credentialStatus, item.provider, env),
+    });
+  }
+  return projected;
+}
+
+async function handleMailboxList(
+  request: Request,
+  env: WhoYouEnv,
+  session: Session,
+  url: URL,
+): Promise<Response> {
+  if ([...url.searchParams.keys()].length > 0) return jsonError(400, "unexpected_parameter");
+  if (request.headers.has("authorization")) return jsonError(400, "unexpected_authorization");
+  const listed = await callWhoYouTool(env, session, "whoyou_mailbox_list", {});
+  if (!listed.ok) {
+    return listed.reason === "not_configured"
+      ? jsonError(503, "mailboxes_unavailable", headers(), { reason: listed.detail })
+      : jsonError(502, "authentication_link_unavailable");
+  }
+  const mailboxes = projectMailboxes(listed.structured, env);
+  if (!mailboxes) return jsonError(502, "mailbox_list_invalid");
+  // Storage bindings alone do not mean this preview can actually manage mail.
+  // With no account identities and no configured provider/own-domain capability,
+  // an empty D1 is not evidence that a usable mail service is available.
+  if (mailboxes.length === 0 && !normalizeDomain(env.MAIL_DOMAIN ?? "")
+      && !resolveCredentialKeys(env)) {
+    return jsonError(503, "mailboxes_unavailable", headers(),
+      { reason: "mail_service_not_configured" });
+  }
+  const h = headers(); h.set("content-type", "application/json; charset=utf-8");
+  return new Response(JSON.stringify({ mailboxes }), { headers: h });
 }
 
 /** Isolated browser login/BFF. The existing /mcp bearer gate is unchanged. */
 export async function handleWebRequest(request: Request, env: WhoYouEnv): Promise<Response | null> {
   const u = new URL(request.url), path = u.pathname;
-  if (!["/", "/auth/start", "/auth/callback", "/auth/logout", "/account", "/api/whoami"].includes(path)) return null;
+  if (!["/", "/auth/start", "/auth/callback", "/auth/logout", "/account", "/api/whoami", "/api/mailboxes"].includes(path)) return null;
   if (u.origin !== ORIGIN) return jsonError(404, "not_found");
   const key = await importSessionKey(env.WHOYOU_WEB_SESSION_KEY), base = baseUrl(env);
   if (!key || !base) return jsonError(503, "web_login_not_configured");
@@ -225,6 +367,7 @@ export async function handleWebRequest(request: Request, env: WhoYouEnv): Promis
   const session = await unseal(key, getCookie(request, SESSION_COOKIE));
   if (!isSession(session))
     return path === "/account" ? redirect("/") : jsonError(401, "sign_in_required");
+  if (path === "/api/mailboxes") return handleMailboxList(request, env, session, u);
   let identity: unknown;
   try { identity = await readIdentity(env, session); }
   catch { return jsonError(502, "authentication_link_unavailable"); }
