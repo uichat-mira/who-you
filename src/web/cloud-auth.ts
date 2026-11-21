@@ -2,7 +2,9 @@ import type { WhoYouEnv } from "../mail/config";
 import { createWhoYouRuntime } from "../mcp/runtime";
 import { normalizeDomain } from "../mail/address";
 import { resolveCredentialKeys } from "../mail/config";
-import { resolveGmailOAuthConfig } from "../mail/gmail-link";
+import { handleGmailCallback } from "../mail/gmail-http";
+import { GMAIL_CALLBACK_PATH, resolveGmailOAuthConfig } from "../mail/gmail-link";
+import { GOOGLE_AUTHORIZATION_ENDPOINT } from "../mail/oauth-client";
 import { resolveMicrosoftOAuthConfig } from "../mail/microsoft-link";
 
 const CLIENT_ID = "who-you-web";
@@ -11,14 +13,33 @@ const ORIGIN = new URL(CALLBACK).origin;
 const STATE_COOKIE = "__Host-who_you_oauth";
 const SESSION_COOKIE = "__Host-who_you_session";
 const INSTALL_COOKIE = "__Host-who_you_installation";
+const MAIL_OAUTH_COOKIE = "__Host-who_you_mail_oauth";
 type ProtectedPage = "/account" | "/account/mailboxes";
 type Flow = { state: string; verifier: string; installation: string; at: number; returnTo?: ProtectedPage };
 type Session = { sessionToken: string; expiresAt: string };
+type MailOAuthFlow = {
+  provider: "gmail";
+  state: string;
+  expiresAt: number;
+  sessionBinding: string;
+};
+type WhoYouCredentialRequest = {
+  audience: "mira:who-you";
+  scopes?: ["whoyou.read", "whoyou.mail.write"];
+  confirmation?: {
+    actor: "user";
+    action: "link" | "unlink";
+    provider: "gmail";
+    mailbox_id: string | null;
+    nonce: string;
+  };
+};
 
 type ToolCallResult =
   | { ok: true; structured: unknown }
   | { ok: false; reason: "authentication_link_unavailable" }
-  | { ok: false; reason: "not_configured"; detail: string };
+  | { ok: false; reason: "not_configured"; detail: string }
+  | { ok: false; reason: "tool_rejected"; code: string };
 
 type MailboxAvailability =
   | "configured"
@@ -74,7 +95,7 @@ async function importSessionKey(raw: string | undefined): Promise<CryptoKey | nu
     return crypto.subtle.importKey("raw", bytes, "AES-GCM", false, ["encrypt", "decrypt"]);
   } catch { return null; }
 }
-async function seal(key: CryptoKey, data: Flow | Session): Promise<string> {
+async function seal(key: CryptoKey, data: Flow | Session | MailOAuthFlow): Promise<string> {
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const encrypted = new Uint8Array(await crypto.subtle.encrypt(
     { name: "AES-GCM", iv, additionalData: new TextEncoder().encode(ORIGIN) },
@@ -125,6 +146,22 @@ function isSession(v: unknown): v is Session {
     && x.sessionToken.length < 4096 && typeof x.expiresAt === "string"
     && Number.isFinite(Date.parse(x.expiresAt)) && Date.parse(x.expiresAt) > Date.now();
 }
+function isMailOAuthFlow(v: unknown): v is MailOAuthFlow {
+  if (typeof v !== "object" || v === null) return false;
+  const x = v as Partial<MailOAuthFlow>;
+  return x.provider === "gmail"
+    && typeof x.state === "string" && /^[\w-]{43}$/.test(x.state)
+    && typeof x.sessionBinding === "string" && /^[\w-]{43}$/.test(x.sessionBinding)
+    && typeof x.expiresAt === "number" && Number.isFinite(x.expiresAt)
+    && x.expiresAt > Date.now() && x.expiresAt <= Date.now() + 10 * 60_000;
+}
+async function sessionBinding(session: Session): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(session.sessionToken),
+  );
+  return encode(new Uint8Array(digest));
+}
 function escapeText(s: string): string {
   return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;",
     '"': "&quot;", "'": "&#39;" })[c]!);
@@ -171,6 +208,8 @@ code{overflow-wrap:anywhere;font-size:13px;background:#f3f3f2;padding:2px 5px;bo
 .pill{display:inline-block;border:1px solid currentColor;border-radius:999px;padding:1px 9px;font-size:12px;line-height:1.55;white-space:nowrap}.pill.ok{color:#2f6b48}.pill.warn{color:#8a5b12}.pill.bad{color:#a33a35}.pill.muted{color:#74777b}
 .notice{background:var(--soft);border:1px solid #e0e2e3;border-radius:8px;padding:12px 14px;margin:16px 0}.notice p:last-child{margin-bottom:0}.notice.error{background:#fcf3f2;border-color:#efd6d3}.notice.auth-required{background:var(--accent-soft);border-color:#d7e7ea}
 .inline-actions{display:flex;gap:14px;flex-wrap:wrap}.inline-actions a{text-decoration:none;font-weight:600}
+.mailbox-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}.mailbox-actions form{margin:0}
+.notice.ok{background:#eef6f1;border-color:#d5e8dc}
 @media (max-width:520px){main{margin:0;width:100%;min-height:100vh;border:0;border-radius:0;box-shadow:none}.brandbar{padding:20px 20px 14px}.content{padding:22px 20px}.appnav{padding-left:12px}.setting-row{gap:10px}}
 </style></head><body><main>
 <header class="brandbar"><a class="brand" href="/">狐邮 <span>· Who You</span></a>${app ? '<span class="session-mark">云账号已登录</span>' : ""}</header>
@@ -212,6 +251,40 @@ function baseUrl(env: WhoYouEnv): string | null {
   } catch { return null; }
 }
 /**
+ * Exchanges the sealed browser Cloud Session for one short-lived Who You
+ * credential. Cloud Auth derives account/device/consumer from the session; the
+ * browser never sees this credential.
+ */
+async function issueWhoYouCredential(
+  env: WhoYouEnv,
+  session: Session,
+  body: WhoYouCredentialRequest,
+): Promise<
+  | { ok: true; token: string }
+  | { ok: false; reason: "authentication_link_unavailable" | "not_configured"; detail?: string }
+> {
+  const base = baseUrl(env);
+  if (!base) return { ok: false, reason: "not_configured", detail: "cloud_auth_issuer" };
+  try {
+    const r = await fetch(new URL("/v1/service-credentials", base), {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${session.sessionToken}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) return { ok: false, reason: "authentication_link_unavailable" };
+    const issued = await r.json() as { token?: string };
+    return typeof issued.token === "string"
+      ? { ok: true, token: issued.token }
+      : { ok: false, reason: "authentication_link_unavailable" };
+  } catch {
+    return { ok: false, reason: "authentication_link_unavailable" };
+  }
+}
+
+/**
  * Calls one MCP tool with a server-side service credential derived from the
  * browser session. The credential never leaves this Worker: the browser only
  * holds the sealed session cookie.
@@ -221,29 +294,20 @@ async function callWhoYouTool(
   session: Session,
   name: string,
   args: Record<string, unknown>,
+  credentialRequest: WhoYouCredentialRequest = { audience: "mira:who-you" },
 ): Promise<ToolCallResult> {
-  const base = baseUrl(env);
-  if (!base) return { ok: false, reason: "not_configured", detail: "cloud_auth_issuer" };
-  let issued: { token?: string };
-  try {
-    const r = await fetch(new URL("/v1/service-credentials", base), {
-      method: "POST", headers: {
-        authorization: `Bearer ${session.sessionToken}`,
-        "content-type": "application/json",
-      }, body: JSON.stringify({ audience: "mira:who-you" }),
-    });
-    if (!r.ok) return { ok: false, reason: "authentication_link_unavailable" };
-    issued = await r.json() as { token?: string };
-  } catch {
-    return { ok: false, reason: "authentication_link_unavailable" };
+  const issued = await issueWhoYouCredential(env, session, credentialRequest);
+  if (!issued.ok) {
+    return issued.reason === "not_configured"
+      ? { ok: false, reason: "not_configured", detail: issued.detail ?? "cloud_auth_issuer" }
+      : { ok: false, reason: "authentication_link_unavailable" };
   }
-  if (typeof issued.token !== "string") return { ok: false, reason: "authentication_link_unavailable" };
 
   const runtime = createWhoYouRuntime(env);
-  if (!runtime.ok) return { ok: false, reason: "not_configured", detail: runtime.reason };
-  if (!env.MCP_RESOURCE_URL) return { ok: false, reason: "not_configured", detail: "mcp_resource_url" };
   // The runtime is cached per isolate and shared with `/mcp`; closing it after
   // one BFF call would break every later call in the same isolate.
+  if (!runtime.ok) return { ok: false, reason: "not_configured", detail: runtime.reason };
+  if (!env.MCP_RESOURCE_URL) return { ok: false, reason: "not_configured", detail: "mcp_resource_url" };
   try {
     const reply = await runtime.runtime.fetch(new Request(env.MCP_RESOURCE_URL, {
       method: "POST", headers: {
@@ -269,7 +333,14 @@ async function callWhoYouTool(
     const body = await reply.json() as {
       result?: { structuredContent?: unknown; isError?: boolean };
     };
-    if (body.result?.isError) return { ok: false, reason: "authentication_link_unavailable" };
+    if (body.result?.isError) {
+      const structured = body.result.structuredContent;
+      const rawCode = typeof structured === "object" && structured !== null
+        ? (structured as { error?: unknown }).error : null;
+      const code = typeof rawCode === "string" && /^[a-z0-9_]{1,64}$/.test(rawCode)
+        ? rawCode : "tool_rejected";
+      return { ok: false, reason: "tool_rejected", code };
+    }
     return { ok: true, structured: body.result?.structuredContent };
   } catch {
     return { ok: false, reason: "authentication_link_unavailable" };
@@ -389,6 +460,120 @@ async function handleMailboxList(
   return new Response(JSON.stringify({ mailboxes: outcome.mailboxes }), { headers: h });
 }
 
+const WRITE_SCOPES: ["whoyou.read", "whoyou.mail.write"] = [
+  "whoyou.read", "whoyou.mail.write",
+];
+
+type GmailLinkStart = { authorizationUrl: string; state: string; expiresAt: number };
+type GmailWebAction =
+  | { ok: true; start: GmailLinkStart }
+  | { ok: false; code: string };
+
+function gmailWebReady(env: WhoYouEnv): boolean {
+  return Boolean(
+    env.DB && env.MAIL_BUCKET
+    && resolveCredentialKeys(env)
+    && resolveGmailOAuthConfig(env),
+  );
+}
+
+async function issueGmailIdentityConfirmation(
+  env: WhoYouEnv,
+  session: Session,
+  action: "link" | "unlink",
+  mailboxId: string | null,
+): Promise<{ ok: true; token: string } | { ok: false; code: string }> {
+  const issued = await issueWhoYouCredential(env, session, {
+    audience: "mira:who-you",
+    confirmation: {
+      actor: "user", action, provider: "gmail", mailbox_id: mailboxId, nonce: random(),
+    },
+  });
+  return issued.ok
+    ? { ok: true, token: issued.token }
+    : { ok: false, code: issued.reason };
+}
+
+function parseGmailLinkStart(value: unknown): GmailLinkStart | null {
+  if (typeof value !== "object" || value === null) return null;
+  const x = value as Record<string, unknown>;
+  if (x.provider !== "gmail" || typeof x.authorizationUrl !== "string"
+      || typeof x.state !== "string" || !/^[\w-]{43}$/.test(x.state)
+      || typeof x.expiresAt !== "number" || !Number.isFinite(x.expiresAt)
+      || x.expiresAt <= Date.now()) return null;
+  try {
+    const authorization = new URL(x.authorizationUrl);
+    const expected = new URL(GOOGLE_AUTHORIZATION_ENDPOINT);
+    if (authorization.protocol !== "https:" || authorization.origin !== expected.origin
+        || authorization.pathname !== expected.pathname
+        || authorization.searchParams.get("state") !== x.state) return null;
+  } catch { return null; }
+  return { authorizationUrl: x.authorizationUrl, state: x.state, expiresAt: x.expiresAt };
+}
+
+async function startWebGmailLink(env: WhoYouEnv, session: Session): Promise<GmailWebAction> {
+  if (!gmailWebReady(env)) return { ok: false, code: "provider_not_configured" };
+  const confirmation = await issueGmailIdentityConfirmation(env, session, "link", null);
+  if (!confirmation.ok) return confirmation;
+  const called = await callWhoYouTool(
+    env, session, "whoyou_mailbox_link",
+    { provider: "gmail", confirmationCredential: confirmation.token },
+    { audience: "mira:who-you", scopes: WRITE_SCOPES },
+  );
+  if (!called.ok) return {
+    ok: false,
+    code: called.reason === "tool_rejected" ? called.code : called.reason,
+  };
+  const start = parseGmailLinkStart(called.structured);
+  return start ? { ok: true, start } : { ok: false, code: "invalid_link_response" };
+}
+
+type GmailUnlinkOutcome = { ok: true } | { ok: false; code: string };
+async function unlinkWebGmail(
+  env: WhoYouEnv,
+  session: Session,
+  mailboxId: string,
+): Promise<GmailUnlinkOutcome> {
+  const listed = await fetchMailboxList(env, session);
+  if (!listed.ok) return { ok: false, code: listed.error };
+  const mailbox = listed.mailboxes.find((entry) => entry.mailboxId === mailboxId);
+  if (!mailbox) return { ok: true };
+  if (mailbox.kind !== "third_party" || mailbox.provider !== "gmail") {
+    return { ok: false, code: "mailbox_not_gmail" };
+  }
+  if (!resolveCredentialKeys(env)) return { ok: false, code: "credential_vault_unavailable" };
+  const confirmation = await issueGmailIdentityConfirmation(
+    env, session, "unlink", mailbox.mailboxId,
+  );
+  if (!confirmation.ok) return confirmation;
+  const called = await callWhoYouTool(
+    env, session, "whoyou_mailbox_unlink",
+    { mailboxId: mailbox.mailboxId, confirmationCredential: confirmation.token },
+    { audience: "mira:who-you", scopes: WRITE_SCOPES },
+  );
+  if (!called.ok) return {
+    ok: false,
+    code: called.reason === "tool_rejected" ? called.code : called.reason,
+  };
+  return { ok: true };
+}
+
+type MailboxNotice =
+  | "gmail_connected" | "gmail_relinked" | "gmail_denied" | "gmail_link_failed"
+  | "gmail_unlinked" | "gmail_unlink_failed" | "gmail_unavailable";
+const MAILBOX_NOTICE_MESSAGES: Record<MailboxNotice, { tone: "ok" | "error"; text: string }> = {
+  gmail_connected: { tone: "ok", text: "Gmail 已连接。邮箱地址来自 Google 授权结果。" },
+  gmail_relinked: { tone: "ok", text: "Gmail 授权已更新。" },
+  gmail_denied: { tone: "error", text: "Gmail 授权没有完成，没有保存新的授权凭据。" },
+  gmail_link_failed: { tone: "error", text: "Gmail 连接失败，没有把这次尝试标记为已连接。" },
+  gmail_unlinked: { tone: "ok", text: "Gmail 已解绑；狐邮本地凭据与同步副本已删除。" },
+  gmail_unlink_failed: { tone: "error", text: "Gmail 解绑没有完成，请稍后重试。" },
+  gmail_unavailable: { tone: "error", text: "当前运行环境还没有配置 Gmail OAuth 或凭据加密能力。" },
+};
+function mailboxNotice(value: string | null): MailboxNotice | null {
+  return value && value in MAILBOX_NOTICE_MESSAGES ? value as MailboxNotice : null;
+}
+
 const PROVIDER_LABELS: Record<NonNullable<WebMailbox["provider"]>, string> = {
   gmail: "Gmail",
   microsoft: "Microsoft",
@@ -445,14 +630,25 @@ function credentialLabel(mailbox: WebMailbox): string {
   }
 }
 
-function renderMailbox(mailbox: WebMailbox): string {
+function renderMailbox(mailbox: WebMailbox, env: WhoYouEnv): string {
   const availability = AVAILABILITY_LABELS[mailbox.availability];
+  const isGmail = mailbox.kind === "third_party" && mailbox.provider === "gmail";
+  const canLink = gmailWebReady(env);
+  const canUnlink = Boolean(resolveCredentialKeys(env));
+  const actions = isGmail ? `<div class="mailbox-actions">
+${canLink ? `<form method="post" action="/account/mailboxes/gmail/link">
+<button class="button secondary" type="submit">${mailbox.credentialStatus === "reauth_required" ? "重新授权 Gmail" : "更新 Gmail 授权"}</button></form>` : ""}
+${canUnlink ? `<form method="post" action="/account/mailboxes/unlink">
+<input type="hidden" name="mailboxId" value="${escapeText(mailbox.mailboxId)}">
+<button class="button secondary" type="submit">解绑 Gmail</button></form>` : ""}
+</div>` : "";
   return `<li class="mailbox">
 <p class="address"><strong>${escapeText(mailbox.address)}</strong></p>
 <p class="meta">${escapeText(mailboxKindLabel(mailbox))}</p>
 <p class="meta"><span class="pill ${availability.tone}">${escapeText(availability.label)}</span>
 ${escapeText(credentialLabel(mailbox))}</p>
 <p class="hint">${escapeText(availability.hint)}</p>
+${actions}
 </li>`;
 }
 
@@ -470,40 +666,43 @@ function mailboxFailureMessage(error: MailboxListError): string {
   }
 }
 
-function renderMailboxesPage(outcome: MailboxListOutcome): string {
+function renderMailboxesPage(
+  outcome: MailboxListOutcome,
+  env: WhoYouEnv,
+  notice: MailboxNotice | null,
+): string {
+  const noticeContent = notice ? MAILBOX_NOTICE_MESSAGES[notice] : null;
+  const banner = noticeContent
+    ? `<div class="notice ${noticeContent.tone === "ok" ? "ok" : "error"}" role="status"><p>${escapeText(noticeContent.text)}</p></div>`
+    : "";
   const mailboxSection = outcome.ok
     ? (outcome.mailboxes.length
-      ? `<ul class="mailboxes">${outcome.mailboxes.map(renderMailbox).join("")}</ul>`
+      ? `<ul class="mailboxes">${outcome.mailboxes.map((mailbox) => renderMailbox(mailbox, env)).join("")}</ul>`
       : `<div class="notice"><p>当前账号还没有登记邮箱。</p>
-<p>等邮箱接入能力开放后，这里只显示真实接入的邮箱。</p></div>`)
+<p>连接 Gmail 后，真实授权成功的邮箱会出现在这里。</p></div>`)
     : `<div class="notice error" role="alert">
 <p>${escapeText(mailboxFailureMessage(outcome.error))}</p>
 <div class="inline-actions"><a href="/account/mailboxes">重试</a>
 <a href="/auth/start?returnTo=%2Faccount%2Fmailboxes">重新登录</a></div></div>`;
+  const gmailReady = gmailWebReady(env);
   return `<h1>邮箱</h1>
 <p class="lead">查看当前账号在狐邮登记的邮箱与连接状态。</p>
+${banner}
 <section aria-labelledby="mailbox-list">
 <h2 id="mailbox-list">已连接</h2>
 ${mailboxSection}
 </section>
 <section aria-labelledby="add-mailbox">
 <h2 id="add-mailbox">添加邮箱</h2>
-<p>接入能力尚未开放时，这里不会发起授权或网络请求。</p>
 <ul class="providers">
-<li><strong>自有域邮箱</strong> <span class="pill muted">尚未开放</span>
-<p class="hint">使用狐邮域名下的地址。需要先在服务端开通域名与邮件路由。</p></li>
-<li><strong>Gmail</strong> <span class="pill muted">尚未开放</span>
-<p class="hint">通过 Google OAuth 授权狐邮读取邮件。</p></li>
+<li><strong>Gmail</strong> ${gmailReady ? '<span class="pill ok">可接入</span>' : '<span class="pill muted">尚未配置</span>'}
+<p class="hint">通过 Google OAuth 授权狐邮读取与发送邮件；登录 Mira 云账号本身不会授予 Gmail 权限。</p>
+${gmailReady ? '<form method="post" action="/account/mailboxes/gmail/link"><button type="submit">连接 Gmail</button></form>' : ""}</li>
 <li><strong>Microsoft</strong> <span class="pill muted">尚未开放</span>
-<p class="hint">通过 Microsoft OAuth 授权狐邮读取邮件。</p></li>
+<p class="hint">本卡不开放 Microsoft 真实接入。</p></li>
 <li><strong>IMAP/SMTP</strong> <span class="pill muted">尚未开放</span>
-<p class="hint">使用 IMAP/SMTP 服务器与授权码接入。</p></li>
+<p class="hint">本卡不开放自填服务器真实接入。</p></li>
 </ul>
-</section>
-<section aria-labelledby="unlink-mailbox">
-<h2 id="unlink-mailbox">解绑邮箱</h2>
-<p>解绑会删除狐邮服务器上该邮箱的本地同步副本并停止后续同步，但不会删除邮箱服务商中的原始邮件。</p>
-<button type="button" disabled aria-disabled="true">解绑邮箱（尚未开放）</button>
 </section>
 <p class="footnote">“本地配置就绪”只说明狐邮运行环境已准备好必要依赖，不代表邮箱连接成功或可以收发邮件。</p>`;
 }
@@ -511,10 +710,38 @@ ${mailboxSection}
 /** Isolated browser login/BFF. The existing /mcp bearer gate is unchanged. */
 export async function handleWebRequest(request: Request, env: WhoYouEnv): Promise<Response | null> {
   const u = new URL(request.url), path = u.pathname;
-  if (!["/", "/auth/start", "/auth/callback", "/auth/logout", "/account", "/account/mailboxes", "/api/whoami", "/api/mailboxes"].includes(path)) return null;
+  const webPaths = [
+    "/", "/auth/start", "/auth/callback", "/auth/logout", "/account",
+    "/account/mailboxes", "/account/mailboxes/gmail/link", "/account/mailboxes/unlink",
+    "/api/whoami", "/api/mailboxes",
+  ];
+  const hasWebGmailFlow = path === GMAIL_CALLBACK_PATH
+    && getCookie(request, MAIL_OAUTH_COOKIE) !== null;
+  if (!webPaths.includes(path) && !hasWebGmailFlow) return null;
   if (u.origin !== ORIGIN) return jsonError(404, "not_found");
   const key = await importSessionKey(env.WHOYOU_WEB_SESSION_KEY), base = baseUrl(env);
   if (!key || !base) return jsonError(503, "web_login_not_configured");
+
+  if (path === GMAIL_CALLBACK_PATH) {
+    const flow = await unseal(key, getCookie(request, MAIL_OAUTH_COOKIE));
+    const currentSession = await unseal(key, getCookie(request, SESSION_COOKIE));
+    const h = headers(); addCookie(h, MAIL_OAUTH_COOKIE, "", 0);
+    if (!isMailOAuthFlow(flow) || !isSession(currentSession)
+        || flow.state !== u.searchParams.get("state")
+        || flow.sessionBinding !== await sessionBinding(currentSession)) {
+      return redirect("/account/mailboxes?notice=gmail_link_failed", h);
+    }
+    const completed = await handleGmailCallback(request, env);
+    let payload: { relinked?: unknown; error?: unknown } = {};
+    try { payload = await completed.json() as { relinked?: unknown; error?: unknown }; }
+    catch { payload = {}; }
+    if (completed.ok) {
+      return redirect(`/account/mailboxes?notice=${payload.relinked === true ? "gmail_relinked" : "gmail_connected"}`, h);
+    }
+    const notice = payload.error === "provider_reauth_required"
+      ? "gmail_denied" : "gmail_link_failed";
+    return redirect(`/account/mailboxes?notice=${notice}`, h);
+  }
 
   if (path === "/") {
     if (request.method !== "GET") return jsonError(405, "method_not_allowed");
@@ -588,16 +815,61 @@ export async function handleWebRequest(request: Request, env: WhoYouEnv): Promis
     return redirect("/", h);
   }
 
-  if (request.method !== "GET") return jsonError(405, "method_not_allowed");
+  const mutation = path === "/account/mailboxes/gmail/link"
+    || path === "/account/mailboxes/unlink";
+  if (mutation) {
+    if (request.method !== "POST") return jsonError(405, "method_not_allowed");
+    if (request.headers.get("origin") !== ORIGIN) return jsonError(403, "origin_not_allowed");
+    if (request.headers.has("authorization")) return jsonError(400, "unexpected_authorization");
+    if ([...u.searchParams.keys()].length > 0) return jsonError(400, "unexpected_parameter");
+  } else if (request.method !== "GET") return jsonError(405, "method_not_allowed");
   const session = await unseal(key, getCookie(request, SESSION_COOKIE));
   if (!isSession(session)) {
+    if (mutation) return redirect(guardLocation("/account/mailboxes"));
     if (validReturnTo(path)) return redirect(guardLocation(path));
     return jsonError(401, "sign_in_required");
   }
 
+  if (path === "/account/mailboxes/gmail/link") {
+    const started = await startWebGmailLink(env, session);
+    if (!started.ok) {
+      const notice = started.code === "provider_not_configured"
+        || started.code === "credential_vault_unavailable"
+        ? "gmail_unavailable" : "gmail_link_failed";
+      return redirect(`/account/mailboxes?notice=${notice}`);
+    }
+    const h = headers();
+    addCookie(h, MAIL_OAUTH_COOKIE, await seal(key, {
+      provider: "gmail",
+      state: started.start.state,
+      expiresAt: started.start.expiresAt,
+      sessionBinding: await sessionBinding(session),
+    }), 600);
+    return redirect(started.start.authorizationUrl, h);
+  }
+
+  if (path === "/account/mailboxes/unlink") {
+    const contentType = request.headers.get("content-type") ?? "";
+    if (!contentType.toLowerCase().startsWith("application/x-www-form-urlencoded")) {
+      return jsonError(415, "unsupported_media_type");
+    }
+    const raw = await request.text();
+    if (raw.length > 512) return jsonError(413, "request_too_large");
+    const form = new URLSearchParams(raw);
+    if ([...form.keys()].some((name) => name !== "mailboxId")) {
+      return jsonError(400, "unexpected_parameter");
+    }
+    const mailboxId = form.get("mailboxId") ?? "";
+    if (!/^[A-Za-z0-9._:-]{1,80}$/.test(mailboxId)) {
+      return jsonError(400, "invalid_mailbox_id");
+    }
+    const unlinked = await unlinkWebGmail(env, session, mailboxId);
+    return redirect(`/account/mailboxes?notice=${unlinked.ok ? "gmail_unlinked" : "gmail_unlink_failed"}`);
+  }
+
   if (path === "/account/mailboxes") {
     const outcome = await fetchMailboxList(env, session);
-    return page(renderMailboxesPage(outcome), headers(),
+    return page(renderMailboxesPage(outcome, env, mailboxNotice(u.searchParams.get("notice"))), headers(),
       outcome.ok ? 200 : outcome.error === "mailboxes_unavailable" ? 503 : 502,
       { shell: "app", active: "mailboxes" });
   }
