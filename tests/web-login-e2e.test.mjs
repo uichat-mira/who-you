@@ -61,7 +61,10 @@ test("real workerd: Web OAuth callback -> server-side credential -> verified who
     },
   });
   try {
-    const initial = await mf.dispatchFetch(ORIGIN + "/auth/start", {redirect: "manual"});
+    const initial = await mf.dispatchFetch(
+      ORIGIN + "/auth/start?returnTo=%2Faccount%2Fmailboxes",
+      {redirect: "manual"},
+    );
     assert.equal(initial.status, 303);
     const redirect = new URL(initial.headers.get("location"));
     const state = redirect.searchParams.get("state");
@@ -71,17 +74,24 @@ test("real workerd: Web OAuth callback -> server-side credential -> verified who
       redirect: "manual", headers: {cookie: cookies(initial)},
     });
     assert.equal(callback.status, 303, await callback.text());
-    assert.equal(callback.headers.get("location"), "/account");
+    assert.equal(callback.headers.get("location"), "/account/mailboxes");
     const page = await mf.dispatchFetch(ORIGIN + "/account", {
       redirect: "manual", headers: {cookie: cookies(callback)},
     });
     const body = await page.text();
     assert.equal(page.status, 200, body);
-    assert.match(body, /狐邮 MCP 已连接/);
+    assert.match(body, /<h1>账户<\/h1>/);
+    assert.match(body, /Mira 云账号/);
     assert.match(body, /account-e2e/);
     assert.match(body, /whoyou.read/);
     assert.match(body, /href="\/account\/mailboxes"/);
+    assert.match(body, /aria-current="page">账户<\/a>/);
     assert.doesNotMatch(body, /mira-device-session-test-only-placeholder-secret/);
+    const root = await mf.dispatchFetch(ORIGIN + "/", {
+      redirect: "manual", headers: {cookie: cookies(callback)},
+    });
+    assert.equal(root.status, 303);
+    assert.equal(root.headers.get("location"), "/account");
     assert.ok(counters.token >= 1);
     assert.ok(counters.issue >= 1);
     assert.ok(counters.jwks >= 1);
