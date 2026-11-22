@@ -5,6 +5,7 @@ import { handleGmailCallback } from "../mail/gmail-http";
 import { GMAIL_CALLBACK_PATH, resolveGmailOAuthConfig } from "../mail/gmail-link";
 import { GOOGLE_AUTHORIZATION_ENDPOINT } from "../mail/oauth-client";
 import { resolveMicrosoftOAuthConfig } from "../mail/microsoft-link";
+import { publicIntroduction, privacyPolicy, serviceTerms, publicFooter } from "./public-pages";
 
 const CLIENT_ID = "who-you-web";
 const CALLBACK = "https://who-you.tomz.io/auth/callback";
@@ -257,21 +258,23 @@ code{overflow-wrap:anywhere;font-size:13px;background:#f3f3f2;padding:2px 5px;bo
 .inline-actions{display:flex;gap:14px;flex-wrap:wrap}.inline-actions a{text-decoration:none;font-weight:600}
 .mailbox-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}.mailbox-actions form{margin:0}
 .notice.ok{background:#eef6f1;border-color:#d5e8dc}
+.public-intro{border-top:1px solid var(--line);margin-top:26px;padding-top:4px}.public-intro h2,.legal h2{margin-top:22px}.legal p,.legal li,.public-intro p{overflow-wrap:anywhere}.legal ul{padding-left:1.3em}.public-footer{border-top:1px solid var(--line);padding:16px 20px;text-align:center;font-size:13px;color:var(--muted)}.public-footer a{color:var(--muted);margin:0 7px;text-decoration:underline;text-underline-offset:3px}
 @media (max-width:520px){main{margin:0;width:100%;min-height:100vh;border:0;border-radius:0;box-shadow:none}.brandbar{padding:20px 20px 14px}.content{padding:22px 20px}.appnav{padding-left:12px}.setting-row{gap:10px}}
 </style></head><body><main>
 <header class="brandbar"><a class="brand" href="/">狐邮 <span>· Who You</span></a>${app ? '<span class="session-mark">云账号已登录</span>' : ""}</header>
-${nav}<div class="content${app ? "" : " auth"}">${content}</div></main></body></html>`, { status, headers: h });
+${nav}<div class="content${app ? "" : " auth"}">${content}</div>${publicFooter}</main></body></html>`, { status, headers: h });
 }
 
 function renderLoginPage(returnTo: ProtectedPage, blocked: boolean): string {
   const href = "/auth/start?" + new URLSearchParams({ returnTo }).toString();
   return `<p class="eyebrow">Mail capability settings</p>
-<h1>连接 Mira 云账号</h1>
-<p class="lead">登录后可以管理狐邮的邮箱连接与授权状态。这里不是邮箱客户端，只保留必要的配置。</p>
+<h1>狐邮 · 邮件能力服务</h1>
+<p class="lead">连接 Mira 云账号，独立管理邮箱授权，让获准的客户端以 MCP 使用邮件能力。狐邮不是传统网页邮箱客户端。</p>
 ${blocked ? `<div class="notice auth-required" role="status"><strong>这个页面需要先登录</strong>
 <p>登录完成后会回到你刚才要访问的位置。</p></div>` : ""}
 <div class="auth-actions"><a class="button" href="${escapeText(href)}">使用 Mira 云账号登录</a></div>
-<p class="footnote">登录由 Cloud Auth 完成。登录只确认你的 Mira 云账号身份，不会自动授权 Gmail、Microsoft 或其他邮箱。</p>`;
+<p class="footnote">登录由 Cloud Auth 完成。登录只确认你的 Mira 云账号身份，不会自动授权 Gmail、Microsoft 或其他邮箱。</p>
+${publicIntroduction}`;
 }
 
 function renderAccountPage(id: { accountId: string; consumerId: string; scopes: string[] }): string {
@@ -761,7 +764,7 @@ ${gmailReady ? '<form method="post" action="/account/mailboxes/gmail/link"><butt
 export async function handleWebRequest(request: Request, env: WhoYouEnv): Promise<Response | null> {
   const u = new URL(request.url), path = u.pathname;
   const webPaths = [
-    "/", "/auth/start", "/auth/callback", "/auth/logout", "/account",
+    "/", "/privacy", "/terms", "/auth/start", "/auth/callback", "/auth/logout", "/account",
     "/account/mailboxes", "/account/mailboxes/gmail/link", "/account/mailboxes/unlink",
     "/api/whoami", "/api/mailboxes",
   ];
@@ -770,6 +773,11 @@ export async function handleWebRequest(request: Request, env: WhoYouEnv): Promis
       || getCookie(request, MAIL_OAUTH_RESULT_COOKIE) !== null);
   if (!webPaths.includes(path) && !hasWebGmailFlow) return null;
   if (u.origin !== ORIGIN) return jsonError(404, "not_found");
+  // Public disclosures must be readable without a session or any provider secrets.
+  if (path === "/privacy" || path === "/terms") {
+    if (request.method !== "GET") return jsonError(405, "method_not_allowed");
+    return page(path === "/privacy" ? privacyPolicy : serviceTerms);
+  }
   const key = await importSessionKey(env.WHOYOU_WEB_SESSION_KEY), base = baseUrl(env);
   if (!key || !base) return jsonError(503, "web_login_not_configured");
 
