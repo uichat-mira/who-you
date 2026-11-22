@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "profiles": {
+    "who-you-runtime": {
+      "description": "Bounded Who You validation: static, unit and Workerd integration; production provider calls and deployment excluded. Repository Contract CI retains scripts/check.sh.",
+      "checks": [
+        {
+          "id": "dependencies",
+          "tier": "L1",
+          "requirement": "required",
+          "command": "set -e; NODE_BIN=\"$(find /opt/hostedtoolcache/node -path '*/24.*/x64/bin/node' -print | sort -V | tail -n 1)\"; test -n \"$NODE_BIN\"; export PATH=\"$(dirname \"$NODE_BIN\"):$PATH\"; npm ci",
+          "failure_result": "BLOCKED"
+        },
+        {
+          "id": "typecheck",
+          "tier": "L1",
+          "requirement": "required",
+          "command": "set -e; NODE_BIN=\"$(find /opt/hostedtoolcache/node -path '*/24.*/x64/bin/node' -print | sort -V | tail -n 1)\"; test -n \"$NODE_BIN\"; export PATH=\"$(dirname \"$NODE_BIN\"):$PATH\"; npm run typecheck",
+          "failure_result": "REPAIR"
+        },
+        {
+          "id": "lint",
+          "tier": "L1",
+          "requirement": "required",
+          "command": "set -e; NODE_BIN=\"$(find /opt/hostedtoolcache/node -path '*/24.*/x64/bin/node' -print | sort -V | tail -n 1)\"; test -n \"$NODE_BIN\"; export PATH=\"$(dirname \"$NODE_BIN\"):$PATH\"; npm run lint",
+          "failure_result": "REPAIR"
+        },
+        {
+          "id": "unit-contracts",
+          "tier": "L2",
+          "requirement": "required",
+          "command": "set -e; NODE_BIN=\"$(find /opt/hostedtoolcache/node -path '*/24.*/x64/bin/node' -print | sort -V | tail -n 1)\"; test -n \"$NODE_BIN\"; export PATH=\"$(dirname \"$NODE_BIN\"):$PATH\"; npm run test:unit",
+          "failure_result": "REPAIR"
+        },
+        {
+          "id": "worker-runtime",
+          "tier": "L3",
+          "requirement": "required",
+          "command": "set -e; NODE_BIN=\"$(find /opt/hostedtoolcache/node -path '*/24.*/x64/bin/node' -print | sort -V | tail -n 1)\"; test -n \"$NODE_BIN\"; export PATH=\"$(dirname \"$NODE_BIN\"):$PATH\"; npm run test:integration",
+          "failure_result": "REPAIR"
+        },
+        {
+          "id": "platform-release",
+          "tier": "L4",
+          "requirement": "not_applicable"
+        },
+        {
+          "id": "production-smoke",
+          "tier": "L5",
+          "requirement": "not_applicable"
+        }
+      ]
+    }
+  }
+}
