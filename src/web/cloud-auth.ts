@@ -215,9 +215,13 @@ function page(content: string, outgoing = headers(), status = 200,
   options: PageOptions = {}): Response {
   const h = outgoing;
   h.set("content-type", "text/html; charset=utf-8");
-  h.set("content-security-policy",
-    "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'");
   const app = options.shell === "app";
+  // Chromium applies form-action to the redirect after a native POST as well.
+  // Only the mailbox page may navigate a form flow to the pinned Google endpoint.
+  const formAction = app && options.active === "mailboxes"
+    ? `'self' ${GOOGLE_AUTHORIZATION_ENDPOINT}` : "'self'";
+  h.set("content-security-policy",
+    `default-src 'none'; style-src 'unsafe-inline'; form-action ${formAction}; base-uri 'none'; frame-ancestors 'none'`);
   // Native same-origin POST forms need a non-null Origin. Keep OAuth redirects,
   // callback error pages and JSON responses on the default no-referrer policy.
   if (app) h.set("referrer-policy", "same-origin");
