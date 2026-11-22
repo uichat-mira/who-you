@@ -453,9 +453,11 @@ export function registerIdentityTools(
 					keys: services.credentialKeys,
 					oauth: services.oauth,
 					remoteTargets: services.remoteTargets,
+					syncStates: services.syncStates,
 				},
 				{ accountId, mailboxId: args.mailboxId, now: Date.now() },
 			);
+			if (!result.ok) return failure(result.code, "An exclusive Gmail operation is outstanding; no unlink was performed. Retry with a fresh confirmation when it has completed.");
 			return success("The identity and its synced mail were removed.", {
 				mailboxId: args.mailboxId,
 				alreadyUnlinked: result.alreadyUnlinked,

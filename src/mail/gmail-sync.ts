@@ -99,6 +99,7 @@ export async function syncGmailMailbox(
 	const leaseId = `lease_${crypto.randomUUID()}`;
 	const acquired = await deps.syncStates.acquireLease({
 		mailboxId: mailbox.id,
+		accountId: mailbox.accountId,
 		provider: "gmail",
 		leaseId,
 		now: deps.now,
@@ -106,22 +107,19 @@ export async function syncGmailMailbox(
 	if (!acquired) return { ok: false, code: "sync_in_progress" };
 
 	try {
-		const outcome = await runGmailSyncBatch(deps, mailbox);
-		// Unlink may run while a provider batch is in flight. Only a live
-		// mailbox may keep its rows/objects; otherwise this batch cleans up
-		// after itself instead of resurrecting a deleted identity's mail.
-		const stillLinked = await deps.repository.findMailboxById(mailbox.accountId, mailbox.id);
-		if (!stillLinked) {
-			const keys = await deps.repository.listMailboxObjectKeys(mailbox.id).catch(() => []);
-			await deps.repository.deleteObjects(keys).catch(() => undefined);
-			await deps.repository.deleteMailboxScoped(mailbox.id).catch(() => undefined);
+		// Ownership is held for every awaited provider, D1 and R2 operation.
+		// Recheck after admission: a stale scheduled snapshot cannot resurrect an
+		// unlinked identity or use a disabled mailbox.
+		const current = await deps.repository.findMailboxById(mailbox.accountId, mailbox.id);
+		if (!current || current.status !== "active") return { ok: false, code: "sync_failed" };
+		if ((await deps.syncStates.get(mailbox.id))?.lastError === "unlink_pending") {
 			return { ok: false, code: "sync_failed" };
 		}
-		return outcome;
+		return await runGmailSyncBatch(deps, current);
 	} finally {
 		// Releasing after the batch (not before) keeps the guard honest even when
 		// the provider call throws mid-import. A failed release cannot undo writes.
-		await deps.syncStates.releaseLease(mailbox.id, leaseId, Date.now()).catch(() => undefined);
+		await deps.syncStates.releaseLease(mailbox.id, leaseId, Date.now());
 	}
 }
 

@@ -163,55 +163,69 @@ export async function completeOAuthLink(
 			now: deps.now,
 		});
 		if (!inserted) return { ok: false, code: "address_already_linked" };
-	} else {
-		// Re-consent replaces the sealed token; the old one can no longer send.
-		await deps.credentials.revoke({
+	}
+	// Re-consent and initial Gmail linking must not reset the cursor or rotate
+	// credentials while an exclusive sync/unlink is outstanding.
+	const leaseId = deps.provider === "gmail" ? `link_${crypto.randomUUID()}` : null;
+	if (leaseId && !await deps.syncStates.acquireLease({
+		mailboxId, accountId: state.accountId, provider: "gmail", leaseId, now: deps.now,
+	})) return { ok: false, code: "link_failed" };
+	try {
+		if (leaseId && (await deps.syncStates.get(mailboxId))?.lastError === "unlink_pending") {
+			return { ok: false, code: "link_failed" };
+		}
+		if (existing) {
+			// Re-consent replaces the sealed token; the old one can no longer send.
+			await deps.credentials.revoke({
+				accountId: state.accountId,
+				mailboxId,
+				credentialType: "oauth_refresh",
+				now: deps.now,
+			});
+		}
+
+		const stored = await deps.credentials.store({
 			accountId: state.accountId,
 			mailboxId,
+			provider: deps.provider,
 			credentialType: "oauth_refresh",
+			secret: identity.refreshToken,
+			scope: identity.scope ?? "",
+			keys: deps.keys,
 			now: deps.now,
 		});
-	}
-
-	const stored = await deps.credentials.store({
-		accountId: state.accountId,
-		mailboxId,
-		provider: deps.provider,
-		credentialType: "oauth_refresh",
-		secret: identity.refreshToken,
-		scope: identity.scope ?? "",
-		keys: deps.keys,
-		now: deps.now,
-	});
-	if (!stored.ok) {
-		if (!relinked) {
-			await deps.repository.deleteMailboxScoped(mailboxId);
+		if (!stored.ok) {
+			if (!relinked) {
+				await deps.repository.deleteMailboxScoped(mailboxId);
+			}
+			return { ok: false, code: "link_failed" };
 		}
-		return { ok: false, code: "link_failed" };
+
+		await deps.syncStates.upsert({
+			mailboxId,
+			provider: deps.provider,
+			cursor: null,
+			backfillBefore: deps.now - (deps.backfillWindowMs ?? OAUTH_BACKFILL_WINDOW_MS),
+			backfillPage: null,
+			backfillHistoryId: identity.backfillHistoryId,
+			lastSyncedAt: null,
+			lastError: null,
+			leaseId: null,
+			leaseExpiresAt: null,
+			now: deps.now,
+		});
+
+		await deps.repository.insertAudit({
+			id: `audit_${crypto.randomUUID()}`,
+			accountId: state.accountId,
+			action: "link_mailbox",
+			targetId: mailboxId,
+			detail: `provider=${deps.provider}`,
+			createdAt: deps.now,
+		});
+
+		return { ok: true, mailboxId, address, relinked };
+	} finally {
+		if (leaseId) await deps.syncStates.releaseLease(mailboxId, leaseId, Date.now());
 	}
-
-	await deps.syncStates.upsert({
-		mailboxId,
-		provider: deps.provider,
-		cursor: null,
-		backfillBefore: deps.now - (deps.backfillWindowMs ?? OAUTH_BACKFILL_WINDOW_MS),
-		backfillPage: null,
-		backfillHistoryId: identity.backfillHistoryId,
-		lastSyncedAt: null,
-		lastError: null,
-		leaseId: null,
-		leaseExpiresAt: null,
-		now: deps.now,
-	});
-
-	await deps.repository.insertAudit({
-		id: `audit_${crypto.randomUUID()}`,
-		accountId: state.accountId,
-		action: "link_mailbox",
-		targetId: mailboxId,
-		detail: `provider=${deps.provider}`,
-		createdAt: deps.now,
-	});
-
-	return { ok: true, mailboxId, address, relinked };
 }

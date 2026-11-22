@@ -715,7 +715,7 @@ function syncRedirectLocation(sync: WebGmailSync): string {
 }
 
 type MailboxNotice = GmailCallbackNotice
-  | "gmail_unlinked" | "gmail_unlink_failed" | "gmail_unavailable"
+  | "gmail_unlinked" | "gmail_unlink_failed" | "gmail_unlink_busy" | "gmail_unavailable"
   | "gmail_sync_completed" | "gmail_sync_busy" | "gmail_sync_reauth"
   | "gmail_sync_failed" | "gmail_sync_unavailable" | "gmail_sync_rejected";
 const MAILBOX_NOTICE_MESSAGES: Record<MailboxNotice, { tone: "ok" | "error"; text: string }> = {
@@ -725,6 +725,7 @@ const MAILBOX_NOTICE_MESSAGES: Record<MailboxNotice, { tone: "ok" | "error"; tex
   gmail_link_failed: { tone: "error", text: "Gmail 连接失败，没有把这次尝试标记为已连接。" },
   gmail_unlinked: { tone: "ok", text: "Gmail 已解绑；狐邮本地凭据与同步副本已删除。" },
   gmail_unlink_failed: { tone: "error", text: "Gmail 解绑没有完成，请稍后重试。" },
+  gmail_unlink_busy: { tone: "error", text: "该邮箱有尚未结束的操作，本次未解绑。请在操作完成后重试。" },
   gmail_unavailable: { tone: "error", text: "当前运行环境还没有配置 Gmail OAuth 或凭据加密能力。" },
   gmail_sync_completed: { tone: "ok", text: "本次 Gmail 同步批次已完成。" },
   gmail_sync_busy: { tone: "error", text: "该邮箱已有同步批次正在运行；本次没有重复启动。" },
@@ -833,18 +834,24 @@ type MailboxSyncState = { label: string; tone: "ok" | "warn" | "bad" | "muted"; 
  */
 function mailboxSyncState(mailbox: WebMailbox): MailboxSyncState | null {
   if (mailbox.kind !== "third_party" || mailbox.provider !== "gmail") return null;
+  if (!mailbox.sync) {
+    return { label: "尚未同步", tone: "muted", hint: "还没有可用的同步记录。" };
+  }
+  if (mailbox.sync.lastError === "sync_recovery_required") {
+    return { label: "同步待恢复", tone: "bad", hint: "有未确认结束的邮箱操作；请联系维护者确认安全恢复，不能自动重试或解绑。" };
+  }
+  if (mailbox.sync.inProgress) {
+    return { label: "同步进行中", tone: "warn", hint: "一次同步批次正在运行；完成后状态会更新。" };
+  }
+  if (mailbox.sync.lastError === "unlink_pending") {
+    return { label: "解绑未完成", tone: "bad", hint: "上次解绑尚未完成清理；请重试解绑，不可继续同步或更新授权。" };
+  }
   if (mailbox.credentialStatus === "reauth_required") {
     return { label: "需要重新授权", tone: "warn",
       hint: "授权已失效，同步已停止；重新授权后才能继续。" };
   }
   if (mailbox.credentialStatus === "unreadable" || mailbox.credentialStatus === "revoked") {
     return { label: "凭据不可用", tone: "bad", hint: "无法读取授权凭据，当前不能同步。" };
-  }
-  if (!mailbox.sync) {
-    return { label: "尚未同步", tone: "muted", hint: "还没有可用的同步记录。" };
-  }
-  if (mailbox.sync.inProgress) {
-    return { label: "同步进行中", tone: "warn", hint: "一次同步批次正在运行；完成后状态会更新。" };
   }
   if (mailbox.sync.lastError) {
     return { label: "上次同步失败", tone: "bad",
@@ -1157,7 +1164,7 @@ export async function handleWebRequest(request: Request, env: WhoYouEnv): Promis
       return jsonError(400, "invalid_mailbox_id");
     }
     const unlinked = await unlinkWebGmail(env, session, mailboxId);
-    return redirect(`/account/mailboxes?notice=${unlinked.ok ? "gmail_unlinked" : "gmail_unlink_failed"}`);
+    return redirect(`/account/mailboxes?notice=${unlinked.ok ? "gmail_unlinked" : unlinked.code === "sync_in_progress" ? "gmail_unlink_busy" : "gmail_unlink_failed"}`);
   }
 
   if (path === "/account/mailboxes/sync") {

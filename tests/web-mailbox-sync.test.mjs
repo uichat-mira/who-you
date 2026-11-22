@@ -205,6 +205,8 @@ const createOutbound = (trace = {}) => async (request) => {
 
 	if (request.url === GOOGLE_REVOKE_URL) {
 		trace.googleRevokes = (trace.googleRevokes ?? 0) + 1;
+		if (trace.googleRevokeEntered) trace.googleRevokeEntered();
+		if (trace.googleRevokeGate) await trace.googleRevokeGate;
 		return new Response(null, { status: 200 });
 	}
 
@@ -254,7 +256,7 @@ async function login(mf, code) {
 	return session.split(";")[0];
 }
 
-async function linkGmail(mf, cookie) {
+async function linkGmail(mf, cookie, expectedNotice = "gmail_connected") {
 	const started = await mf.dispatchFetch(ORIGIN + "/account/mailboxes/gmail/link", {
 		method: "POST",
 		redirect: "manual",
@@ -270,7 +272,7 @@ async function linkGmail(mf, cookie) {
 		{ redirect: "manual", headers: { cookie: cookie + "; " + cookies(started) } },
 	);
 	assert.equal(callback.status, 303, await callback.text());
-	assert.equal(callback.headers.get("location"), "/account/mailboxes?notice=gmail_connected");
+	assert.equal(callback.headers.get("location"), `/account/mailboxes?notice=${expectedNotice}`);
 }
 
 async function mailboxIdOf(db, accountId) {
@@ -523,7 +525,7 @@ test("a provider that over-returns still cannot exceed the 20-message batch ceil
 	}
 });
 
-test("unbinding while a batch is in flight leaves no resurrected mail", async () => {
+test("outstanding Gmail ownership excludes unlink and expiry takeover; retry deletes all objects", async () => {
 	const trace = {
 		gmailMessages: Array.from({ length: 5 }, (_, index) => gmailMessage(index)),
 	};
@@ -549,7 +551,24 @@ test("unbinding while a batch is in flight leaves no resurrected mail", async ()
 			}),
 		]);
 
-		const unlink = await mf.dispatchFetch(ORIGIN + "/account/mailboxes/unlink", {
+		// Advance the diagnostic timestamp while the original provider request
+		// remains in flight. Never let a successor replace its ownership.
+		const held = await db.prepare("SELECT lease_id FROM mailbox_sync_state WHERE mailbox_id = ?").bind(mailboxId).first();
+		assert.ok(held.lease_id);
+		await db.prepare("UPDATE mailbox_sync_state SET lease_expires_at = ? WHERE mailbox_id = ?")
+			.bind(Date.now() - 1, mailboxId).run();
+		const recoveryPage = await mf.dispatchFetch(ORIGIN + "/account/mailboxes", { headers: { cookie: ownerCookie } });
+		assert.match(await recoveryPage.text(), /同步待恢复/);
+		const successor = await sync(mf, ownerCookie, mailboxId);
+		assert.equal(successor.headers.get("location"), "/account/mailboxes?notice=gmail_sync_busy");
+		const after = await db.prepare("SELECT lease_id FROM mailbox_sync_state WHERE mailbox_id = ?").bind(mailboxId).first();
+		assert.equal(after.lease_id, held.lease_id, "elapsed time is not evidence that the writer stopped");
+		const beforeRelink = await db.prepare("SELECT cursor, last_synced_at, lease_id FROM mailbox_sync_state WHERE mailbox_id = ?").bind(mailboxId).first();
+		await linkGmail(mf, ownerCookie, "gmail_link_failed");
+		assert.deepEqual(await db.prepare("SELECT cursor, last_synced_at, lease_id FROM mailbox_sync_state WHERE mailbox_id = ?").bind(mailboxId).first(), beforeRelink);
+
+
+		const requestUnlink = () => mf.dispatchFetch(ORIGIN + "/account/mailboxes/unlink", {
 			method: "POST",
 			redirect: "manual",
 			headers: {
@@ -559,13 +578,48 @@ test("unbinding while a batch is in flight leaves no resurrected mail", async ()
 			},
 			body: new URLSearchParams({ mailboxId }).toString(),
 		});
+		const unlink = await requestUnlink();
 		assert.equal(unlink.status, 303, await unlink.text());
-		assert.equal(unlink.headers.get("location"), "/account/mailboxes?notice=gmail_unlinked");
+		assert.equal(unlink.headers.get("location"), "/account/mailboxes?notice=gmail_unlink_busy");
+		assert.ok(await db.prepare("SELECT id FROM mailboxes WHERE id = ?").bind(mailboxId).first(), "busy unlink does not remove identity");
+		assert.ok(await db.prepare("SELECT id FROM provider_credentials WHERE mailbox_id = ?").bind(mailboxId).first(), "busy unlink does not revoke credentials");
 
 		release();
 		const finished = await running;
 		assert.equal(finished.status, 303);
-		assert.equal(finished.headers.get("location"), "/account/mailboxes?notice=gmail_sync_failed");
+		assert.match(finished.headers.get("location"), /notice=gmail_sync_completed/);
+		const bucket = await mf.getR2Bucket("MAIL_BUCKET");
+		// Model an interrupted R2 write with no D1 row. Successful unlink must
+		// erase the entire owned namespace, not only keys found in D1.
+		await bucket.put(`accounts/account-sync-owner/mailboxes/${mailboxId}/messages/orphan/raw.eml`, "fixture");
+		await bucket.put("accounts/other-account/mailboxes/other-mailbox/messages/keep/raw.eml", "other fixture");
+		// A prior unlink may have stopped after revocation or partial object cleanup.
+		// Even without an owner, the durable intent blocks new sync.
+		await db.prepare("UPDATE mailbox_sync_state SET last_error = 'unlink_pending' WHERE mailbox_id = ?").bind(mailboxId).run();
+		const blocked = await sync(mf, ownerCookie, mailboxId);
+		assert.equal(blocked.headers.get("location"), "/account/mailboxes?notice=gmail_sync_failed");
+		const pending = await mf.dispatchFetch(ORIGIN + "/account/mailboxes", { headers: { cookie: ownerCookie } });
+		assert.match(await pending.text(), /解绑未完成/);
+		let finishRevoke;
+		trace.googleRevokeGate = new Promise((resolve) => { finishRevoke = resolve; });
+		const revokeEntered = new Promise((resolve) => { trace.googleRevokeEntered = resolve; });
+		const finishingUnlink = requestUnlink();
+		try {
+			await Promise.race([revokeEntered, delay(5000).then(() => { throw new Error("unlink never reached revocation"); })]);
+			const refreshes = trace.googleRefreshes;
+			const duringUnlink = await sync(mf, ownerCookie, mailboxId);
+			assert.equal(duringUnlink.headers.get("location"), "/account/mailboxes?notice=gmail_sync_busy");
+			assert.equal(trace.googleRefreshes, refreshes, "unlink prevents provider access");
+			await linkGmail(mf, ownerCookie, "gmail_link_failed");
+		} finally {
+			finishRevoke();
+		}
+		const retried = await finishingUnlink;
+		assert.equal(retried.headers.get("location"), "/account/mailboxes?notice=gmail_unlinked");
+		assert.ok(await bucket.head("accounts/other-account/mailboxes/other-mailbox/messages/keep/raw.eml"));
+		const stale = await sync(mf, ownerCookie, mailboxId);
+		assert.equal(stale.headers.get("location"), "/account/mailboxes?notice=gmail_sync_rejected");
+
 
 		for (const table of ["messages", "threads", "provider_credentials", "mailbox_sync_state"]) {
 			const row = await db
@@ -579,7 +633,6 @@ test("unbinding while a batch is in flight leaves no resurrected mail", async ()
 			.bind(mailboxId)
 			.first();
 		assert.equal(mailbox.total, 0);
-		const bucket = await mf.getR2Bucket("MAIL_BUCKET");
 		const objects = await bucket.list({
 			prefix: `accounts/account-sync-owner/mailboxes/${mailboxId}/`,
 		});

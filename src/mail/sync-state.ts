@@ -4,13 +4,13 @@ import type { MailboxProvider } from "./store";
  * Per-identity incremental sync cursor (S7c). A missing row means the identity
  * has never synced; `backfillBefore` marks the bounded initial scan.
  *
- * The row also carries the single-sync lease (OPS-044): a manual or scheduled
- * run must acquire it before touching a provider, so two batches can never run
- * the same identity concurrently. `leaseExpiresAt` lets a crashed run age out
- * instead of blocking the identity forever.
+ * The row also carries the exclusive operation lease (OPS-044): Gmail sync,
+ * unlink and relink share it. The expiry timestamp is diagnostic
+ * only: a Cloudflare HTTP invocation can outlive an elapsed wall-clock TTL,
+ * so time alone must never authorize another writer.
  */
 
-/** Longer than one bounded batch; recovery is automatic after a crash. */
+/** Age at which an outstanding exclusive operation needs investigation. */
 export const SYNC_LEASE_TTL_MS = 5 * 60_000;
 
 export type MailboxSyncState = {
@@ -68,12 +68,13 @@ export class SyncStateRepository {
 	}
 
 	/**
-	 * Takes the single sync lease for one identity. The conditional UPSERT is the
-	 * whole race: an unexpired lease owned by any run makes the update a no-op.
+	 * Takes exclusive ownership for one still-linked identity. No automatic
+	 * expiry takeover: D1 and R2 do not share an atomic fencing transaction.
 	 * `true` means this caller owns the lease and must release it.
 	 */
 	async acquireLease(input: {
 		mailboxId: string;
+		accountId: string;
 		provider: MailboxProvider;
 		leaseId: string;
 		now: number;
@@ -84,28 +85,28 @@ export class SyncStateRepository {
 				 mailbox_id, provider, cursor, backfill_before, backfill_page,
 				 backfill_history_id, last_synced_at, last_error,
 				 lease_id, lease_expires_at, created_at, updated_at
-				 ) VALUES (?,?,NULL,NULL,NULL,NULL,NULL,NULL,?,?,?,?)
+				 ) SELECT id, provider, NULL,NULL,NULL,NULL,NULL,NULL,?,?,?,?
+				 FROM mailboxes WHERE id = ? AND account_id = ? AND provider = ?
 				 ON CONFLICT (mailbox_id) DO UPDATE SET
 				 lease_id = excluded.lease_id,
 				 lease_expires_at = excluded.lease_expires_at,
 				 updated_at = excluded.updated_at
-				 WHERE mailbox_sync_state.lease_expires_at IS NULL
-				 OR mailbox_sync_state.lease_expires_at <= ?`,
+				 WHERE mailbox_sync_state.lease_id IS NULL`,
 			)
 			.bind(
-				input.mailboxId,
-				input.provider,
 				input.leaseId,
 				input.now + SYNC_LEASE_TTL_MS,
 				input.now,
 				input.now,
-				input.now,
+				input.mailboxId,
+				input.accountId,
+				input.provider,
 			)
 			.run();
 		return (result.meta.changes ?? 0) > 0;
 	}
 
-	/** Releases only this run's lease; a takeover by another run is untouched. */
+	/** Releases only the exact owner after all its operations have settled. */
 	async releaseLease(mailboxId: string, leaseId: string, now: number): Promise<void> {
 		await this.db
 			.prepare(
