@@ -82,6 +82,8 @@ test("real workerd: Web OAuth callback -> server-side credential -> verified who
     const body = await page.text();
     assert.equal(page.status, 200, body);
     assert.equal(page.headers.get("referrer-policy"), "same-origin");
+    assert.equal(page.headers.get("content-security-policy")?.split("; ")
+      .find((directive) => directive.startsWith("form-action ")), "form-action 'self'");
     assert.match(body, /action="\/auth\/logout"/);
     assert.match(body, /<h1>账户<\/h1>/);
     assert.match(body, /Mira 云账号/);
