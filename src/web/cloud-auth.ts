@@ -218,6 +218,9 @@ function page(content: string, outgoing = headers(), status = 200,
   h.set("content-security-policy",
     "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'");
   const app = options.shell === "app";
+  // Native same-origin POST forms need a non-null Origin. Keep OAuth redirects,
+  // callback error pages and JSON responses on the default no-referrer policy.
+  if (app) h.set("referrer-policy", "same-origin");
   const nav = app ? `<nav class="appnav" aria-label="狐邮配置">
 <a href="/account"${options.active === "account" ? ' aria-current="page"' : ""}>账户</a>
 <a href="/account/mailboxes"${options.active === "mailboxes" ? ' aria-current="page"' : ""}>邮箱</a>
