@@ -12,6 +12,7 @@ import type { RemoteTargetRepository } from "./remote-targets";
 import { MailSendError, type MailSender, type OutboundMail, type SendIdentity } from "./send";
 import { sendSmtpMessage, SmtpError } from "./smtp-client";
 import type { MailTransport } from "./socket-transport";
+import type { SyncStateRepository } from "./sync-state";
 import type { MailboxRecord, MailRepository } from "./store";
 
 /**
@@ -21,14 +22,25 @@ import type { MailboxRecord, MailRepository } from "./store";
  * mailbox and leaves the own-domain Resend / `send_email` path untouched.
  */
 
+/** Safe sync projection: fixed state, timestamps and a reason code only. */
+export type IdentitySyncView = {
+	lastSyncedAt: number | null;
+	lastError: string | null;
+	inProgress: boolean;
+	/** `true` once the bounded initial scan has handed over to the cursor. */
+	initialImportComplete: boolean;
+};
+
 export type IdentityView = {
 	mailbox: MailboxRecord;
 	credentialStatus: CredentialStatus | null;
+	sync: IdentitySyncView | null;
 };
 
 export async function listIdentities(
 	repository: MailRepository,
 	credentials: CredentialRepository,
+	syncStates: SyncStateRepository,
 	accountId: string,
 ): Promise<IdentityView[]> {
 	const [mailboxes, records] = await Promise.all([
@@ -42,7 +54,13 @@ export async function listIdentities(
 			[record.credentialType]: record.status,
 		});
 	}
-	return mailboxes.map((mailbox) => {
+	const now = Date.now();
+	const syncs = await Promise.all(
+		mailboxes.map((mailbox) =>
+			mailbox.kind === "third_party" ? syncStates.get(mailbox.id) : Promise.resolve(null),
+		),
+	);
+	return mailboxes.map((mailbox, index) => {
 		const statuses = statusByMailbox.get(mailbox.id) ?? {};
 		// The refresh token governs OAuth identities; a self-filled identity is
 		// governed by its IMAP password (both password rows share a lifetime).
@@ -50,7 +68,20 @@ export async function listIdentities(
 			mailbox.provider === "imap_smtp"
 				? (statuses.imap_password ?? null)
 				: (statuses.oauth_refresh ?? null);
-		return { mailbox, credentialStatus };
+		const state = syncs[index];
+		return {
+			mailbox,
+			credentialStatus,
+			sync: state
+				? {
+						lastSyncedAt: state.lastSyncedAt,
+						lastError: state.leaseId !== null && state.leaseExpiresAt !== null && state.leaseExpiresAt <= now
+							? "sync_recovery_required" : state.lastError,
+						inProgress: state.leaseId !== null,
+						initialImportComplete: state.cursor !== null,
+					}
+				: null,
+		};
 	});
 }
 
@@ -60,6 +91,7 @@ export type UnlinkDependencies = {
 	keys: CredentialKeys | null;
 	oauth: GmailOAuthClient | null;
 	remoteTargets: RemoteTargetRepository | null;
+	syncStates: SyncStateRepository;
 };
 
 /**
@@ -72,9 +104,31 @@ export type UnlinkDependencies = {
 export async function unlinkMailbox(
 	deps: UnlinkDependencies,
 	input: { accountId: string; mailboxId: string; now: number },
-): Promise<{ ok: true; alreadyUnlinked: boolean }> {
+): Promise<{ ok: true; alreadyUnlinked: boolean } | { ok: false; code: "sync_in_progress" }> {
 	const mailbox = await deps.repository.findMailboxById(input.accountId, input.mailboxId);
 	if (!mailbox) return { ok: true, alreadyUnlinked: true };
+
+	// The lock spans provider revocation, object deletion and row deletion.
+	// A concurrent sync cannot start, and a running sync prevents an unlink
+	// from claiming success before the last writer has stopped.
+	const leaseId = mailbox.provider === "gmail" ? `unlink_${crypto.randomUUID()}` : null;
+	if (leaseId && !await deps.syncStates.acquireLease({
+		mailboxId: mailbox.id, accountId: input.accountId, provider: "gmail",
+		leaseId, now: input.now,
+	})) return { ok: false, code: "sync_in_progress" };
+	try {
+		if (leaseId) await deps.syncStates.markError(mailbox.id, "unlink_pending", input.now);
+		return await unlinkOwnedMailbox(deps, input, mailbox);
+	} finally {
+		if (leaseId) await deps.syncStates.releaseLease(mailbox.id, leaseId, Date.now());
+	}
+}
+
+async function unlinkOwnedMailbox(
+	deps: UnlinkDependencies,
+	input: { accountId: string; mailboxId: string; now: number },
+	mailbox: MailboxRecord,
+): Promise<{ ok: true; alreadyUnlinked: boolean }> {
 
 	if (deps.keys) {
 		if (mailbox.provider === "imap_smtp") {
@@ -124,8 +178,19 @@ export async function unlinkMailbox(
 
 	if (deps.remoteTargets) await deps.remoteTargets.delete(mailbox.id);
 
-	const keys = await deps.repository.listMailboxObjectKeys(mailbox.id);
-	await deps.repository.deleteObjects(keys);
+	if (mailbox.provider === "gmail") {
+		// Also delete objects from interrupted imports that never obtained a D1
+		// row. Exclusive ownership means the prefix cannot gain sync objects.
+		await deps.repository.deleteMailboxObjectPrefix(mailbox.accountId, mailbox.id);
+		// Preserve deletion of existing referenced keys outside the message prefix.
+		const keys = await deps.repository.listMailboxObjectKeys(mailbox.id);
+		for (let offset = 0; offset < keys.length; offset += 1000) {
+			await deps.repository.deleteObjects(keys.slice(offset, offset + 1000));
+		}
+	} else {
+		const keys = await deps.repository.listMailboxObjectKeys(mailbox.id);
+		await deps.repository.deleteObjects(keys);
+	}
 	await deps.repository.deleteMailboxScoped(mailbox.id);
 
 	await deps.repository.insertAudit({

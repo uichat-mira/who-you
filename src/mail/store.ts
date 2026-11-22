@@ -1122,6 +1122,18 @@ export class MailRepository {
 		return deleted;
 	}
 
+	/** Used under exclusive Gmail operation ownership, including interrupted writes. */
+	async deleteMailboxObjectPrefix(accountId: string, mailboxId: string): Promise<void> {
+		const prefix = `accounts/${encodeURIComponent(accountId)}/mailboxes/${encodeURIComponent(mailboxId)}/`;
+		// Delete the first page repeatedly; no concurrent sync writer may add keys.
+		// A failed list/delete propagates; D1 rows are not removed on failure.
+		for (;;) {
+			const page = await this.bucket.list({ prefix, limit: 1000 });
+			if (!page.objects.length) return;
+			await this.bucket.delete(page.objects.map((object) => object.key));
+		}
+	}
+
 	async listMailboxObjectKeys(mailboxId: string): Promise<string[]> {
 		const statements = [
 			this.db

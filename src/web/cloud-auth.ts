@@ -2,6 +2,7 @@ import { createMailServices, resolveCredentialKeys, type WhoYouEnv } from "../ma
 import { createWhoYouRuntime } from "../mcp/runtime";
 import { normalizeDomain } from "../mail/address";
 import { handleGmailCallback } from "../mail/gmail-http";
+import { GMAIL_SYNC_MAX_MESSAGES_PER_RUN } from "../mail/gmail-sync";
 import { GMAIL_CALLBACK_PATH, resolveGmailOAuthConfig } from "../mail/gmail-link";
 import { GOOGLE_AUTHORIZATION_ENDPOINT } from "../mail/oauth-client";
 import { resolveMicrosoftOAuthConfig } from "../mail/microsoft-link";
@@ -57,6 +58,13 @@ type MailboxAvailability =
   | "credential_unavailable"
   | "credential_missing";
 
+type WebMailboxSync = {
+  lastSyncedAt: number | null;
+  lastError: string | null;
+  inProgress: boolean;
+  initialImportComplete: boolean;
+};
+
 type WebMailbox = {
   mailboxId: string;
   address: string;
@@ -64,6 +72,7 @@ type WebMailbox = {
   provider: "gmail" | "microsoft" | "imap_smtp" | null;
   credentialStatus: "active" | "reauth_required" | "unreadable" | "revoked" | null;
   availability: MailboxAvailability;
+  sync: WebMailboxSync | null;
 };
 
 function encode(bytes: Uint8Array): string {
@@ -438,7 +447,33 @@ const mailboxAvailability = (
   return "configured";
 };
 
-/** Whitelists the server list into the six fields the browser is allowed to see. */
+/** Whitelists the server list into the fields the browser is allowed to see. */
+const INVALID_SYNC = Symbol("invalid_sync");
+function projectSync(value: unknown): WebMailboxSync | null | typeof INVALID_SYNC {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "object") return INVALID_SYNC;
+  const item = value as Record<string, unknown>;
+  const lastSyncedAt = item.lastSyncedAt;
+  const lastError = item.lastError;
+  if (lastSyncedAt !== null
+      && (typeof lastSyncedAt !== "number" || !Number.isInteger(lastSyncedAt) || lastSyncedAt < 0)) {
+    return INVALID_SYNC;
+  }
+  if (lastError !== null
+      && (typeof lastError !== "string" || !/^[a-z0-9_]{1,64}$/.test(lastError))) {
+    return INVALID_SYNC;
+  }
+  if (typeof item.inProgress !== "boolean" || typeof item.initialImportComplete !== "boolean") {
+    return INVALID_SYNC;
+  }
+  return {
+    lastSyncedAt: lastSyncedAt === null ? null : lastSyncedAt as number,
+    lastError: lastError === null ? null : lastError as string,
+    inProgress: item.inProgress,
+    initialImportComplete: item.initialImportComplete,
+  };
+}
+
 function projectMailboxes(value: unknown, env: WhoYouEnv): WebMailbox[] | null {
   if (typeof value !== "object" || value === null) return null;
   const identities = (value as { identities?: unknown }).identities;
@@ -456,6 +491,8 @@ function projectMailboxes(value: unknown, env: WhoYouEnv): WebMailbox[] | null {
     if (credentialStatus !== null && credentialStatus !== "active"
       && credentialStatus !== "reauth_required" && credentialStatus !== "unreadable"
       && credentialStatus !== "revoked") return null;
+    const sync = projectSync(item.sync);
+    if (sync === INVALID_SYNC) return null;
     projected.push({
       mailboxId: item.mailboxId,
       address: item.address,
@@ -463,6 +500,7 @@ function projectMailboxes(value: unknown, env: WhoYouEnv): WebMailbox[] | null {
       provider: item.provider,
       credentialStatus,
       availability: mailboxAvailability(item.kind, item.status, credentialStatus, item.provider, env),
+      sync,
     });
   }
   return projected;
@@ -612,8 +650,74 @@ async function unlinkWebGmail(
   return { ok: true };
 }
 
+type WebGmailSync =
+  | { ok: true; counts: SyncCounts }
+  | { ok: false; code: string };
+
+/**
+ * Starts one bounded Gmail batch through the write-scoped MCP tool. The browser
+ * session never holds the credential and the read scope is never reused for a
+ * persistent write. Ownership is checked twice: the BFF list narrows the
+ * account, and the tool re-resolves the mailbox from the bearer account.
+ */
+async function syncWebGmail(
+  env: WhoYouEnv,
+  session: Session,
+  mailboxId: string,
+): Promise<WebGmailSync> {
+  const listed = await fetchMailboxList(env, session);
+  if (!listed.ok) return { ok: false, code: listed.error };
+  const mailbox = listed.mailboxes.find((entry) => entry.mailboxId === mailboxId);
+  if (!mailbox) return { ok: false, code: "mailbox_not_found" };
+  if (mailbox.kind !== "third_party" || mailbox.provider !== "gmail") {
+    return { ok: false, code: "mailbox_not_gmail" };
+  }
+  if (!gmailWebReady(env)) return { ok: false, code: "provider_not_configured" };
+
+  const called = await callWhoYouTool(
+    env, session, "whoyou_mailbox_sync",
+    { mailboxId: mailbox.mailboxId },
+    { audience: "mira:who-you", scopes: WRITE_SCOPES },
+  );
+  if (!called.ok) return {
+    ok: false,
+    code: called.reason === "tool_rejected" ? called.code : called.reason,
+  };
+  const counts = parseSyncCounts(called.structured);
+  return counts ? { ok: true, counts } : { ok: false, code: "invalid_sync_response" };
+}
+
+function syncNotice(code: string): MailboxNotice {
+  switch (code) {
+    case "sync_in_progress": return "gmail_sync_busy";
+    case "provider_reauth_required":
+    case "credential_reauth_required": return "gmail_sync_reauth";
+    case "provider_not_configured":
+    case "credential_vault_unavailable":
+    case "mail_storage_not_configured": return "gmail_sync_unavailable";
+    case "mailbox_not_found":
+    case "mailbox_not_gmail":
+    case "mailbox_disabled":
+    case "insufficient_scope": return "gmail_sync_rejected";
+    default: return "gmail_sync_failed";
+  }
+}
+
+function syncRedirectLocation(sync: WebGmailSync): string {
+  if (!sync.ok) return `/account/mailboxes?notice=${syncNotice(sync.code)}`;
+  const query = new URLSearchParams({
+    notice: "gmail_sync_completed",
+    imported: String(sync.counts.imported),
+    duplicates: String(sync.counts.duplicates),
+    skipped: String(sync.counts.skipped),
+  });
+  return `/account/mailboxes?${query.toString()}`;
+}
+
 type MailboxNotice = GmailCallbackNotice
-  | "gmail_unlinked" | "gmail_unlink_failed" | "gmail_unavailable";
+  | "gmail_unlinked" | "gmail_unlink_failed" | "gmail_unlink_busy" | "gmail_unavailable"
+  | "gmail_sync_completed" | "gmail_sync_busy" | "gmail_sync_reauth"
+  | "gmail_sync_failed" | "gmail_sync_unavailable" | "gmail_sync_rejected";
 const MAILBOX_NOTICE_MESSAGES: Record<MailboxNotice, { tone: "ok" | "error"; text: string }> = {
   gmail_connected: { tone: "ok", text: "Gmail 已连接。邮箱地址来自 Google 授权结果。" },
   gmail_relinked: { tone: "ok", text: "Gmail 授权已更新。" },
@@ -621,10 +725,48 @@ const MAILBOX_NOTICE_MESSAGES: Record<MailboxNotice, { tone: "ok" | "error"; tex
   gmail_link_failed: { tone: "error", text: "Gmail 连接失败，没有把这次尝试标记为已连接。" },
   gmail_unlinked: { tone: "ok", text: "Gmail 已解绑；狐邮本地凭据与同步副本已删除。" },
   gmail_unlink_failed: { tone: "error", text: "Gmail 解绑没有完成，请稍后重试。" },
+  gmail_unlink_busy: { tone: "error", text: "该邮箱有尚未结束的操作，本次未解绑。请在操作完成后重试。" },
   gmail_unavailable: { tone: "error", text: "当前运行环境还没有配置 Gmail OAuth 或凭据加密能力。" },
+  gmail_sync_completed: { tone: "ok", text: "本次 Gmail 同步批次已完成。" },
+  gmail_sync_busy: { tone: "error", text: "该邮箱已有同步批次正在运行；本次没有重复启动。" },
+  gmail_sync_reauth: { tone: "error", text: "Gmail 授权已失效；需要重新授权后才能继续同步。" },
+  gmail_sync_failed: { tone: "error", text: "本次 Gmail 同步失败，未标记为成功。" },
+  gmail_sync_unavailable: { tone: "error", text: "当前运行环境缺少 Gmail 同步所需配置。" },
+  gmail_sync_rejected: { tone: "error", text: "同步请求被拒绝；没有读取任何邮件。" },
 };
 function mailboxNotice(value: string | null): MailboxNotice | null {
   return value && value in MAILBOX_NOTICE_MESSAGES ? value as MailboxNotice : null;
+}
+
+type SyncCounts = { imported: number; duplicates: number; skipped: number };
+
+const boundedCount = (value: unknown, max: number): number | null =>
+  typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= max
+    ? value : null;
+
+/** Reads only the three bounded counters the manual batch may report. */
+function parseSyncCounts(value: unknown): SyncCounts | null {
+  if (typeof value !== "object" || value === null) return null;
+  const item = value as Record<string, unknown>;
+  const imported = boundedCount(item.imported, GMAIL_SYNC_MAX_MESSAGES_PER_RUN);
+  const duplicates = boundedCount(item.duplicates, 500);
+  const skipped = boundedCount(item.skipped, 500);
+  return imported === null || duplicates === null || skipped === null
+    ? null : { imported, duplicates, skipped };
+}
+
+function syncCountsFromQuery(url: URL): SyncCounts | null {
+  const imported = parseCount(url.searchParams.get("imported"), GMAIL_SYNC_MAX_MESSAGES_PER_RUN);
+  const duplicates = parseCount(url.searchParams.get("duplicates"), 500);
+  const skipped = parseCount(url.searchParams.get("skipped"), 500);
+  return imported === null || duplicates === null || skipped === null
+    ? null : { imported, duplicates, skipped };
+}
+
+function parseCount(value: string | null, max: number): number | null {
+  if (value === null || !/^\d{1,4}$/.test(value)) return null;
+  const parsed = Number.parseInt(value, 10);
+  return parsed <= max ? parsed : null;
 }
 
 const PROVIDER_LABELS: Record<NonNullable<WebMailbox["provider"]>, string> = {
@@ -683,12 +825,59 @@ function credentialLabel(mailbox: WebMailbox): string {
   }
 }
 
+type MailboxSyncState = { label: string; tone: "ok" | "warn" | "bad" | "muted"; hint: string };
+
+/**
+ * Sync state is projected from the stored cursor row, never inferred from a
+ * button click. "成功" requires a recorded lastSyncedAt with no lastError;
+ * a backfill that has not handed over to the cursor stays visibly partial.
+ */
+function mailboxSyncState(mailbox: WebMailbox): MailboxSyncState | null {
+  if (mailbox.kind !== "third_party" || mailbox.provider !== "gmail") return null;
+  if (!mailbox.sync) {
+    return { label: "尚未同步", tone: "muted", hint: "还没有可用的同步记录。" };
+  }
+  if (mailbox.sync.lastError === "sync_recovery_required") {
+    return { label: "同步待恢复", tone: "bad", hint: "有未确认结束的邮箱操作；请联系维护者确认安全恢复，不能自动重试或解绑。" };
+  }
+  if (mailbox.sync.inProgress) {
+    return { label: "同步进行中", tone: "warn", hint: "一次同步批次正在运行；完成后状态会更新。" };
+  }
+  if (mailbox.sync.lastError === "unlink_pending") {
+    return { label: "解绑未完成", tone: "bad", hint: "上次解绑尚未完成清理；请重试解绑，不可继续同步或更新授权。" };
+  }
+  if (mailbox.credentialStatus === "reauth_required") {
+    return { label: "需要重新授权", tone: "warn",
+      hint: "授权已失效，同步已停止；重新授权后才能继续。" };
+  }
+  if (mailbox.credentialStatus === "unreadable" || mailbox.credentialStatus === "revoked") {
+    return { label: "凭据不可用", tone: "bad", hint: "无法读取授权凭据，当前不能同步。" };
+  }
+  if (mailbox.sync.lastError) {
+    return { label: "上次同步失败", tone: "bad",
+      hint: `固定错误分类：${mailbox.sync.lastError}。失败不会标记为成功。` };
+  }
+  if (mailbox.sync.lastSyncedAt !== null) {
+    const time = new Date(mailbox.sync.lastSyncedAt).toISOString();
+    return mailbox.sync.initialImportComplete
+      ? { label: "同步成功", tone: "ok", hint: `最近同步时间：${time}。` }
+      : { label: "初始同步进行中", tone: "warn",
+        hint: `最近批次时间：${time}；初始回填尚未完成，再次同步会继续推进。` };
+  }
+  return { label: "尚未同步", tone: "muted", hint: "还没有可用的同步记录。" };
+}
+
 function renderMailbox(mailbox: WebMailbox, env: WhoYouEnv): string {
   const availability = AVAILABILITY_LABELS[mailbox.availability];
   const isGmail = mailbox.kind === "third_party" && mailbox.provider === "gmail";
   const canLink = gmailWebReady(env);
   const canUnlink = Boolean(resolveCredentialKeys(env));
+  const canSync = isGmail && gmailWebReady(env) && mailbox.availability === "configured";
+  const syncState = mailboxSyncState(mailbox);
   const actions = isGmail ? `<div class="mailbox-actions">
+${canSync ? `<form method="post" action="/account/mailboxes/sync">
+<input type="hidden" name="mailboxId" value="${escapeText(mailbox.mailboxId)}">
+<button class="button secondary" type="submit">同步一次</button></form>` : ""}
 ${canLink ? `<form method="post" action="/account/mailboxes/gmail/link">
 <button class="button secondary" type="submit">${mailbox.credentialStatus === "reauth_required" ? "重新授权 Gmail" : "更新 Gmail 授权"}</button></form>` : ""}
 ${canUnlink ? `<form method="post" action="/account/mailboxes/unlink">
@@ -700,6 +889,8 @@ ${canUnlink ? `<form method="post" action="/account/mailboxes/unlink">
 <p class="meta">${escapeText(mailboxKindLabel(mailbox))}</p>
 <p class="meta"><span class="pill ${availability.tone}">${escapeText(availability.label)}</span>
 ${escapeText(credentialLabel(mailbox))}</p>
+${syncState ? `<p class="meta"><span class="pill ${syncState.tone}">${escapeText(syncState.label)}</span>
+${escapeText(syncState.hint)}</p>` : ""}
 <p class="hint">${escapeText(availability.hint)}</p>
 ${actions}
 </li>`;
@@ -723,10 +914,14 @@ function renderMailboxesPage(
   outcome: MailboxListOutcome,
   env: WhoYouEnv,
   notice: MailboxNotice | null,
+  counts: SyncCounts | null,
 ): string {
   const noticeContent = notice ? MAILBOX_NOTICE_MESSAGES[notice] : null;
+  const syncDetail = notice === "gmail_sync_completed" && counts
+    ? `<p>本次导入 ${counts.imported} 封，重复 ${counts.duplicates} 封，跳过 ${counts.skipped} 封。</p>`
+    : "";
   const banner = noticeContent
-    ? `<div class="notice ${noticeContent.tone === "ok" ? "ok" : "error"}" role="status"><p>${escapeText(noticeContent.text)}</p></div>`
+    ? `<div class="notice ${noticeContent.tone === "ok" ? "ok" : "error"}" role="status"><p>${escapeText(noticeContent.text)}</p>${syncDetail}</div>`
     : "";
   const mailboxSection = outcome.ok
     ? (outcome.mailboxes.length
@@ -757,7 +952,8 @@ ${gmailReady ? '<form method="post" action="/account/mailboxes/gmail/link"><butt
 <p class="hint">本卡不开放自填服务器真实接入。</p></li>
 </ul>
 </section>
-<p class="footnote">“本地配置就绪”只说明狐邮运行环境已准备好必要依赖，不代表邮箱连接成功或可以收发邮件。</p>`;
+<p class="footnote">“本地配置就绪”只说明狐邮运行环境已准备好必要依赖，不代表邮箱连接成功或可以收发邮件。
+“同步一次”只运行一个有界批次（最多 20 封），不会触发全量回填或周期调度。</p>`;
 }
 
 /** Isolated browser login/BFF. The existing /mcp bearer gate is unchanged. */
@@ -766,7 +962,7 @@ export async function handleWebRequest(request: Request, env: WhoYouEnv): Promis
   const webPaths = [
     "/", "/privacy", "/terms", "/auth/start", "/auth/callback", "/auth/logout", "/account",
     "/account/mailboxes", "/account/mailboxes/gmail/link", "/account/mailboxes/unlink",
-    "/api/whoami", "/api/mailboxes",
+    "/account/mailboxes/sync", "/api/whoami", "/api/mailboxes",
   ];
   const hasWebGmailFlow = path === GMAIL_CALLBACK_PATH
     && (getCookie(request, MAIL_OAUTH_COOKIE) !== null
@@ -919,7 +1115,8 @@ export async function handleWebRequest(request: Request, env: WhoYouEnv): Promis
   }
 
   const mutation = path === "/account/mailboxes/gmail/link"
-    || path === "/account/mailboxes/unlink";
+    || path === "/account/mailboxes/unlink"
+    || path === "/account/mailboxes/sync";
   if (mutation) {
     if (request.method !== "POST") return jsonError(405, "method_not_allowed");
     if (request.headers.get("origin") !== ORIGIN) return jsonError(403, "origin_not_allowed");
@@ -967,12 +1164,33 @@ export async function handleWebRequest(request: Request, env: WhoYouEnv): Promis
       return jsonError(400, "invalid_mailbox_id");
     }
     const unlinked = await unlinkWebGmail(env, session, mailboxId);
-    return redirect(`/account/mailboxes?notice=${unlinked.ok ? "gmail_unlinked" : "gmail_unlink_failed"}`);
+    return redirect(`/account/mailboxes?notice=${unlinked.ok ? "gmail_unlinked" : unlinked.code === "sync_in_progress" ? "gmail_unlink_busy" : "gmail_unlink_failed"}`);
+  }
+
+  if (path === "/account/mailboxes/sync") {
+    const contentType = request.headers.get("content-type") ?? "";
+    if (!contentType.toLowerCase().startsWith("application/x-www-form-urlencoded")) {
+      return jsonError(415, "unsupported_media_type");
+    }
+    const raw = await request.text();
+    if (raw.length > 512) return jsonError(413, "request_too_large");
+    const form = new URLSearchParams(raw);
+    if ([...form.keys()].some((name) => name !== "mailboxId")) {
+      return jsonError(400, "unexpected_parameter");
+    }
+    const mailboxId = form.get("mailboxId") ?? "";
+    if (!/^[A-Za-z0-9._:-]{1,80}$/.test(mailboxId)) {
+      return jsonError(400, "invalid_mailbox_id");
+    }
+    const synced = await syncWebGmail(env, session, mailboxId);
+    return redirect(syncRedirectLocation(synced));
   }
 
   if (path === "/account/mailboxes") {
     const outcome = await fetchMailboxList(env, session);
-    return page(renderMailboxesPage(outcome, env, mailboxNotice(u.searchParams.get("notice"))), headers(),
+    const notice = mailboxNotice(u.searchParams.get("notice"));
+    const counts = notice === "gmail_sync_completed" ? syncCountsFromQuery(u) : null;
+    return page(renderMailboxesPage(outcome, env, notice, counts), headers(),
       outcome.ok ? 200 : outcome.error === "mailboxes_unavailable" ? 503 : 502,
       { shell: "app", active: "mailboxes" });
   }

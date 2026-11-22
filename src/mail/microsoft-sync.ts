@@ -106,6 +106,8 @@ export async function syncMicrosoftMailbox(
 		backfillHistoryId: null,
 		lastSyncedAt: null,
 		lastError: null,
+		leaseId: null,
+		leaseExpiresAt: null,
 	};
 
 	const counters: OAuthSyncCounters = { imported: 0, duplicates: 0, skipped: 0 };
