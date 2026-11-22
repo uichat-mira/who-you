@@ -529,6 +529,7 @@ test("the mailbox page renders the signed-in account's real list with explicit s
 		assert.doesNotMatch(body, /beta@tomlab\.cn/);
 		assert.doesNotMatch(body, /account-e2e|account-other/);
 		assert.doesNotMatch(body, /example\.com|demo@|placeholder@/i);
+		assert.equal(response.headers.get("referrer-policy"), "same-origin");
 		assert.match(body, /action="\/account\/mailboxes\/gmail\/link"/);
 		assert.match(body, /action="\/account\/mailboxes\/unlink"/);
 		assert.match(body, /更新 Gmail 授权/);
@@ -854,6 +855,16 @@ test("Web Gmail mutations fail closed on CSRF/auth and provider denial", async (
 			{ method: "POST", headers: { cookie, origin: "https://evil.invalid" } },
 		);
 		assert.equal(wrongOrigin.status, 403);
+		for (const path of ["/account/mailboxes/gmail/link", "/account/mailboxes/unlink"]) {
+			for (const origin of [undefined, "null", "https://evil.invalid"]) {
+				const rejected = await mf.dispatchFetch(ORIGIN + path, {
+					method: "POST", headers: origin === undefined ? { cookie } : { cookie, origin },
+				});
+				assert.equal(rejected.status, 403);
+				assert.equal((await rejected.json()).error, "origin_not_allowed");
+			}
+		}
+		assert.equal(trace.googleTokenExchanges ?? 0, 0);
 
 		const suppliedBearer = await mf.dispatchFetch(
 			ORIGIN + "/account/mailboxes/gmail/link",

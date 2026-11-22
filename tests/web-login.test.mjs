@@ -64,6 +64,7 @@ test("OAuth start pins HTTPS callback, PKCE-S256 and a short HttpOnly state", as
       { headers: { cookie: cookieHeader }, redirect: "manual" },
     );
     assert.equal(callback.status, 200);
+    assert.equal(callback.headers.get("referrer-policy"), "no-referrer");
     assert.match(await callback.text(), /登录没有完成/);
   });
 });
@@ -104,6 +105,13 @@ test("Web routes fail closed without session key, valid encrypted cookie or same
       method: "POST", headers: { origin: "https://evil.invalid" },
     });
     assert.equal(crossOrigin.status, 403);
+    for (const origin of [undefined, "null"]) {
+      const rejected = await mf.dispatchFetch(ORIGIN + "/auth/logout", {
+        method: "POST", headers: origin === undefined ? {} : { origin },
+      });
+      assert.equal(rejected.status, 403);
+      assert.equal((await rejected.json()).error, "origin_not_allowed");
+    }
     const normal = await mf.dispatchFetch(ORIGIN + "/auth/logout", {
       method: "POST", headers: { origin: ORIGIN }, redirect: "manual",
     });
