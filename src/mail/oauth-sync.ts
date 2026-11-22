@@ -20,6 +20,7 @@ export type OAuthSyncFailureCode =
 	| "provider_tls_required"
 	| "provider_auth_failed"
 	| "credential_unavailable"
+	| "sync_in_progress"
 	| "sync_failed";
 
 export type OAuthSyncCounters = { imported: number; duplicates: number; skipped: number };

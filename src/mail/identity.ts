@@ -12,6 +12,7 @@ import type { RemoteTargetRepository } from "./remote-targets";
 import { MailSendError, type MailSender, type OutboundMail, type SendIdentity } from "./send";
 import { sendSmtpMessage, SmtpError } from "./smtp-client";
 import type { MailTransport } from "./socket-transport";
+import type { SyncStateRepository } from "./sync-state";
 import type { MailboxRecord, MailRepository } from "./store";
 
 /**
@@ -21,14 +22,25 @@ import type { MailboxRecord, MailRepository } from "./store";
  * mailbox and leaves the own-domain Resend / `send_email` path untouched.
  */
 
+/** Safe sync projection: fixed state, timestamps and a reason code only. */
+export type IdentitySyncView = {
+	lastSyncedAt: number | null;
+	lastError: string | null;
+	inProgress: boolean;
+	/** `true` once the bounded initial scan has handed over to the cursor. */
+	initialImportComplete: boolean;
+};
+
 export type IdentityView = {
 	mailbox: MailboxRecord;
 	credentialStatus: CredentialStatus | null;
+	sync: IdentitySyncView | null;
 };
 
 export async function listIdentities(
 	repository: MailRepository,
 	credentials: CredentialRepository,
+	syncStates: SyncStateRepository,
 	accountId: string,
 ): Promise<IdentityView[]> {
 	const [mailboxes, records] = await Promise.all([
@@ -42,7 +54,13 @@ export async function listIdentities(
 			[record.credentialType]: record.status,
 		});
 	}
-	return mailboxes.map((mailbox) => {
+	const now = Date.now();
+	const syncs = await Promise.all(
+		mailboxes.map((mailbox) =>
+			mailbox.kind === "third_party" ? syncStates.get(mailbox.id) : Promise.resolve(null),
+		),
+	);
+	return mailboxes.map((mailbox, index) => {
 		const statuses = statusByMailbox.get(mailbox.id) ?? {};
 		// The refresh token governs OAuth identities; a self-filled identity is
 		// governed by its IMAP password (both password rows share a lifetime).
@@ -50,7 +68,20 @@ export async function listIdentities(
 			mailbox.provider === "imap_smtp"
 				? (statuses.imap_password ?? null)
 				: (statuses.oauth_refresh ?? null);
-		return { mailbox, credentialStatus };
+		const state = syncs[index];
+		return {
+			mailbox,
+			credentialStatus,
+			sync: state
+				? {
+						lastSyncedAt: state.lastSyncedAt,
+						lastError: state.lastError,
+						inProgress:
+							state.leaseExpiresAt !== null && state.leaseExpiresAt > now,
+						initialImportComplete: state.cursor !== null,
+					}
+				: null,
+		};
 	});
 }
 

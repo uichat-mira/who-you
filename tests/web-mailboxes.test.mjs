@@ -302,6 +302,7 @@ const EXPECTED_KEYS = [
 	"kind",
 	"mailboxId",
 	"provider",
+	"sync",
 ];
 
 test("a signed-in account receives only its own mailboxes with minimal fields", async () => {
@@ -326,6 +327,7 @@ test("a signed-in account receives only its own mailboxes with minimal fields", 
 				provider: "gmail",
 				credentialStatus: "active",
 				availability: "configured",
+				sync: null,
 			},
 			{
 				mailboxId: "mbx_ms",
@@ -334,6 +336,7 @@ test("a signed-in account receives only its own mailboxes with minimal fields", 
 				provider: "microsoft",
 				credentialStatus: "reauth_required",
 				availability: "reauth_required",
+				sync: null,
 			},
 			{
 				mailboxId: "mbx_own",
@@ -342,6 +345,7 @@ test("a signed-in account receives only its own mailboxes with minimal fields", 
 				provider: null,
 				credentialStatus: null,
 				availability: "configured",
+				sync: null,
 			},
 		]);
 		for (const entry of body.mailboxes) assert.deepEqual(Object.keys(entry).sort(), EXPECTED_KEYS);
@@ -535,6 +539,9 @@ test("the mailbox page renders the signed-in account's real list with explicit s
 			"form-action 'self' https://accounts.google.com/o/oauth2/v2/auth");
 		assert.match(body, /action="\/account\/mailboxes\/gmail\/link"/);
 		assert.match(body, /action="\/account\/mailboxes\/unlink"/);
+		assert.match(body, /action="\/account\/mailboxes\/sync"/);
+		assert.match(body, /同步一次/);
+		assert.match(body, /尚未同步/);
 		assert.match(body, /更新 Gmail 授权/);
 		assert.match(body, /解绑 Gmail/);
 		assert.match(body, /Gmail<\/strong> <span class="pill ok">可接入<\/span>/);
@@ -858,7 +865,11 @@ test("Web Gmail mutations fail closed on CSRF/auth and provider denial", async (
 			{ method: "POST", headers: { cookie, origin: "https://evil.invalid" } },
 		);
 		assert.equal(wrongOrigin.status, 403);
-		for (const path of ["/account/mailboxes/gmail/link", "/account/mailboxes/unlink"]) {
+		for (const path of [
+			"/account/mailboxes/gmail/link",
+			"/account/mailboxes/unlink",
+			"/account/mailboxes/sync",
+		]) {
 			for (const origin of [undefined, "null", "https://evil.invalid"]) {
 				const rejected = await mf.dispatchFetch(ORIGIN + path, {
 					method: "POST", headers: origin === undefined ? { cookie } : { cookie, origin },
@@ -885,6 +896,24 @@ test("Web Gmail mutations fail closed on CSRF/auth and provider denial", async (
 		assert.equal(anonymous.status, 303);
 		assert.equal(
 			anonymous.headers.get("location"),
+			"/?reason=sign_in_required&returnTo=%2Faccount%2Fmailboxes",
+		);
+
+		const anonymousSync = await mf.dispatchFetch(
+			ORIGIN + "/account/mailboxes/sync",
+			{
+				method: "POST",
+				redirect: "manual",
+				headers: {
+					origin: ORIGIN,
+					"content-type": "application/x-www-form-urlencoded",
+				},
+				body: new URLSearchParams({ mailboxId: "mbx_gmail" }).toString(),
+			},
+		);
+		assert.equal(anonymousSync.status, 303);
+		assert.equal(
+			anonymousSync.headers.get("location"),
 			"/?reason=sign_in_required&returnTo=%2Faccount%2Fmailboxes",
 		);
 

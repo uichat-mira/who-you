@@ -27,7 +27,7 @@ import type { MailboxRecord, MailRepository } from "./store";
 export const GMAIL_BACKFILL_MAX_MESSAGES = 500;
 export const GMAIL_SYNC_MAX_MESSAGES_PER_RUN = 20;
 
-export type GmailSyncFailureCode = OAuthSyncFailureCode;
+export type GmailSyncFailureCode = OAuthSyncFailureCode | "sync_in_progress";
 
 export type GmailSyncDependencies = {
 	repository: MailRepository;
@@ -94,6 +94,41 @@ export async function syncGmailMailbox(
 	deps: GmailSyncDependencies,
 	mailbox: MailboxRecord,
 ): Promise<GmailSyncOutcome> {
+	// One bounded batch per identity. The lease makes a second manual click, a
+	// cron tick and a retry mutually exclusive; a busy caller imports nothing.
+	const leaseId = `lease_${crypto.randomUUID()}`;
+	const acquired = await deps.syncStates.acquireLease({
+		mailboxId: mailbox.id,
+		provider: "gmail",
+		leaseId,
+		now: deps.now,
+	});
+	if (!acquired) return { ok: false, code: "sync_in_progress" };
+
+	try {
+		const outcome = await runGmailSyncBatch(deps, mailbox);
+		// Unlink may run while a provider batch is in flight. Only a live
+		// mailbox may keep its rows/objects; otherwise this batch cleans up
+		// after itself instead of resurrecting a deleted identity's mail.
+		const stillLinked = await deps.repository.findMailboxById(mailbox.accountId, mailbox.id);
+		if (!stillLinked) {
+			const keys = await deps.repository.listMailboxObjectKeys(mailbox.id).catch(() => []);
+			await deps.repository.deleteObjects(keys).catch(() => undefined);
+			await deps.repository.deleteMailboxScoped(mailbox.id).catch(() => undefined);
+			return { ok: false, code: "sync_failed" };
+		}
+		return outcome;
+	} finally {
+		// Releasing after the batch (not before) keeps the guard honest even when
+		// the provider call throws mid-import. A failed release cannot undo writes.
+		await deps.syncStates.releaseLease(mailbox.id, leaseId, Date.now()).catch(() => undefined);
+	}
+}
+
+async function runGmailSyncBatch(
+	deps: GmailSyncDependencies,
+	mailbox: MailboxRecord,
+): Promise<GmailSyncOutcome> {
 	const access = await resolveOAuthAccessToken(deps, mailbox, "gmail", (input) =>
 		deps.oauth.refresh(input),
 	);
@@ -110,6 +145,8 @@ export async function syncGmailMailbox(
 		backfillHistoryId: null,
 		lastSyncedAt: null,
 		lastError: null,
+		leaseId: null,
+		leaseExpiresAt: null,
 	};
 
 	const counters: OAuthSyncCounters = { imported: 0, duplicates: 0, skipped: 0 };
@@ -155,7 +192,10 @@ export async function syncGmailMailbox(
 				maxResults: GMAIL_SYNC_MAX_MESSAGES_PER_RUN,
 				pageToken: page.pageToken ?? undefined,
 			});
-			for (const id of listing.ids) {
+			// The listing request is capped, and the slice keeps the run bounded even
+			// if a provider ignored maxResults. A single action never imports more
+			// than GMAIL_SYNC_MAX_MESSAGES_PER_RUN messages.
+			for (const id of listing.ids.slice(0, GMAIL_SYNC_MAX_MESSAGES_PER_RUN)) {
 				if (page.seen >= GMAIL_BACKFILL_MAX_MESSAGES) break;
 				const advanced = await importMessage(id);
 				if (advanced) page.seen += 1;

@@ -199,6 +199,8 @@ export async function completeOAuthLink(
 		backfillHistoryId: identity.backfillHistoryId,
 		lastSyncedAt: null,
 		lastError: null,
+		leaseId: null,
+		leaseExpiresAt: null,
 		now: deps.now,
 	});
 

@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/server";
 import type { MailServices } from "../mail/config";
 import { startGmailLink } from "../mail/gmail-link";
+import { syncGmailMailbox, GMAIL_SYNC_MAX_MESSAGES_PER_RUN, type GmailSyncFailureCode } from "../mail/gmail-sync";
 import type { WhoYouIdentityConfirmationVerifier } from "../mail/identity-confirmation";
 import { IdentityConfirmationError } from "../mail/identity-confirmation";
 import {
@@ -17,6 +18,7 @@ import { failure, requireWriteScope, success, type ToolResult } from "./mail";
 export const MAILBOX_LIST_TOOL = "whoyou_mailbox_list";
 export const MAILBOX_LINK_TOOL = "whoyou_mailbox_link";
 export const MAILBOX_UNLINK_TOOL = "whoyou_mailbox_unlink";
+export const MAILBOX_SYNC_TOOL = "whoyou_mailbox_sync";
 
 const READ_ONLY = {
 	readOnlyHint: true,
@@ -28,6 +30,14 @@ const READ_ONLY = {
 const REVERSIBLE_WRITE = {
 	readOnlyHint: false,
 	destructiveHint: false,
+	idempotentHint: false,
+	openWorldHint: true,
+} as const;
+
+const SYNC_WRITE = {
+	readOnlyHint: false,
+	destructiveHint: false,
+	// A second batch advances the cursor even when it imports nothing new.
 	idempotentHint: false,
 	openWorldHint: true,
 } as const;
@@ -57,13 +67,41 @@ const IMAP_LINK_MESSAGES: Record<ImapLinkFailureCode, string> = {
 
 const imapLinkMessage = (code: ImapLinkFailureCode): string => IMAP_LINK_MESSAGES[code];
 
-const identityJson = (mailbox: MailboxRecord, credentialStatus: string | null): Record<string, unknown> => ({
+const SYNC_FAILURE_MESSAGES: Record<GmailSyncFailureCode, string> = {
+	provider_credentials_not_configured:
+		"Gmail sync is not configured on this deployment; no batch was started.",
+	provider_reauth_required:
+		"The Gmail authorization is no longer valid; reauthorize the mailbox before syncing again.",
+	provider_unreachable:
+		"The Gmail provider could not be reached; no batch was marked successful.",
+	provider_tls_required:
+		"The provider transport did not meet the TLS requirement; no batch was started.",
+	provider_auth_failed:
+		"The provider rejected the stored credential; no batch was marked successful.",
+	credential_unavailable:
+		"The stored Gmail credential cannot be decrypted; the mailbox must be authorized again.",
+	sync_in_progress:
+		"Another sync batch is already running for this mailbox; this request imported nothing.",
+	sync_failed: "The sync batch failed; nothing was marked successful.",
+};
+
+const identityJson = (
+	mailbox: MailboxRecord,
+	credentialStatus: string | null,
+	sync: {
+		lastSyncedAt: number | null;
+		lastError: string | null;
+		inProgress: boolean;
+		initialImportComplete: boolean;
+	} | null,
+): Record<string, unknown> => ({
 	mailboxId: mailbox.id,
 	address: mailbox.address,
 	kind: mailbox.kind,
 	provider: mailbox.provider,
 	status: mailbox.status,
 	credentialStatus,
+	sync,
 	quotaBytes: mailbox.quotaBytes,
 	bytesUsed: mailbox.bytesUsed,
 	messageCount: mailbox.messageCount,
@@ -121,9 +159,16 @@ export function registerIdentityTools(
 			annotations: READ_ONLY,
 		},
 		async () => {
-			const identities = await listIdentities(services.repository, services.credentials, accountId);
+			const identities = await listIdentities(
+				services.repository,
+				services.credentials,
+				services.syncStates,
+				accountId,
+			);
 			const structured = {
-				identities: identities.map((entry) => identityJson(entry.mailbox, entry.credentialStatus)),
+				identities: identities.map((entry) =>
+					identityJson(entry.mailbox, entry.credentialStatus, entry.sync),
+				),
 			};
 			const markdown = identities.length
 				? identities
@@ -415,6 +460,94 @@ export function registerIdentityTools(
 				mailboxId: args.mailboxId,
 				alreadyUnlinked: result.alreadyUnlinked,
 			});
+		},
+	);
+
+	// OPS-044: explicit, single-batch Gmail sync. It is a state write, so it
+	// requires whoyou.mail.write; it is not an identity mutation, so the link/
+	// unlink confirmation credential contract does not apply. The mailbox is
+	// resolved from the bearer account, never from a caller-supplied account.
+	server.registerTool(
+		MAILBOX_SYNC_TOOL,
+		{
+			title: "Who You sync one Gmail identity",
+			description:
+				"Runs exactly one bounded Gmail sync batch (at most 20 messages) for one linked mailbox owned by the caller. Reuses the stored OAuth credential, cursor, dedupe and error codes. A concurrent batch for the same mailbox fails with sync_in_progress and imports nothing. Requires whoyou.mail.write; no confirmation credential is needed because no identity or credential is changed.",
+			inputSchema: z.object({
+				mailboxId: z.string().trim().min(1).max(80),
+			}),
+			annotations: SYNC_WRITE,
+		},
+		async (args) => {
+			const denied = requireWriteScope(principal);
+			if (denied) return denied;
+			const { credentialKeys, oauth, gmail } = services;
+			if (!credentialKeys || !oauth || !gmail) {
+				return failure(
+					"provider_not_configured",
+					SYNC_FAILURE_MESSAGES.provider_credentials_not_configured,
+				);
+			}
+
+			const mailbox = await services.repository.findMailboxById(accountId, args.mailboxId);
+			if (!mailbox) {
+				return failure(
+					"mailbox_not_found",
+					"No such identity exists for this account; nothing was synced.",
+				);
+			}
+			if (mailbox.kind !== "third_party" || mailbox.provider !== "gmail") {
+				return failure(
+					"mailbox_not_gmail",
+					"Manual sync is only available for a linked Gmail identity.",
+				);
+			}
+			if (mailbox.status !== "active") {
+				return failure(
+					"mailbox_disabled",
+					"This identity is disabled; no sync batch was started.",
+				);
+			}
+
+			const ownNow = Date.now();
+			const outcome = await syncGmailMailbox(
+				{
+					repository: services.repository,
+					limits: services.limits,
+					credentials: services.credentials,
+					keys: credentialKeys,
+					oauth,
+					gmail,
+					syncStates: services.syncStates,
+					now: ownNow,
+				},
+				mailbox,
+			);
+			if (!outcome.ok) {
+				return failure(outcome.code, SYNC_FAILURE_MESSAGES[outcome.code]);
+			}
+
+			const state = await services.syncStates.get(mailbox.id);
+			return success(
+				[
+					"# Who You · Gmail sync batch",
+					`- mailbox: \`${mailbox.id}\``,
+					`- mode: ${outcome.mode}`,
+					`- imported: ${outcome.imported}`,
+					`- duplicates: ${outcome.duplicates}`,
+					`- skipped: ${outcome.skipped}`,
+					`- batch ceiling: ${GMAIL_SYNC_MAX_MESSAGES_PER_RUN} messages`,
+				].join("\n"),
+				{
+					mailboxId: mailbox.id,
+					mode: outcome.mode,
+					imported: outcome.imported,
+					duplicates: outcome.duplicates,
+					skipped: outcome.skipped,
+					lastSyncedAt: state?.lastSyncedAt ?? ownNow,
+					initialImportComplete: state?.cursor != null,
+				},
+			);
 		},
 	);
 }
