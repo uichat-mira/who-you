@@ -45,6 +45,7 @@ const MAIL_TOOL_NAMES = [
 	"whoyou_mailbox_list",
 	"whoyou_mailbox_link",
 	"whoyou_mailbox_unlink",
+	"whoyou_mailbox_sync",
 	"whoyou_mail_export",
 	"whoyou_mail_message_delete",
 	"whoyou_mail_mailbox_delete",
