@@ -530,6 +530,9 @@ test("the mailbox page renders the signed-in account's real list with explicit s
 		assert.doesNotMatch(body, /account-e2e|account-other/);
 		assert.doesNotMatch(body, /example\.com|demo@|placeholder@/i);
 		assert.equal(response.headers.get("referrer-policy"), "same-origin");
+		assert.equal(response.headers.get("content-security-policy")?.split("; ")
+			.find((directive) => directive.startsWith("form-action ")),
+			"form-action 'self' https://accounts.google.com/o/oauth2/v2/auth");
 		assert.match(body, /action="\/account\/mailboxes\/gmail\/link"/);
 		assert.match(body, /action="\/account\/mailboxes\/unlink"/);
 		assert.match(body, /更新 Gmail 授权/);
