@@ -74,12 +74,15 @@ test("real workerd: Web OAuth callback -> server-side credential -> verified who
       redirect: "manual", headers: {cookie: cookies(initial)},
     });
     assert.equal(callback.status, 303, await callback.text());
+    assert.equal(callback.headers.get("referrer-policy"), "no-referrer");
     assert.equal(callback.headers.get("location"), "/account/mailboxes");
     const page = await mf.dispatchFetch(ORIGIN + "/account", {
       redirect: "manual", headers: {cookie: cookies(callback)},
     });
     const body = await page.text();
     assert.equal(page.status, 200, body);
+    assert.equal(page.headers.get("referrer-policy"), "same-origin");
+    assert.match(body, /action="\/auth\/logout"/);
     assert.match(body, /<h1>账户<\/h1>/);
     assert.match(body, /Mira 云账号/);
     assert.match(body, /account-e2e/);
