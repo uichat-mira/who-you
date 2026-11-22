@@ -146,6 +146,8 @@ export async function syncImapMailbox(
 		backfillHistoryId: null,
 		lastSyncedAt: null,
 		lastError: null,
+		leaseId: null,
+		leaseExpiresAt: null,
 	};
 
 	let connection: MailConnection;

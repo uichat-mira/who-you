@@ -212,6 +212,8 @@ export async function linkImapIdentity(
 		backfillHistoryId: null,
 		lastSyncedAt: null,
 		lastError: null,
+		leaseId: null,
+		leaseExpiresAt: null,
 		now: deps.now,
 	});
 
