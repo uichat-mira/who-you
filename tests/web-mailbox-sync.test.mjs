@@ -197,6 +197,7 @@ const createOutbound = (trace = {}) => async (request) => {
 
 	if ((url.origin + url.pathname).startsWith(GMAIL_MESSAGES_URL + "/")) {
 		const id = decodeURIComponent(url.pathname.slice(GMAIL_MESSAGES_PATH.length + 1));
+		if (trace.failMessageId === id) return Response.json({ error: { code: 503 } }, { status: 503 });
 		const message = (trace.gmailMessages ?? []).find((entry) => entry.id === id);
 		if (!message) return Response.json({ error: { code: 404 } }, { status: 404 });
 		assert.equal(url.searchParams.get("format"), "raw");
@@ -399,6 +400,8 @@ test("manual Gmail sync is bounded, account-scoped, deduped and readable through
 			.bind(mailboxId)
 			.first();
 		assert.equal(afterThird.total, 25);
+		const remainingHistory = await sync(mf, ownerCookie, mailboxId);
+		assert.match(remainingHistory.headers.get("location"), /imported=0&duplicates=5&skipped=0/);
 
 		// 4) The existing read-only MCP surface reaches the synced third-party mail.
 		const client = await mcpClient(mf, await accessCredential("account-sync-owner"));
@@ -520,6 +523,26 @@ test("a provider that over-returns still cannot exceed the 20-message batch ceil
 			.bind(mailboxId)
 			.first();
 		assert.equal(count.total, 20, "the local batch ceiling wins over the provider listing");
+
+		const second = await sync(mf, ownerCookie, mailboxId);
+		assert.match(second.headers.get("location"), /imported=5&duplicates=0&skipped=0/);
+		const total = () => db.prepare("SELECT COUNT(*) AS total FROM messages WHERE mailbox_id = ?").bind(mailboxId).first().then((row) => row.total);
+		assert.equal(await total(), 25, "over-returned backfill IDs are not lost");
+
+		trace.gmailMessages = Array.from({ length: 25 }, (_, index) => gmailMessage(index + 25));
+		const third = await sync(mf, ownerCookie, mailboxId);
+		assert.match(third.headers.get("location"), /imported=20&duplicates=0&skipped=0/);
+		assert.equal(await total(), 45);
+		const beforeFailure = await db.prepare("SELECT cursor, last_synced_at FROM mailbox_sync_state WHERE mailbox_id = ?").bind(mailboxId).first();
+		assert.equal(JSON.parse(beforeFailure.cursor).pendingIds.length, 5);
+		trace.failMessageId = trace.gmailMessages[20].id;
+		const failed = await sync(mf, ownerCookie, mailboxId);
+		assert.equal(failed.headers.get("location"), "/account/mailboxes?notice=gmail_sync_failed");
+		assert.deepEqual(await db.prepare("SELECT cursor, last_synced_at FROM mailbox_sync_state WHERE mailbox_id = ?").bind(mailboxId).first(), beforeFailure);
+		trace.failMessageId = null;
+		const retried = await sync(mf, ownerCookie, mailboxId);
+		assert.match(retried.headers.get("location"), /imported=5&duplicates=0&skipped=0/);
+		assert.equal(await total(), 50, "history page has no dropped IDs");
 	} finally {
 		await mf.dispose();
 	}

@@ -50,37 +50,54 @@ export type GmailSyncOutcome =
 	  }
 	| { ok: false; code: GmailSyncFailureCode };
 
-type HistoryCursor = { startHistoryId: string; pageToken: string | null };
+type HistoryCursor = {
+	startHistoryId: string;
+	pageToken: string | null;
+	pendingIds?: string[];
+	nextHistoryId?: string | null;
+};
+
+// Preserve IDs from a provider page without advancing past unprocessed mail.
+const parsePendingIds = (value: unknown): string[] => {
+	if (value === undefined) return [];
+	if (!Array.isArray(value) || !value.every((id) => typeof id === "string" && id.length > 0)) {
+		throw new Error("invalid_pending_ids");
+	}
+	return value as string[];
+};
 
 const parseHistoryCursor = (value: string): HistoryCursor | null => {
 	try {
-		const parsed = JSON.parse(value) as { startHistoryId?: unknown; pageToken?: unknown };
+		const parsed = JSON.parse(value) as { startHistoryId?: unknown; pageToken?: unknown; pendingIds?: unknown; nextHistoryId?: unknown };
 		if (typeof parsed.startHistoryId !== "string" || !parsed.startHistoryId) return null;
 		if (parsed.pageToken !== null && typeof parsed.pageToken !== "string") return null;
 		return {
 			startHistoryId: parsed.startHistoryId,
 			pageToken: (parsed.pageToken as string | null) ?? null,
+			pendingIds: parsePendingIds(parsed.pendingIds),
+			nextHistoryId: typeof parsed.nextHistoryId === "string" ? parsed.nextHistoryId : null,
 		};
 	} catch {
 		return null;
 	}
 };
 
-const parseBackfillPage = (value: string | null): { pageToken: string | null; seen: number } => {
-	if (!value) return { pageToken: null, seen: 0 };
+const parseBackfillPage = (value: string | null): { pageToken: string | null; seen: number; pendingIds: string[] } => {
+	if (!value) return { pageToken: null, seen: 0, pendingIds: [] };
 	try {
-		const parsed = JSON.parse(value) as { pageToken?: unknown; seen?: unknown };
+		const parsed = JSON.parse(value) as { pageToken?: unknown; seen?: unknown; pendingIds?: unknown };
 		return {
 			pageToken: typeof parsed.pageToken === "string" ? parsed.pageToken : null,
 			seen: typeof parsed.seen === "number" && Number.isFinite(parsed.seen) ? parsed.seen : 0,
+			pendingIds: parsePendingIds(parsed.pendingIds),
 		};
 	} catch {
-		return { pageToken: null, seen: 0 };
+		return { pageToken: null, seen: 0, pendingIds: [] };
 	}
 };
 
-const encodeBackfillPage = (pageToken: string | null, seen: number): string =>
-	JSON.stringify({ pageToken, seen });
+const encodeBackfillPage = (pageToken: string | null, seen: number, pendingIds: string[]): string =>
+	JSON.stringify({ pageToken, seen, pendingIds });
 
 const classifyGmailFailure = (error: unknown): OAuthSyncDisposition => {
 	if (error instanceof GmailApiError) {
@@ -156,7 +173,10 @@ async function runGmailSyncBatch(
 			const message = await deps.gmail.getMessage(accessToken, id);
 			return { raw: message.raw, receivedAt: message.internalDate };
 		},
-		(error) => error instanceof GmailApiError && error.code === "unauthorized",
+		// Only a missing message is a permanent fetch skip. Transient provider or
+		// storage errors abort this batch so its cursor remains retryable.
+		(error) => !(error instanceof GmailApiError && error.status === 404),
+		true,
 	);
 
 	try {
@@ -185,21 +205,20 @@ async function runGmailSyncBatch(
 				return { ok: true, ...counters, mode: "idle" };
 			}
 
-			const listing = await deps.gmail.listMessages(accessToken, {
-				query: "newer_than:30d -in:sent",
-				maxResults: GMAIL_SYNC_MAX_MESSAGES_PER_RUN,
-				pageToken: page.pageToken ?? undefined,
-			});
-			// The listing request is capped, and the slice keeps the run bounded even
-			// if a provider ignored maxResults. A single action never imports more
-			// than GMAIL_SYNC_MAX_MESSAGES_PER_RUN messages.
-			for (const id of listing.ids.slice(0, GMAIL_SYNC_MAX_MESSAGES_PER_RUN)) {
-				if (page.seen >= GMAIL_BACKFILL_MAX_MESSAGES) break;
-				const advanced = await importMessage(id);
-				if (advanced) page.seen += 1;
+			const listing = page.pendingIds.length
+				? { ids: page.pendingIds, nextPageToken: page.pageToken }
+				: await deps.gmail.listMessages(accessToken, {
+					query: "newer_than:30d -in:sent",
+					maxResults: GMAIL_SYNC_MAX_MESSAGES_PER_RUN,
+					pageToken: page.pageToken ?? undefined,
+				});
+			const count = Math.min(GMAIL_SYNC_MAX_MESSAGES_PER_RUN, GMAIL_BACKFILL_MAX_MESSAGES - page.seen, listing.ids.length);
+			for (const id of listing.ids.slice(0, count)) {
+				await importMessage(id);
+				page.seen += 1;
 			}
-
-			const finished = !listing.nextPageToken || page.seen >= GMAIL_BACKFILL_MAX_MESSAGES;
+			const pendingIds = listing.ids.slice(count);
+			const finished = (!pendingIds.length && !listing.nextPageToken) || page.seen >= GMAIL_BACKFILL_MAX_MESSAGES;
 			if (finished) {
 				state = {
 					...state,
@@ -214,7 +233,7 @@ async function runGmailSyncBatch(
 			} else {
 				state = {
 					...state,
-					backfillPage: encodeBackfillPage(listing.nextPageToken, page.seen),
+					backfillPage: encodeBackfillPage(listing.nextPageToken, page.seen, pendingIds),
 				};
 			}
 			state = { ...state, lastSyncedAt: deps.now, lastError: null };
@@ -239,7 +258,9 @@ async function runGmailSyncBatch(
 
 		let history;
 		try {
-			history = await deps.gmail.listHistory(accessToken, {
+			history = cursor.pendingIds?.length
+				? { messageIds: cursor.pendingIds, nextPageToken: cursor.pageToken, historyId: cursor.nextHistoryId ?? null }
+				: await deps.gmail.listHistory(accessToken, {
 				startHistoryId: cursor.startHistoryId,
 				maxResults: GMAIL_SYNC_MAX_MESSAGES_PER_RUN,
 				pageToken: cursor.pageToken ?? undefined,
@@ -267,9 +288,12 @@ async function runGmailSyncBatch(
 			await importMessage(id);
 		}
 
-		const nextCursor: HistoryCursor = history.nextPageToken
-			? { startHistoryId: cursor.startHistoryId, pageToken: history.nextPageToken }
-			: { startHistoryId: history.historyId ?? cursor.startHistoryId, pageToken: null };
+		const pendingIds = history.messageIds.slice(GMAIL_SYNC_MAX_MESSAGES_PER_RUN);
+		const nextCursor: HistoryCursor = pendingIds.length
+			? { startHistoryId: cursor.startHistoryId, pageToken: history.nextPageToken, pendingIds, nextHistoryId: history.historyId }
+			: history.nextPageToken
+				? { startHistoryId: cursor.startHistoryId, pageToken: history.nextPageToken }
+				: { startHistoryId: history.historyId ?? cursor.startHistoryId, pageToken: null };
 		state = {
 			...state,
 			cursor: JSON.stringify(nextCursor),

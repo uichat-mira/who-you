@@ -98,22 +98,23 @@ export type FetchedOAuthMessage = { raw: Uint8Array; receivedAt: number | null }
 
 /**
  * Builds the per-message importer. `true` means the entry consumed a backfill
- * slot; a fetch error other than authorization is skipped without consuming
- * one, so a single bad message cannot stall the cursor forever.
+ * slot; the caller chooses which fetch failures must abort and may opt into
+ * retrying storage failures. Permanent skips are counted explicitly.
  */
 export function createOAuthMailImporter<T>(
 	deps: OAuthSyncBaseDependencies,
 	mailbox: MailboxRecord,
 	counters: OAuthSyncCounters,
 	fetchMessage: (entry: T) => Promise<FetchedOAuthMessage>,
-	isUnauthorized: (error: unknown) => boolean,
+	shouldAbort: (error: unknown) => boolean,
+	failOnStorageError = false,
 ): (entry: T) => Promise<boolean> {
 	return async (entry) => {
 		let message: FetchedOAuthMessage;
 		try {
 			message = await fetchMessage(entry);
 		} catch (error) {
-			if (isUnauthorized(error)) throw error;
+			if (shouldAbort(error)) throw error;
 			counters.skipped += 1;
 			return false;
 		}
@@ -135,6 +136,7 @@ export function createOAuthMailImporter<T>(
 			direction,
 		});
 		if (!result.ok) {
+			if (failOnStorageError && result.reason === "storage_write_failed") throw new Error("storage_write_failed");
 			counters.skipped += 1;
 			return true;
 		}
