@@ -76,6 +76,31 @@ export type OAuthSyncSweepOutcome =
 	| { ok: false; code: OAuthSyncFailureCode };
 
 /**
+ * Safe operational telemetry. The projector never receives an account or
+ * mailbox object, so scheduled sync cannot accidentally log user identities.
+ */
+export function projectOAuthSyncMetric(
+	provider: MailboxProvider,
+	outcome: OAuthSyncSweepOutcome | null,
+): {
+	event: "whoyou_mail_sync";
+	provider: MailboxProvider;
+	outcome: "synced" | "failed";
+	message_count: number;
+	reason_code?: OAuthSyncFailureCode | "sync_failed";
+} {
+	return outcome?.ok
+		? { event: "whoyou_mail_sync", provider, outcome: "synced", message_count: outcome.imported }
+		: {
+				event: "whoyou_mail_sync",
+				provider,
+				outcome: "failed",
+				message_count: 0,
+				reason_code: outcome?.ok === false ? outcome.code : "sync_failed",
+			};
+}
+
+/**
  * Cron sweep: at most 20 identities per tick, each bounded by the provider
  * module. A failed identity records a reason code and is retried next tick.
  * Logs only whitelisted fields, never an address or message content.
@@ -111,29 +136,10 @@ export async function runOAuthSyncSweep(
 			} else {
 				summary.failed += 1;
 			}
-			console.log(
-				JSON.stringify({
-					event: "whoyou_mail_sync",
-					outcome: outcome.ok ? "synced" : "failed",
-					provider: config.provider,
-					accountId: mailbox.accountId,
-					mailboxId: mailbox.id,
-					message_count: outcome.ok ? outcome.imported : 0,
-					reason_code: outcome.ok ? undefined : outcome.code,
-				}),
-			);
+			console.log(JSON.stringify(projectOAuthSyncMetric(config.provider, outcome)));
 		} catch {
 			summary.failed += 1;
-			console.log(
-				JSON.stringify({
-					event: "whoyou_mail_sync",
-					outcome: "failed",
-					provider: config.provider,
-					accountId: mailbox.accountId,
-					mailboxId: mailbox.id,
-					reason_code: "sync_failed",
-				}),
-			);
+			console.log(JSON.stringify(projectOAuthSyncMetric(config.provider, null)));
 		}
 	}
 	return summary;

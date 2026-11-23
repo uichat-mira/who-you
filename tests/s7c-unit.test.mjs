@@ -15,7 +15,27 @@ import {
 	hasRequiredGmailScope,
 	encodeRawMessage,
 	resolveGmailOAuthConfig,
+	projectOAuthSyncMetric,
 } from "../dist/unit.mjs";
+
+test("Gmail sync telemetry excludes account and mailbox identities in every outcome", () => {
+	const succeeded = projectOAuthSyncMetric("gmail", { ok: true, imported: 3 });
+	const rejected = projectOAuthSyncMetric("gmail", { ok: false, code: "sync_failed" });
+	const unexpected = projectOAuthSyncMetric("gmail", null);
+	assert.deepEqual(succeeded, {
+		event: "whoyou_mail_sync", provider: "gmail", outcome: "synced", message_count: 3,
+	});
+	assert.deepEqual(rejected, {
+		event: "whoyou_mail_sync", provider: "gmail", outcome: "failed",
+		message_count: 0, reason_code: "sync_failed",
+	});
+	assert.deepEqual(unexpected, rejected);
+	for (const item of [succeeded, rejected, unexpected]) {
+		assert.deepEqual(Object.keys(item).sort(),
+			Object.keys(item.outcome === "synced" ? succeeded : rejected).sort());
+		assert.doesNotMatch(JSON.stringify(item), /accountId|mailboxId|address|subject|token/i);
+	}
+});
 
 const config = {
 	clientId: "client-id",
