@@ -539,8 +539,8 @@ test("the mailbox page renders the signed-in account's real list with explicit s
 			"form-action 'self' https://accounts.google.com/o/oauth2/v2/auth");
 		assert.match(body, /action="\/account\/mailboxes\/gmail\/link"/);
 		assert.match(body, /action="\/account\/mailboxes\/unlink"/);
-		assert.match(body, /action="\/account\/mailboxes\/sync"/);
-		assert.match(body, /同步一次/);
+		assert.doesNotMatch(body, /action="\/account\/mailboxes\/sync"/);
+		assert.doesNotMatch(body, /同步一次/);
 		assert.match(body, /尚未同步/);
 		assert.match(body, /更新 Gmail 授权/);
 		assert.match(body, /解绑 Gmail/);
