@@ -1052,6 +1052,11 @@ test("the five-minute tick auto-syncs Gmail only, stays bounded and stays readab
 			assert.equal(revokedCoverage.lastError, "provider_reauth_required");
 			assert.match(revokedSearch.content[0].text, /last error: provider_reauth_required/);
 
+			const syncMetrics = trace.logs.filter((line) => line.includes('"event":"whoyou_mail_sync"'));
+			assert.ok(syncMetrics.length > 0);
+			for (const metric of syncMetrics) {
+				assert.doesNotMatch(metric, /accountId|mailboxId|account-sync-owner|mbx_ms_scheduled/);
+			}
 			const logs = trace.logs.join("\n");
 			assert.doesNotMatch(logs, /linked@gmail\.com|linked-outlook@|linked-imap@/);
 			assert.doesNotMatch(logs, /synthetic-access|synthetic-refresh|Batch message|Fixture body/);

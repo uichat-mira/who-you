@@ -7,7 +7,7 @@
 - 定时同步使用 `MAIL_SCHEDULE_SYNC_PROVIDERS` 作为**显式 allowlist**，逗号分隔，大小写不敏感。
 - 该变量为空或缺失时，五分钟 tick **不访问任何邮件提供商**（fail-closed）。仅“存在 Cron”不等于允许自动同步。
 - 可选值只有 `gmail`、`microsoft`、`imap_smtp`。OPS-045 只批准并验证 Gmail；Microsoft / IMAP-SMTP 需要各自的实际证据和授权后才能加入。
-- 仓库默认部署配置 `cloudflare.config.ts` 声明 `MAIL_SCHEDULE_SYNC_PROVIDERS=gmail`，因此该配置所描述的目标环境只运行 Gmail 定时同步。`who-you.tomz.io` 的独立预览 Worker 目前仍是**无 Cron** 的受限环境；在那里启用定时同步属于单独部署任务。
+- 仓库默认部署配置 `cloudflare.config.ts` **不启用任何 provider**，仅有 Cron 不会自动进行真实 Gmail 拉取。需在明确授权的目标部署单独绑定 `MAIL_SCHEDULE_SYNC_PROVIDERS=gmail`。`who-you.tomz.io` 的独立预览 Worker 目前仍是**无 Cron** 的受限环境；在那里启用定时同步属于单独部署任务。
 
 ```text
 MAIL_SCHEDULE_SYNC_PROVIDERS=gmail              # 只自动同步 Gmail
@@ -19,7 +19,7 @@ MAIL_SCHEDULE_SYNC_PROVIDERS=                   # 暂停全部定时同步（推
 ## 2. 有界语义
 
 - 每五分钟一个 tick，只推进**一个**有界批次，不循环扫库。
-- 每个 tick 最多检查 20 个同 provider 的 active 第三方邮箱（`OAUTH_SYNC_SWEEP_LIMIT`）。
+- 每个 tick 最多检查 20 个同 provider 的 active 第三方邮箱（`OAUTH_SYNC_SWEEP_LIMIT`）；按时间槽轮转稳定排序的邮箱，末尾回绕，防止长期失败的前 20 个邮箱使后续账号永久饥饿。
 - 每个邮箱每轮最多导入 20 封（`GMAIL_SYNC_MAX_MESSAGES_PER_RUN`）。
 - 首次回填仍受 30 天窗口与总计 500 封上限约束（`GMAIL_BACKFILL_WINDOW_MS` / `GMAIL_BACKFILL_MAX_MESSAGES`）。
 - 回填分页游标、history 游标、未处理的 pending IDs 和 Message-ID 去重全部沿用 OPS-044 的既有实现；tick 只负责再次调用同一条导入管线。
@@ -39,10 +39,10 @@ MAIL_SCHEDULE_SYNC_PROVIDERS=                   # 暂停全部定时同步（推
 
 只记录非敏感计数与固定错误码：
 
-- `whoyou_mail_sync`：单个身份的 `outcome`（`synced` / `skipped` / `failed`）、provider、不透明 `accountId` / `mailboxId`、导入数量、固定 `reason_code`。
+- `whoyou_mail_sync`：单个身份的 `outcome`（`synced` / `skipped` / `failed`）、provider、导入数量、固定 `reason_code`（不记录账号/邮箱标识）。
 - `whoyou_mail_scheduled_sync`：`checkedAt`、启用的 provider、检查/导入/失败/跳过数量、最晚成功同步时间，以及按 provider 的计数。
 
-日志**不得**包含邮箱地址、OAuth/IMAP 凭据、主题、正文、附件内容或授权 URL。测试与 PR 也不使用真实邮件或凭据。
+日志**不得**包含账号标识、邮箱标识、邮箱地址、OAuth/IMAP 凭据、主题、正文、附件内容或授权 URL。测试与 PR 也不使用真实邮件或凭据。
 
 “跳过”表示本次未执行（例如另一写入方持有 lease），不是成功；失败会保留固定错误码并留待下一 tick 重试。
 
