@@ -872,12 +872,8 @@ function renderMailbox(mailbox: WebMailbox, env: WhoYouEnv): string {
   const isGmail = mailbox.kind === "third_party" && mailbox.provider === "gmail";
   const canLink = gmailWebReady(env);
   const canUnlink = Boolean(resolveCredentialKeys(env));
-  const canSync = isGmail && gmailWebReady(env) && mailbox.availability === "configured";
   const syncState = mailboxSyncState(mailbox);
   const actions = isGmail ? `<div class="mailbox-actions">
-${canSync ? `<form method="post" action="/account/mailboxes/sync">
-<input type="hidden" name="mailboxId" value="${escapeText(mailbox.mailboxId)}">
-<button class="button secondary" type="submit">同步一次</button></form>` : ""}
 ${canLink ? `<form method="post" action="/account/mailboxes/gmail/link">
 <button class="button secondary" type="submit">${mailbox.credentialStatus === "reauth_required" ? "重新授权 Gmail" : "更新 Gmail 授权"}</button></form>` : ""}
 ${canUnlink ? `<form method="post" action="/account/mailboxes/unlink">
@@ -953,7 +949,7 @@ ${gmailReady ? '<form method="post" action="/account/mailboxes/gmail/link"><butt
 </ul>
 </section>
 <p class="footnote">“本地配置就绪”只说明狐邮运行环境已准备好必要依赖，不代表邮箱连接成功或可以收发邮件。
-“同步一次”只运行一个有界批次（最多 20 封），不会触发全量回填或周期调度。</p>`;
+同步状态只反映服务端已有的真实同步记录，不代表自动调度已经启用。</p>`;
 }
 
 /** Isolated browser login/BFF. The existing /mcp bearer gate is unchanged. */

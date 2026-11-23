@@ -360,7 +360,7 @@ test("manual Gmail sync is bounded, account-scoped, deduped and readable through
 		assert.match(partialHtml, /本次 Gmail 同步批次已完成/);
 		assert.match(partialHtml, /本次导入 20 封/);
 		assert.match(partialHtml, /初始同步进行中/);
-		assert.match(partialHtml, /action="\/account\/mailboxes\/sync"/);
+		assert.doesNotMatch(partialHtml, /action="\/account\/mailboxes\/sync"/);
 		assert.doesNotMatch(partialHtml, /synthetic-access|synthetic-refresh/);
 		assert.doesNotMatch(partialHtml, /account-sync-owner/);
 
