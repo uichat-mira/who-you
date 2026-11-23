@@ -43,6 +43,7 @@ export {
 	sealSecret,
 } from "../src/mail/credential-crypto";
 export { resolveCredentialKeys } from "../src/mail/config";
+export { projectOAuthSyncMetric } from "../src/mail/oauth-http";
 export { mailObjectKeys } from "../src/mail/store";
 export {
 	DEFAULT_ABUSE_POLICY,
