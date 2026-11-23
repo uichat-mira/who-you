@@ -74,6 +74,12 @@ export type WhoYouEnv = McpEnv &
 		MICROSOFT_OAUTH_REDIRECT_URI?: string;
 		/** Authority tenant; defaults to `common` (any work or personal account). */
 		MICROSOFT_OAUTH_TENANT?: string;
+		/**
+		 * Comma-separated allowlist for the five-minute scheduled sweep, e.g.
+		 * `gmail`. Empty or absent means every provider is closed (fail-closed);
+		 * Microsoft and IMAP/SMTP must be enabled explicitly and separately.
+		 */
+		MAIL_SCHEDULE_SYNC_PROVIDERS?: string;
 	};
 
 export type MailServices = {

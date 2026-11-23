@@ -158,3 +158,5 @@ export {
 	narrowFolder,
 	resolveJobScope,
 } from "../src/mail/job-scope";
+export { resolveScheduledSyncProviders } from "../src/mail/scheduled-sync";
+export { projectOAuthSyncMetric, scheduledSyncBatchWindow } from "../src/mail/oauth-http";

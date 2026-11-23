@@ -6,12 +6,12 @@ import {
 	handleSignedDownload,
 	MAIL_DOWNLOAD_PATH,
 } from "./mail/download";
-import { handleGmailCallback, GMAIL_SYNC_CRON, runGmailSyncSweep } from "./mail/gmail-http";
+import { handleGmailCallback } from "./mail/gmail-http";
 import { GMAIL_CALLBACK_PATH } from "./mail/gmail-link";
-import { runImapSyncSweep } from "./mail/imap-http";
-import { handleMicrosoftCallback, runMicrosoftSyncSweep } from "./mail/microsoft-http";
+import { handleMicrosoftCallback } from "./mail/microsoft-http";
 import { MICROSOFT_CALLBACK_PATH } from "./mail/microsoft-link";
 import { runRetentionSweep } from "./mail/retention";
+import { MAIL_SYNC_CRON, runScheduledSync } from "./mail/scheduled-sync";
 import { DELIVERY_WEBHOOK_PATH, handleDeliveryWebhook } from "./mail/webhook";
 import { MCP_METADATA_PATH, MCP_RESOURCE_PATH } from "./mcp/config";
 import { createWhoYouRuntime } from "./mcp/runtime";
@@ -70,15 +70,14 @@ export default {
 	},
 
 	/**
-	 * Two schedules share this handler. The five-minute tick only advances
-	 * third-party sync cursors; the daily tick keeps audit expiry and the
-	 * deliverability report on their existing cadence.
+	 * Two schedules share this handler. The five-minute tick only advances the
+	 * third-party sync providers explicitly enabled by
+	 * MAIL_SCHEDULE_SYNC_PROVIDERS (empty means nothing runs); the daily tick
+	 * keeps audit expiry and the deliverability report on their existing cadence.
 	 */
 	async scheduled(controller: ScheduledController, env: WhoYouEnv): Promise<void> {
-		if (controller.cron === GMAIL_SYNC_CRON) {
-			await runGmailSyncSweep(env);
-			await runMicrosoftSyncSweep(env);
-			await runImapSyncSweep(env);
+		if (controller.cron === MAIL_SYNC_CRON) {
+			await runScheduledSync(env);
 			return;
 		}
 		const services = createMailServices(env);
