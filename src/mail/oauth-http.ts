@@ -69,6 +69,10 @@ export type OAuthSyncSweepSummary = {
 	identities: number;
 	imported: number;
 	failed: number;
+	/** Identities that were not attempted because another writer owns them. */
+	skipped: number;
+	/** Latest `lastSyncedAt` actually persisted by this sweep. */
+	lastSyncedAt: number | null;
 };
 
 export type OAuthSyncSweepOutcome =
@@ -77,8 +81,9 @@ export type OAuthSyncSweepOutcome =
 
 /**
  * Cron sweep: at most 20 identities per tick, each bounded by the provider
- * module. A failed identity records a reason code and is retried next tick.
- * Logs only whitelisted fields, never an address or message content.
+ * module. A busy identity (another writer holds its lease) is counted as
+ * skipped; any other failure records a fixed reason code and is retried next
+ * tick. Logs only whitelisted fields, never an address, subject or body.
  */
 export async function runOAuthSyncSweep(
 	env: WhoYouEnv,
@@ -91,7 +96,13 @@ export async function runOAuthSyncSweep(
 	now: number = Date.now(),
 	options: { transport?: MailServices["transport"] } = {},
 ): Promise<OAuthSyncSweepSummary> {
-	const summary: OAuthSyncSweepSummary = { identities: 0, imported: 0, failed: 0 };
+	const summary: OAuthSyncSweepSummary = {
+		identities: 0,
+		imported: 0,
+		failed: 0,
+		skipped: 0,
+		lastSyncedAt: null,
+	};
 	const resolved = createMailServices(env, options);
 	if (!resolved.ok) return summary;
 	const sweep = config.build(resolved.services);
@@ -108,18 +119,45 @@ export async function runOAuthSyncSweep(
 			const outcome = await sweep(mailbox, now);
 			if (outcome.ok) {
 				summary.imported += outcome.imported;
-			} else {
-				summary.failed += 1;
+				// The sweep only reads the committed row to enrich its own summary;
+				// that read cannot turn a successful batch into a reported failure.
+				try {
+					const state = await resolved.services.syncStates.get(mailbox.id);
+					if (
+						state?.lastSyncedAt != null &&
+						(summary.lastSyncedAt === null || state.lastSyncedAt > summary.lastSyncedAt)
+					) {
+						summary.lastSyncedAt = state.lastSyncedAt;
+					}
+				} catch {
+					// The batch has already settled; only the aggregate timestamp is absent.
+				}
+				console.log(
+					JSON.stringify({
+						event: "whoyou_mail_sync",
+						outcome: "synced",
+						provider: config.provider,
+						accountId: mailbox.accountId,
+						mailboxId: mailbox.id,
+						message_count: outcome.imported,
+					}),
+				);
+				continue;
 			}
+			// A lease held by a manual call, another tick or an unlink is not a
+			// provider failure: this tick simply imported nothing for that identity.
+			const busy = outcome.code === "sync_in_progress";
+			if (busy) summary.skipped += 1;
+			else summary.failed += 1;
 			console.log(
 				JSON.stringify({
 					event: "whoyou_mail_sync",
-					outcome: outcome.ok ? "synced" : "failed",
+					outcome: busy ? "skipped" : "failed",
 					provider: config.provider,
 					accountId: mailbox.accountId,
 					mailboxId: mailbox.id,
-					message_count: outcome.ok ? outcome.imported : 0,
-					reason_code: outcome.ok ? undefined : outcome.code,
+					message_count: 0,
+					reason_code: outcome.code,
 				}),
 			);
 		} catch {

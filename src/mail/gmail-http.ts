@@ -12,9 +12,11 @@ import {
  * HTTP and scheduled entry points for Gmail identities (S7c). The shared
  * handler owns the callback contract and the cron sweep; this module only wires
  * the Gmail clients and keeps the public export names.
+ *
+ * The five-minute schedule itself is gated by `scheduled-sync.ts`; this module
+ * never decides on its own whether a deployment may poll Gmail.
  */
 
-export const GMAIL_SYNC_CRON = "*/5 * * * *";
 export const GMAIL_SYNC_SWEEP_LIMIT = OAUTH_SYNC_SWEEP_LIMIT;
 
 export const handleGmailCallback = createOAuthCallbackHandler({

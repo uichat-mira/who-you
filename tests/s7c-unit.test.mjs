@@ -15,6 +15,7 @@ import {
 	hasRequiredGmailScope,
 	encodeRawMessage,
 	resolveGmailOAuthConfig,
+	resolveScheduledSyncProviders,
 } from "../dist/unit.mjs";
 
 const config = {
@@ -256,5 +257,34 @@ test("gmail OAuth config resolves only complete, secure deployments", () => {
 			GMAIL_OAUTH_REDIRECT_URI: "http://localhost:8787/mail/oauth/gmail/callback",
 		})?.redirectUri,
 		"http://localhost:8787/mail/oauth/gmail/callback",
+	);
+});
+
+test("scheduled sync providers are fail-closed and require an exact allowlist", () => {
+	// No binding at all: a Worker that merely has a cron must not poll anyone.
+	assert.deepEqual(resolveScheduledSyncProviders({}), []);
+	assert.deepEqual(resolveScheduledSyncProviders({ MAIL_SCHEDULE_SYNC_PROVIDERS: "" }), []);
+	assert.deepEqual(resolveScheduledSyncProviders({ MAIL_SCHEDULE_SYNC_PROVIDERS: " , " }), []);
+
+	// Unknown names, provider-adjacent guesses and casing never enable a provider.
+	assert.deepEqual(
+		resolveScheduledSyncProviders({ MAIL_SCHEDULE_SYNC_PROVIDERS: "imap,google,outlook" }),
+		[],
+	);
+	assert.deepEqual(
+		resolveScheduledSyncProviders({ MAIL_SCHEDULE_SYNC_PROVIDERS: " Gmail " }),
+		["gmail"],
+	);
+
+	// Enabling Gmail never implicitly enables the unverified providers.
+	assert.deepEqual(
+		resolveScheduledSyncProviders({ MAIL_SCHEDULE_SYNC_PROVIDERS: "gmail" }),
+		["gmail"],
+	);
+	assert.deepEqual(
+		resolveScheduledSyncProviders({
+			MAIL_SCHEDULE_SYNC_PROVIDERS: "gmail,microsoft,imap_smtp,gmail",
+		}),
+		["gmail", "microsoft", "imap_smtp"],
 	);
 });
