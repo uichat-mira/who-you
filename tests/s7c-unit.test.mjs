@@ -15,6 +15,9 @@ import {
 	hasRequiredGmailScope,
 	encodeRawMessage,
 	resolveGmailOAuthConfig,
+	resolveScheduledSyncProviders,
+	projectOAuthSyncMetric,
+	scheduledSyncBatchWindow,
 } from "../dist/unit.mjs";
 
 const config = {
@@ -257,4 +260,70 @@ test("gmail OAuth config resolves only complete, secure deployments", () => {
 		})?.redirectUri,
 		"http://localhost:8787/mail/oauth/gmail/callback",
 	);
+});
+
+test("scheduled sync providers are fail-closed and require an exact allowlist", () => {
+	// No binding at all: a Worker that merely has a cron must not poll anyone.
+	assert.deepEqual(resolveScheduledSyncProviders({}), []);
+	assert.deepEqual(resolveScheduledSyncProviders({ MAIL_SCHEDULE_SYNC_PROVIDERS: "" }), []);
+	assert.deepEqual(resolveScheduledSyncProviders({ MAIL_SCHEDULE_SYNC_PROVIDERS: " , " }), []);
+
+	// Unknown names, provider-adjacent guesses and casing never enable a provider.
+	assert.deepEqual(
+		resolveScheduledSyncProviders({ MAIL_SCHEDULE_SYNC_PROVIDERS: "imap,google,outlook" }),
+		[],
+	);
+	assert.deepEqual(
+		resolveScheduledSyncProviders({ MAIL_SCHEDULE_SYNC_PROVIDERS: " Gmail " }),
+		["gmail"],
+	);
+
+	// Enabling Gmail never implicitly enables the unverified providers.
+	assert.deepEqual(
+		resolveScheduledSyncProviders({ MAIL_SCHEDULE_SYNC_PROVIDERS: "gmail" }),
+		["gmail"],
+	);
+	assert.deepEqual(
+		resolveScheduledSyncProviders({
+			MAIL_SCHEDULE_SYNC_PROVIDERS: "gmail,microsoft,imap_smtp,gmail",
+		}),
+		["gmail", "microsoft", "imap_smtp"],
+	);
+});
+
+test("bounded scheduled sync rotates beyond the first 20 identities", () => {
+	const pick = (now, total) => {
+		const window = scheduledSyncBatchWindow(now, total);
+		const ids = [
+			...Array.from({ length: window.first }, (_, i) => window.offset + i),
+			...Array.from({ length: window.wrap }, (_, i) => i),
+		];
+		assert.ok(ids.length <= 20);
+		assert.equal(new Set(ids).size, ids.length);
+		return ids;
+	};
+	assert.deepEqual(pick(0, 0), []);
+	assert.deepEqual(pick(0, 5), [0, 1, 2, 3, 4]);
+	assert.equal(new Set([...pick(0, 21), ...pick(300_000, 21)]).size, 21);
+	assert.equal(new Set([...pick(0, 40), ...pick(300_000, 40)]).size, 40);
+});
+
+test("OAuth sync metric never exposes account or mailbox identifiers", () => {
+	const ok = projectOAuthSyncMetric("gmail", { ok: true, imported: 4 });
+	const skipped = projectOAuthSyncMetric("gmail", { ok: false, code: "sync_in_progress" });
+	const failed = projectOAuthSyncMetric("gmail", { ok: false, code: "provider_reauth_required" });
+	const unexpected = projectOAuthSyncMetric("gmail", null);
+	assert.deepEqual(ok, { event: "whoyou_mail_sync", provider: "gmail", outcome: "synced", message_count: 4 });
+	assert.deepEqual(skipped, { event: "whoyou_mail_sync", provider: "gmail", outcome: "skipped", message_count: 0, reason_code: "sync_in_progress" });
+	assert.equal(failed.outcome, "failed");
+	assert.equal(unexpected.reason_code, "sync_failed");
+	for (const metric of [ok, skipped, failed, unexpected]) {
+		assert.doesNotMatch(JSON.stringify(metric), /accountId|mailboxId|address|subject|token|email/i);
+	}
+});
+
+test("default deploy config does not opt in to Gmail automatically", async () => {
+	const { readFile } = await import("node:fs/promises");
+	const config = await readFile(new URL("../cloudflare.config.ts", import.meta.url), "utf8");
+	assert.doesNotMatch(config, /MAIL_SCHEDULE_SYNC_PROVIDERS\s*:\s*bindings\.text\s*\(\s*["']gmail["']\s*\)/);
 });

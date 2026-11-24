@@ -517,8 +517,20 @@ export class MailRepository {
 		return row ? toMailbox(row) : null;
 	}
 
-	/** Sync sweep input: active third-party identities of one provider. */
-	async listMailboxesByProvider(provider: MailboxProvider, limit: number): Promise<MailboxRecord[]> {
+	/** Count active third-party identities so the scheduled sweep can rotate its bounded window. */
+	async countMailboxesByProvider(provider: MailboxProvider): Promise<number> {
+		const row = await this.db
+			.prepare(
+				`SELECT COUNT(*) AS total FROM mailboxes
+				 WHERE kind = 'third_party' AND provider = ? AND status = 'active'`,
+			)
+			.bind(provider)
+			.first<{ total: number }>();
+		return row?.total ?? 0;
+	}
+
+	/** Stable offset window for a bounded, rotating provider sweep. */
+	async listMailboxesByProvider(provider: MailboxProvider, limit: number, offset = 0): Promise<MailboxRecord[]> {
 		const { results } = await this.db
 			.prepare(
 				`SELECT id, account_id, address, local_part, kind, provider, status,
@@ -526,9 +538,9 @@ export class MailRepository {
 				 send_paused_at, send_paused_reason, created_at
 				 FROM mailboxes
 				 WHERE kind = 'third_party' AND provider = ? AND status = 'active'
-				 ORDER BY created_at LIMIT ?`,
+				 ORDER BY created_at, id LIMIT ? OFFSET ?`,
 			)
-			.bind(provider, limit)
+			.bind(provider, limit, offset)
 			.all<MailboxRow>();
 		return results.map(toMailbox);
 	}

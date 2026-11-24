@@ -214,7 +214,7 @@ const createOutbound = (trace = {}) => async (request) => {
 	return Response.json({ error: "unexpected_upstream", url: request.url }, { status: 404 });
 };
 
-function createWorker(trace = {}) {
+function createWorker(trace = {}, options = {}) {
 	return new Miniflare({
 		modules: true,
 		scriptPath: "dist/worker.mjs",
@@ -231,10 +231,15 @@ function createWorker(trace = {}) {
 			GMAIL_OAUTH_CLIENT_ID: "synthetic-client",
 			GMAIL_OAUTH_CLIENT_SECRET: "synthetic-secret",
 			GMAIL_OAUTH_REDIRECT_URI: ORIGIN + "/mail/oauth/gmail/callback",
+			...(options.bindings ?? {}),
 		},
 		d1Databases: ["DB"],
 		r2Buckets: ["MAIL_BUCKET"],
 		outboundService: createOutbound(trace),
+		unsafeTriggerHandlers: options.unsafeTriggerHandlers ?? false,
+		...(trace.logs
+			? { handleStructuredLogs: (event) => { trace.logs.push(event.message); } }
+			: {}),
 	});
 }
 
@@ -295,6 +300,39 @@ async function sync(mf, cookie, mailboxId) {
 		},
 		body: new URLSearchParams({ mailboxId }).toString(),
 	});
+}
+
+/**
+ * Dispatches the production five-minute scheduled event. Miniflare only exposes
+ * the handler through this reserved path when `unsafeTriggerHandlers` is set.
+ */
+async function scheduledTick(mf) {
+	return mf.dispatchFetch(
+		"https://127.0.0.1/cdn-cgi/handler/scheduled?" +
+			new URLSearchParams({ cron: "*/5 * * * *", format: "json" }),
+	);
+}
+
+/** A non-Gmail identity must exist without ever being touched by the sweep. */
+async function seedThirdPartyMailbox(db, input) {
+	await db
+		.prepare(
+			`INSERT INTO mailboxes (
+			 id, account_id, address, local_part, kind, provider, status,
+			 quota_bytes, bytes_used, message_count, quarantine_count, created_at, updated_at
+			 ) VALUES (?,?,?,?, 'third_party', ?, 'active', ?, 0, 0, 0, ?, ?)`,
+		)
+		.bind(
+			input.id,
+			input.accountId,
+			input.address,
+			input.localPart,
+			input.provider,
+			input.quotaBytes ?? 1024 * 1024,
+			Date.now(),
+			Date.now(),
+		)
+		.run();
 }
 
 async function mcpClient(mf, token) {
@@ -707,6 +745,323 @@ test("manual sync requires a write credential and refuses read-only callers", as
 			assert.equal(trace.googleRefreshes ?? 0, 0);
 		} finally {
 			await writer.close();
+		}
+	} finally {
+		await mf.dispose();
+	}
+});
+
+async function requestUnlinkFor(mf, cookie, mailboxId) {
+	return mf.dispatchFetch(ORIGIN + "/account/mailboxes/unlink", {
+		method: "POST",
+		redirect: "manual",
+		headers: {
+			cookie,
+			origin: ORIGIN,
+			"content-type": "application/x-www-form-urlencoded",
+		},
+		body: new URLSearchParams({ mailboxId }).toString(),
+	});
+}
+
+const scheduledLogLines = (trace) =>
+	trace.logs.filter((line) => line.includes("whoyou_mail_scheduled_sync"));
+
+test("the scheduled tick is closed by default and never polls an unverified provider", async () => {
+	const trace = {
+		gmailMessages: [gmailMessage(0)],
+		logs: [],
+	};
+	const mf = createWorker(trace, { unsafeTriggerHandlers: true });
+	try {
+		const db = await mf.getD1Database("DB");
+		await db.batch(MIGRATIONS.map((statement) => db.prepare(statement)));
+		const ownerCookie = await login(mf, "code-sync-owner");
+		await linkGmail(mf, ownerCookie);
+		const mailboxId = await mailboxIdOf(db, "account-sync-owner");
+		await seedThirdPartyMailbox(db, {
+			id: "mbx_ms_scheduled",
+			accountId: "account-sync-owner",
+			address: "linked-outlook@example.net",
+			localPart: "linked-outlook",
+			provider: "microsoft",
+		});
+		await seedThirdPartyMailbox(db, {
+			id: "mbx_imap_scheduled",
+			accountId: "account-sync-owner",
+			address: "linked-imap@example.net",
+			localPart: "linked-imap",
+			provider: "imap_smtp",
+		});
+
+		const refreshesBefore = trace.googleRefreshes ?? 0;
+		const listsBefore = trace.gmailListCalls ?? 0;
+		const tick = await scheduledTick(mf);
+		assert.equal(tick.status, 200);
+
+		// No provider was contacted, even though two more identities are linked.
+		assert.equal(trace.googleRefreshes ?? 0, refreshesBefore);
+		assert.equal(trace.gmailListCalls ?? 0, listsBefore);
+		const count = await db
+			.prepare("SELECT COUNT(*) AS total FROM messages WHERE mailbox_id = ?")
+			.bind(mailboxId)
+			.first();
+		assert.equal(count.total, 0);
+		for (const id of [mailboxId, "mbx_ms_scheduled", "mbx_imap_scheduled"]) {
+			const state = await db
+				.prepare(
+					`SELECT last_synced_at, lease_id FROM mailbox_sync_state WHERE mailbox_id = ?`,
+				)
+				.bind(id)
+				.first();
+			if (id === mailboxId) {
+				// Linking creates the row; a closed schedule must not advance it.
+				assert.ok(state, "the linked Gmail row exists");
+				assert.equal(state.last_synced_at, null);
+				assert.equal(state.lease_id, null);
+			} else {
+				assert.equal(state, null, `${id} was not claimed by any sweep`);
+			}
+		}
+
+		const aggregate = JSON.parse(scheduledLogLines(trace).at(-1));
+		assert.deepEqual(aggregate.enabledProviders, []);
+		assert.equal(aggregate.identities, 0);
+		assert.equal(aggregate.imported, 0);
+		assert.equal(aggregate.failed, 0);
+		assert.equal(aggregate.skipped, 0);
+		assert.equal(aggregate.lastSyncedAt, null);
+		const logs = trace.logs.join("\n");
+		assert.doesNotMatch(logs, /linked@gmail\.com|linked-outlook@|linked-imap@/);
+		assert.doesNotMatch(logs, /synthetic-access|synthetic-refresh|Batch message|Fixture body/);
+	} finally {
+		await mf.dispose();
+	}
+});
+
+test("the five-minute tick auto-syncs Gmail only, stays bounded and stays readable through MCP", async () => {
+	const trace = {
+		gmailMessages: Array.from({ length: 25 }, (_, index) => gmailMessage(index)),
+		logs: [],
+	};
+	const mf = createWorker(trace, {
+		unsafeTriggerHandlers: true,
+		bindings: { MAIL_SCHEDULE_SYNC_PROVIDERS: "gmail" },
+	});
+	try {
+		const db = await mf.getD1Database("DB");
+		await db.batch(MIGRATIONS.map((statement) => db.prepare(statement)));
+		const ownerCookie = await login(mf, "code-sync-owner");
+		await linkGmail(mf, ownerCookie);
+		const mailboxId = await mailboxIdOf(db, "account-sync-owner");
+		assert.ok(mailboxId);
+		const totalMessages = () =>
+			db
+				.prepare("SELECT COUNT(*) AS total FROM messages WHERE mailbox_id = ?")
+				.bind(mailboxId)
+				.first()
+				.then((row) => row.total);
+
+		const client = await mcpClient(mf, await accessCredential("account-sync-owner"));
+		try {
+			// Before any tick the read-only surface must not imply an empty mailbox.
+			const before = await client.callTool({
+				name: "whoyou_mail_search",
+				arguments: { query: "batch message" },
+			});
+			assert.equal(before.structuredContent.messages.length, 0);
+			assert.equal(before.structuredContent.coverage.partial, true);
+			const beforeCoverage = before.structuredContent.coverage.mailboxes.find(
+				(entry) => entry.mailboxId === mailboxId,
+			);
+			assert.equal(beforeCoverage.initialImportComplete, false);
+			assert.match(before.content[0].text, /coverage is partial/);
+			assert.match(before.content[0].text, /does not prove/);
+
+			// Hold the first tick inside the provider call to prove mutual exclusion.
+			let release;
+			const gate = new Promise((resolve) => { release = resolve; });
+			let entered;
+			const enteredPromise = new Promise((resolve) => { entered = resolve; });
+			trace.gmailListGate = gate;
+			trace.gmailListEntered = entered;
+			const firstTick = scheduledTick(mf);
+			await Promise.race([
+				enteredPromise,
+				delay(5000).then(() => {
+					throw new Error("scheduled tick never reached Gmail");
+				}),
+			]);
+
+			// Manual sync and unlink share the same owner and refuse while Cron runs.
+			const manual = await sync(mf, ownerCookie, mailboxId);
+			assert.equal(manual.headers.get("location"), "/account/mailboxes?notice=gmail_sync_busy");
+			const unlink = await requestUnlinkFor(mf, ownerCookie, mailboxId);
+			assert.equal(unlink.headers.get("location"), "/account/mailboxes?notice=gmail_unlink_busy");
+			assert.ok(
+				await db.prepare("SELECT id FROM mailboxes WHERE id = ?").bind(mailboxId).first(),
+				"a busy unlink does not remove the identity",
+			);
+
+			// A second tick while the first is in flight is skipped, not duplicated.
+			const skippedTick = await scheduledTick(mf);
+			assert.equal(skippedTick.status, 200);
+			const skippedLog = JSON.parse(scheduledLogLines(trace).at(-1));
+			assert.equal(skippedLog.identities, 1);
+			assert.equal(skippedLog.imported, 0);
+			assert.equal(skippedLog.failed, 0);
+			assert.equal(skippedLog.skipped, 1);
+
+			release();
+			assert.equal((await firstTick).status, 200);
+			trace.gmailListGate = null;
+			assert.equal(await totalMessages(), 20, "one tick imports at most 20 messages");
+			const partial = await db
+				.prepare(
+					`SELECT cursor, backfill_page, last_synced_at, last_error, lease_id
+					 FROM mailbox_sync_state WHERE mailbox_id = ?`,
+				)
+				.bind(mailboxId)
+				.first();
+			assert.equal(partial.cursor, null);
+			assert.ok(partial.backfill_page, "the next page survives the tick");
+			assert.ok(partial.last_synced_at);
+			assert.equal(partial.last_error, null);
+			assert.equal(partial.lease_id, null, "the cron releases its lease after the batch");
+
+			// A partial backfill is reported as partial coverage, not as a full mailbox.
+			const mid = await client.callTool({
+				name: "whoyou_mail_search",
+				arguments: { query: "batch message" },
+			});
+			assert.equal(mid.structuredContent.coverage.partial, true);
+			const midCoverage = mid.structuredContent.coverage.mailboxes.find(
+				(entry) => entry.mailboxId === mailboxId,
+			);
+			assert.equal(midCoverage.initialImportComplete, false);
+			assert.ok(midCoverage.lastSyncedAt);
+
+			// The next tick resumes naturally from the persisted page.
+			assert.equal((await scheduledTick(mf)).status, 200);
+			assert.equal(await totalMessages(), 25);
+			const complete = await db
+				.prepare("SELECT cursor, backfill_page FROM mailbox_sync_state WHERE mailbox_id = ?")
+				.bind(mailboxId)
+				.first();
+			assert.ok(complete.cursor, "a completed backfill hands over to the cursor");
+			assert.equal(complete.backfill_page, null);
+
+			// Re-running the same provider page never duplicates a Message-ID row.
+			assert.equal((await scheduledTick(mf)).status, 200);
+			assert.equal(await totalMessages(), 25);
+			const distinct = await db
+				.prepare(
+					"SELECT COUNT(DISTINCT internet_message_id) AS total FROM messages WHERE mailbox_id = ?",
+				)
+				.bind(mailboxId)
+				.first();
+			assert.equal(distinct.total, 25, "each Message-ID is stored once");
+
+			// Newest first metadata and the stored body are available without a manual sync.
+			const after = await client.callTool({
+				name: "whoyou_mail_search",
+				arguments: { query: "batch message", limit: 5 },
+			});
+			const results = after.structuredContent.messages;
+			assert.equal(results.length, 5);
+			const timestamps = results.map((message) => message.receivedAt);
+			assert.deepEqual([...timestamps].sort((left, right) => right - left), timestamps);
+			assert.match(String(results[0].subject), /Batch message/);
+			assert.equal(after.structuredContent.coverage.partial, false);
+			const latestCoverage = after.structuredContent.coverage.mailboxes.find(
+				(entry) => entry.mailboxId === mailboxId,
+			);
+			assert.equal(latestCoverage.initialImportComplete, true);
+			assert.ok(latestCoverage.lastSyncedAt);
+			const body = await client.callTool({
+				name: "whoyou_mail_message_get",
+				arguments: { messageId: results[0].id, include: "text" },
+			});
+			assert.equal(body.isError, undefined);
+			assert.match(body.structuredContent.body, /Fixture body/);
+
+			const noMatch = await client.callTool({
+				name: "whoyou_mail_search",
+				arguments: { query: "zzz-no-such-message" },
+			});
+			assert.equal(noMatch.structuredContent.messages.length, 0);
+			assert.match(noMatch.content[0].text, /currently synced mail/);
+
+			// Linking unverified providers must not make the Gmail tick poll them.
+			await seedThirdPartyMailbox(db, {
+				id: "mbx_ms_scheduled",
+				accountId: "account-sync-owner",
+				address: "linked-outlook@example.net",
+				localPart: "linked-outlook",
+				provider: "microsoft",
+			});
+			await seedThirdPartyMailbox(db, {
+				id: "mbx_imap_scheduled",
+				accountId: "account-sync-owner",
+				address: "linked-imap@example.net",
+				localPart: "linked-imap",
+				provider: "imap_smtp",
+			});
+			assert.equal((await scheduledTick(mf)).status, 200);
+			assert.equal(await totalMessages(), 25);
+			const afterIsolation = await db
+				.prepare("SELECT last_synced_at, last_error FROM mailbox_sync_state WHERE mailbox_id = ?")
+				.bind(mailboxId)
+				.first();
+			assert.ok(afterIsolation.last_synced_at);
+			assert.equal(afterIsolation.last_error, null);
+			for (const id of ["mbx_ms_scheduled", "mbx_imap_scheduled"]) {
+				const state = await db
+					.prepare("SELECT COUNT(*) AS total FROM mailbox_sync_state WHERE mailbox_id = ?")
+					.bind(id)
+					.first();
+				assert.equal(state.total, 0, `${id} is never claimed by the Gmail-only tick`);
+			}
+
+			// A revoked grant is reported as a fixed error, never as a successful tick.
+			trace.refreshInvalidGrant = true;
+			assert.equal((await scheduledTick(mf)).status, 200);
+			assert.equal(await totalMessages(), 25);
+			const revoked = await db
+				.prepare(
+					`SELECT s.last_error AS sync_error, c.status AS credential_status
+					 FROM mailbox_sync_state s
+					 JOIN provider_credentials c ON c.mailbox_id = s.mailbox_id
+					 WHERE s.mailbox_id = ?`,
+				)
+				.bind(mailboxId)
+				.first();
+			assert.equal(revoked.sync_error, "provider_reauth_required");
+			assert.equal(revoked.credential_status, "reauth_required");
+			const revokedLog = JSON.parse(scheduledLogLines(trace).at(-1));
+			assert.equal(revokedLog.failed, 1);
+			assert.equal(revokedLog.imported, 0);
+			const revokedSearch = await client.callTool({
+				name: "whoyou_mail_search",
+				arguments: { query: "batch message" },
+			});
+			assert.equal(revokedSearch.structuredContent.coverage.partial, true);
+			const revokedCoverage = revokedSearch.structuredContent.coverage.mailboxes.find(
+				(entry) => entry.mailboxId === mailboxId,
+			);
+			assert.equal(revokedCoverage.lastError, "provider_reauth_required");
+			assert.match(revokedSearch.content[0].text, /last error: provider_reauth_required/);
+
+			const syncMetrics = trace.logs.filter((line) => line.includes('"event":"whoyou_mail_sync"'));
+			assert.ok(syncMetrics.length > 0);
+			for (const metric of syncMetrics) {
+				assert.doesNotMatch(metric, /accountId|mailboxId|account-sync-owner|mbx_ms_scheduled/);
+			}
+			const logs = trace.logs.join("\n");
+			assert.doesNotMatch(logs, /linked@gmail\.com|linked-outlook@|linked-imap@/);
+			assert.doesNotMatch(logs, /synthetic-access|synthetic-refresh|Batch message|Fixture body/);
+		} finally {
+			await client.close();
 		}
 	} finally {
 		await mf.dispose();
