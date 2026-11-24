@@ -32,6 +32,12 @@ import { registerJobTools } from "./jobs";
 import { registerLifecycleTools } from "./lifecycle";
 import { registerDraftTools, type DraftToolDependencies } from "./drafts";
 import { registerIdentityTools, type IdentityToolDependencies } from "./identities";
+import {
+	SERVICE_CAPABILITIES_RESOURCE_MIME_TYPE,
+	SERVICE_CAPABILITIES_RESOURCE_NAME,
+	SERVICE_CAPABILITIES_RESOURCE_URI,
+	serializeServiceCapabilitiesManifest,
+} from "./service-capabilities";
 import type { MailServices } from "../mail/config";
 
 const MAX_REQUEST_BODY_BYTES = 256 * 1024;
@@ -73,6 +79,29 @@ function buildMcpServer(
 	registerDraftTools(server, principal, services, tools);
 	registerIdentityTools(server, principal, services, tools);
 	registerLifecycleTools(server, principal, services);
+
+	// Optional semantic discovery: a static, versioned manifest that names real
+	// tools but never carries account, mailbox or credential state. Older MCP
+	// clients can ignore this resource and keep using tools/list unchanged.
+	server.registerResource(
+		SERVICE_CAPABILITIES_RESOURCE_NAME,
+		SERVICE_CAPABILITIES_RESOURCE_URI,
+		{
+			title: "Who You service capabilities",
+			description:
+				"Versioned, read-only declaration of Who You service capabilities and the registered MCP tools that implement them. Tool schemas, scopes and execution remain authoritative.",
+			mimeType: SERVICE_CAPABILITIES_RESOURCE_MIME_TYPE,
+		},
+		async (uri) => ({
+			contents: [
+				{
+					uri: uri.href,
+					mimeType: SERVICE_CAPABILITIES_RESOURCE_MIME_TYPE,
+					text: serializeServiceCapabilitiesManifest(),
+				},
+			],
+		}),
+	);
 
 	return server;
 }
