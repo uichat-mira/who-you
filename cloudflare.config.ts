@@ -18,9 +18,12 @@ export default defineConfig({
 			// has Email Routing enabled (MX, SPF, DKIM); which addresses reach this
 			// Worker is decided by the zone's Email Routing rules, not by this file.
 			MAIL_DOMAIN: bindings.text("tzt2026.xyz"),
+			// The default deployment must not start polling real providers.
+			// An approved target can explicitly bind MAIL_SCHEDULE_SYNC_PROVIDERS
+			// after separate real-mail acceptance and deployment authorization.
 		},
 		// Daily: retention expiry, deliverability report.
-		// Every five minutes: third-party (Gmail, Microsoft) incremental sync only.
+		// Every five minutes: provider sync runs only after a separate explicit allowlist opt-in.
 		triggers: [
 			triggers.scheduled({ schedule: "17 3 * * *" }),
 			triggers.scheduled({ schedule: "*/5 * * * *" }),

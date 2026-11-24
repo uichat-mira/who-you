@@ -11,6 +11,28 @@ import type { MailboxProvider, MailboxRecord } from "./store";
  */
 
 export const OAUTH_SYNC_SWEEP_LIMIT = 20;
+const SWEEP_TICK_MS = 5 * 60 * 1000;
+
+/**
+ * Rotate a fixed-size window on each scheduled slot; an early identity that
+ * always fails or holds an unrecoverable lease cannot starve later mailboxes.
+ * A wrapped page is read in two bounded queries without a persistent cursor.
+ */
+export function scheduledSyncBatchWindow(now: number, total: number): {
+	offset: number;
+	first: number;
+	wrap: number;
+} {
+	if (!Number.isSafeInteger(total) || total <= 0) {
+		return { offset: 0, first: 0, wrap: 0 };
+	}
+	const size = Math.min(total, OAUTH_SYNC_SWEEP_LIMIT);
+	const slot = Math.floor(now / SWEEP_TICK_MS);
+	const offset = ((slot % total) * size) % total;
+	const first = Math.min(size, total - offset);
+	return { offset, first, wrap: size - first };
+}
+
 
 const json = (status: number, body: Record<string, unknown>): Response =>
 	new Response(JSON.stringify(body), {
@@ -69,16 +91,42 @@ export type OAuthSyncSweepSummary = {
 	identities: number;
 	imported: number;
 	failed: number;
+	/** Identities that were not attempted because another writer owns them. */
+	skipped: number;
+	/** Latest `lastSyncedAt` actually persisted by this sweep. */
+	lastSyncedAt: number | null;
 };
 
 export type OAuthSyncSweepOutcome =
 	| { ok: true; imported: number }
 	| { ok: false; code: OAuthSyncFailureCode };
 
+/** The telemetry projector cannot receive account/mailbox identities. */
+export function projectOAuthSyncMetric(
+	provider: MailboxProvider,
+	outcome: OAuthSyncSweepOutcome | null,
+): {
+	event: "whoyou_mail_sync";
+	provider: MailboxProvider;
+	outcome: "synced" | "skipped" | "failed";
+	message_count: number;
+	reason_code?: OAuthSyncFailureCode | "sync_failed";
+} {
+	if (outcome?.ok) {
+		return { event: "whoyou_mail_sync", provider, outcome: "synced", message_count: outcome.imported };
+	}
+	const busy = outcome?.ok === false && outcome.code === "sync_in_progress";
+	return {
+		event: "whoyou_mail_sync", provider, outcome: busy ? "skipped" : "failed",
+		message_count: 0, reason_code: outcome?.ok === false ? outcome.code : "sync_failed",
+	};
+}
+
 /**
  * Cron sweep: at most 20 identities per tick, each bounded by the provider
- * module. A failed identity records a reason code and is retried next tick.
- * Logs only whitelisted fields, never an address or message content.
+ * module. A busy identity (another writer holds its lease) is counted as
+ * skipped; any other failure records a fixed reason code and is retried next
+ * tick. Logs only counters and fixed codes, never any account or mailbox identity.
  */
 export async function runOAuthSyncSweep(
 	env: WhoYouEnv,
@@ -91,49 +139,62 @@ export async function runOAuthSyncSweep(
 	now: number = Date.now(),
 	options: { transport?: MailServices["transport"] } = {},
 ): Promise<OAuthSyncSweepSummary> {
-	const summary: OAuthSyncSweepSummary = { identities: 0, imported: 0, failed: 0 };
+	const summary: OAuthSyncSweepSummary = {
+		identities: 0,
+		imported: 0,
+		failed: 0,
+		skipped: 0,
+		lastSyncedAt: null,
+	};
 	const resolved = createMailServices(env, options);
 	if (!resolved.ok) return summary;
 	const sweep = config.build(resolved.services);
 	if (!sweep) return summary;
 
 	await resolved.services.oauthStates.deleteExpired(now).catch(() => 0);
-	const mailboxes = await resolved.services.repository.listMailboxesByProvider(
-		config.provider,
-		OAUTH_SYNC_SWEEP_LIMIT,
-	);
+	const total = await resolved.services.repository.countMailboxesByProvider(config.provider);
+	const window = scheduledSyncBatchWindow(now, total);
+	const mailboxes = window.first
+		? await resolved.services.repository.listMailboxesByProvider(
+				config.provider, window.first, window.offset,
+			)
+		: [];
+	if (window.wrap) {
+		mailboxes.push(...await resolved.services.repository.listMailboxesByProvider(
+			config.provider, window.wrap, 0,
+		));
+	}
 	for (const mailbox of mailboxes) {
 		summary.identities += 1;
 		try {
 			const outcome = await sweep(mailbox, now);
 			if (outcome.ok) {
 				summary.imported += outcome.imported;
-			} else {
-				summary.failed += 1;
+				// The sweep only reads the committed row to enrich its own summary;
+				// that read cannot turn a successful batch into a reported failure.
+				try {
+					const state = await resolved.services.syncStates.get(mailbox.id);
+					if (
+						state?.lastSyncedAt != null &&
+						(summary.lastSyncedAt === null || state.lastSyncedAt > summary.lastSyncedAt)
+					) {
+						summary.lastSyncedAt = state.lastSyncedAt;
+					}
+				} catch {
+					// The batch has already settled; only the aggregate timestamp is absent.
+				}
+				console.log(JSON.stringify(projectOAuthSyncMetric(config.provider, outcome)));
+				continue;
 			}
-			console.log(
-				JSON.stringify({
-					event: "whoyou_mail_sync",
-					outcome: outcome.ok ? "synced" : "failed",
-					provider: config.provider,
-					accountId: mailbox.accountId,
-					mailboxId: mailbox.id,
-					message_count: outcome.ok ? outcome.imported : 0,
-					reason_code: outcome.ok ? undefined : outcome.code,
-				}),
-			);
+			// A lease held by a manual call, another tick or an unlink is not a
+			// provider failure: this tick simply imported nothing for that identity.
+			const busy = outcome.code === "sync_in_progress";
+			if (busy) summary.skipped += 1;
+			else summary.failed += 1;
+			console.log(JSON.stringify(projectOAuthSyncMetric(config.provider, outcome)));
 		} catch {
 			summary.failed += 1;
-			console.log(
-				JSON.stringify({
-					event: "whoyou_mail_sync",
-					outcome: "failed",
-					provider: config.provider,
-					accountId: mailbox.accountId,
-					mailboxId: mailbox.id,
-					reason_code: "sync_failed",
-				}),
-			);
+			console.log(JSON.stringify(projectOAuthSyncMetric(config.provider, null)));
 		}
 	}
 	return summary;

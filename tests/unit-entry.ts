@@ -71,6 +71,16 @@ export {
 	resolveMcpConfig,
 } from "../src/mcp/config";
 export {
+	SERVICE_CAPABILITIES_MANIFEST,
+	SERVICE_CAPABILITIES_MANIFEST_VERSION,
+	SERVICE_CAPABILITIES_RESOURCE_MIME_TYPE,
+	SERVICE_CAPABILITIES_RESOURCE_NAME,
+	SERVICE_CAPABILITIES_RESOURCE_URI,
+	SERVICE_CAPABILITIES_SCHEMA,
+	SERVICE_CAPABILITIES_SCHEMA_VERSION,
+	serializeServiceCapabilitiesManifest,
+} from "../src/mcp/service-capabilities";
+export {
 	GMAIL_READONLY_SCOPE,
 	GMAIL_SCOPES,
 	GMAIL_SEND_SCOPE,
@@ -158,3 +168,5 @@ export {
 	narrowFolder,
 	resolveJobScope,
 } from "../src/mail/job-scope";
+export { resolveScheduledSyncProviders } from "../src/mail/scheduled-sync";
+export { projectOAuthSyncMetric, scheduledSyncBatchWindow } from "../src/mail/oauth-http";
