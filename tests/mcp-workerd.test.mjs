@@ -152,6 +152,129 @@ test("a real workerd modern MCP client lists and calls the read-only whoami tool
 	});
 });
 
+test("a real workerd client discovers the versioned capability resource and every named tool resolves", async () => {
+	await withWorker("dist/test-worker.mjs", FIXTURE_BINDINGS, async ({ mf }) => {
+		const { client } = await connect(mf, "fixture-consumer-1", {
+			versionNegotiation: { mode: { pin: "2026-07-28" } },
+		});
+		try {
+			const [listed, resourceList] = await Promise.all([
+				client.listTools(),
+				client.listResources(),
+			]);
+			const toolNames = listed.tools.map((tool) => tool.name);
+			assert.deepEqual(toolNames, MAIL_TOOL_NAMES);
+
+			const resource = resourceList.resources.find(
+				(entry) => entry.uri === "mira://service/who-you/capabilities",
+			);
+			assert.ok(resource, "the capability resource must be discoverable");
+			assert.equal(resource.mimeType, "application/json");
+			assert.equal(resource.name, "who-you-service-capabilities");
+
+			const read = await client.readResource({
+				uri: "mira://service/who-you/capabilities",
+			});
+			assert.equal(read.contents.length, 1);
+			const [content] = read.contents;
+			assert.equal(content.uri, "mira://service/who-you/capabilities");
+			assert.equal(content.mimeType, "application/json");
+			assert.equal(typeof content.text, "string");
+
+			const manifest = JSON.parse(content.text);
+			assert.equal(manifest.schema, "mira.service-capabilities/v1");
+			assert.equal(manifest.version, "1.0.0");
+			assert.equal(manifest.service.id, "who-you");
+			assert.equal(manifest.service.name, "Who You");
+			assert.equal(manifest.service.mcp.serverName, "who-you");
+			assert.equal(manifest.service.mcp.sdk, "@modelcontextprotocol/server@2.4.0");
+			assert.deepEqual(manifest.service.mcp.protocolVersions, [
+				"2026-07-28",
+				"2025-11-25",
+				"2025-06-18",
+			]);
+
+			const capabilityIds = manifest.capabilities.map((capability) => capability.id);
+			assert.equal(new Set(capabilityIds).size, capabilityIds.length);
+			const manifestTools = manifest.capabilities.flatMap(
+				(capability) => capability.tools,
+			);
+			assert.equal(
+				new Set(manifestTools).size,
+				manifestTools.length,
+				"each tool must appear in exactly one capability",
+			);
+			assert.deepEqual([...manifestTools].sort(), [...toolNames].sort());
+
+			// No account, consumer, mailbox or bearer material may leak into the
+			// shared manifest, and a second account sees exactly the same document.
+			assert.doesNotMatch(
+				content.text,
+				/account-a|account-b|consumer-1|fixture|Bearer [A-Za-z0-9._-]+/,
+			);
+			const other = await connect(mf, "fixture-account-b", {
+				versionNegotiation: { mode: { pin: "2026-07-28" } },
+			});
+			try {
+				const otherRead = await other.client.readResource({
+					uri: "mira://service/who-you/capabilities",
+				});
+				assert.equal(otherRead.contents[0].text, content.text);
+			} finally {
+				await other.client.close();
+			}
+
+			// Choosing a tool from the manifest still goes through the real
+			// tools/call chain; the manifest creates no separate execution path.
+			const identity = manifest.capabilities.find(
+				(capability) => capability.id === "who-you.identity",
+			);
+			const chosen = identity.tools[0];
+			assert.ok(toolNames.includes(chosen));
+			const called = await client.callTool({ name: chosen, arguments: {} });
+			assert.equal(called.isError, undefined);
+			assert.equal(called.structuredContent.consumerId, "consumer-1");
+
+			// An unsupported resource URI stays an explicit protocol error.
+			await assert.rejects(
+				client.readResource({ uri: "mira://service/who-you/unknown" }),
+			);
+		} finally {
+			await client.close();
+		}
+	});
+});
+
+test("the capability resource sits behind the same bearer and scope gate as tools", async () => {
+	await withWorker("dist/test-worker.mjs", FIXTURE_BINDINGS, async ({ mf }) => {
+		const resourceEnvelope = {
+			jsonrpc: "2.0",
+			id: 1,
+			method: "resources/read",
+			params: { uri: "mira://service/who-you/capabilities" },
+		};
+		for (const [token, status] of [
+			[null, 401],
+			["fixture-forged", 401],
+			["fixture-wrong-issuer", 401],
+			["fixture-wrong-scope", 403],
+		]) {
+			const response = await mf.dispatchFetch(MCP_TEST_RESOURCE_URL, {
+				method: "POST",
+				headers: {
+					"content-type": "application/json",
+					accept: "application/json, text/event-stream",
+					...(token ? { authorization: `Bearer ${token}` } : {}),
+				},
+				body: JSON.stringify(resourceEnvelope),
+			});
+			assert.equal(response.status, status, token ?? "anonymous");
+			const body = await response.text();
+			assert.doesNotMatch(body, /mira\.service-capabilities|whoyou_/);
+		}
+	});
+});
+
 test("real 2025-06-18 and 2025-11-25 initialize clients use the stateless legacy path", async () => {
 	await withWorker("dist/test-worker.mjs", FIXTURE_BINDINGS, async ({ mf }) => {
 		for (const version of ["2025-06-18", "2025-11-25"]) {
@@ -164,6 +287,20 @@ test("real 2025-06-18 and 2025-11-25 initialize clients use the stateless legacy
 				assert.equal(transport.sessionId, undefined);
 				const listed = await client.listTools();
 				assert.equal(listed.tools.length, MAIL_TOOL_NAMES.length);
+				const resources = await client.listResources();
+				assert.ok(
+					resources.resources.some(
+						(resource) =>
+							resource.uri === "mira://service/who-you/capabilities",
+					),
+				);
+				const capability = await client.readResource({
+					uri: "mira://service/who-you/capabilities",
+				});
+				assert.equal(
+					JSON.parse(capability.contents[0].text).schema,
+					"mira.service-capabilities/v1",
+				);
 				const whoami = await client.callTool({ name: "whoyou_whoami", arguments: {} });
 				assert.equal(whoami.isError, undefined);
 				assert.equal(whoami.structuredContent.consumerId, "consumer-2");
