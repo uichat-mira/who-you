@@ -2,7 +2,6 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
-	REGISTERED_TOOL_NAMES,
 	SERVICE_CAPABILITIES_MANIFEST,
 	SERVICE_CAPABILITIES_MANIFEST_VERSION,
 	SERVICE_CAPABILITIES_RESOURCE_MIME_TYPE,
@@ -98,7 +97,7 @@ test("every registered tool is classified exactly once and read/write/send/destr
 
 	const mapped = capabilities.flatMap((capability) => capability.tools);
 	assert.equal(new Set(mapped).size, mapped.length, "a tool must map to one capability");
-	assert.deepEqual([...mapped].sort(), [...REGISTERED_TOOL_NAMES].sort());
+	assert.equal(mapped.length, 30, "currently 30 tools; the workerd test verifies exact runtime registration");
 
 	const reads = new Set(
 		capabilities
@@ -135,6 +134,9 @@ test("every registered tool is classified exactly once and read/write/send/destr
 	const identityConfirmation = capabilities.find(
 		(capability) => capability.id === "who-you.mailbox.link",
 	);
+	const mailboxErase = capabilities.find((capability) => capability.id === "who-you.mailbox.delete");
+	assert.equal(mailboxErase.confirmation, "confirm-argument");
+	assert.match(mailboxErase.description, /confirm: true/);
 	assert.equal(identityConfirmation.confirmation, "identity-credential");
 	assert.ok(
 		identityConfirmation.requiredScopes.includes("whoyou.mail.write"),

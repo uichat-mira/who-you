@@ -60,7 +60,7 @@ export const SERVICE_CAPABILITIES_MANIFEST_VERSION = "1.0.0";
 const ACCESS_MODES = ["read", "write", "send", "destructive"] as const;
 const CONFIRMATIONS = [
 	"none",
-	"user",
+	"confirm-argument",
 	"identity-credential",
 	"draft-credential",
 ] as const;
@@ -99,44 +99,6 @@ export const SERVICE_CAPABILITIES_SCHEMA = z.strictObject({
 
 export type ServiceCapabilitiesManifest = z.infer<typeof SERVICE_CAPABILITIES_SCHEMA>;
 export type ServiceCapability = ServiceCapabilitiesManifest["capabilities"][number];
-
-/**
- * Every tool registered on `/mcp`. The manifest covers this list exactly once;
- * a new tool must be classified here instead of silently disappearing from the
- * semantic view. `tools/list` remains the execution and schema authority.
- */
-export const REGISTERED_TOOL_NAMES = [
-	WHOAMI_TOOL_NAME,
-	MAILBOX_PROVISION_TOOL,
-	MAILBOX_GET_TOOL,
-	MAIL_SEARCH_TOOL,
-	MAIL_THREAD_GET_TOOL,
-	MAIL_MESSAGE_GET_TOOL,
-	MAIL_ATTACHMENT_GET_TOOL,
-	MAIL_FLAG_SET_TOOL,
-	JOB_CREATE_TOOL,
-	JOB_LIST_TOOL,
-	JOB_GET_TOOL,
-	JOB_STAGE_UPDATE_TOOL,
-	JOB_ANNOTATE_TOOL,
-	JOB_ANNOTATION_RESOLVE_TOOL,
-	JOB_STAGE_ACCEPT_TOOL,
-	JOB_PAUSE_TOOL,
-	JOB_RESUME_TOOL,
-	DRAFT_CREATE_TOOL,
-	DRAFT_UPDATE_TOOL,
-	DRAFT_DISCARD_TOOL,
-	DRAFT_GET_TOOL,
-	DRAFT_LIST_TOOL,
-	DRAFT_SEND_TOOL,
-	MAILBOX_LIST_TOOL,
-	MAILBOX_LINK_TOOL,
-	MAILBOX_UNLINK_TOOL,
-	MAILBOX_SYNC_TOOL,
-	MAIL_EXPORT_TOOL,
-	MAIL_MESSAGE_DELETE_TOOL,
-	MAIL_MAILBOX_DELETE_TOOL,
-] as const;
 
 const READ_SCOPE = [WHOYOU_REQUIRED_SCOPE];
 const WRITE_SCOPES = [WHOYOU_REQUIRED_SCOPE, WHOYOU_MAIL_WRITE_SCOPE];
@@ -319,10 +281,10 @@ const capabilities: ServiceCapability[] = [
 		id: "who-you.mailbox.delete",
 		title: "Mailbox erasure",
 		description:
-			"Erases the caller's entire mailbox, including mail, drafts and account audit rows. It is destructive, cannot be undone and requires an explicit confirmation argument.",
+			"Erases the caller's entire mailbox, including mail, drafts and account audit rows. It is destructive, cannot be undone and requires `confirm: true` as a tool argument; this flag by itself does not attest to a separate human approval.",
 		access: "destructive",
 		requiredScopes: WRITE_SCOPES,
-		confirmation: "user",
+		confirmation: "confirm-argument",
 		tools: [MAIL_MAILBOX_DELETE_TOOL],
 	},
 ];
@@ -362,24 +324,25 @@ const manifestInput = {
 export const SERVICE_CAPABILITIES_MANIFEST: ServiceCapabilitiesManifest =
 	SERVICE_CAPABILITIES_SCHEMA.parse(manifestInput);
 
-const assertCompleteToolCoverage = (): void => {
+/**
+ * Semantic labels are a view over real MCP registrations, not a second
+ * authoritative Tool Registry. The workerd contract test compares all
+ * advertised references against the actual tools/list response.
+ */
+const assertUniqueMappings = (): void => {
 	const mapped = SERVICE_CAPABILITIES_MANIFEST.capabilities.flatMap(
 		(capability) => capability.tools,
 	);
-	const duplicates = mapped.filter(
-		(tool, index) => mapped.indexOf(tool) !== index,
-	);
-	const registered = new Set<string>(REGISTERED_TOOL_NAMES);
-	const unknown = mapped.filter((tool) => !registered.has(tool));
-	const missing = REGISTERED_TOOL_NAMES.filter((tool) => !mapped.includes(tool));
-	if (duplicates.length || unknown.length || missing.length) {
-		throw new Error(
-			`service capability manifest does not match registered tools: duplicates=${duplicates.join(",")} unknown=${unknown.join(",")} missing=${missing.join(",")}`,
-		);
+	if (new Set(mapped).size !== mapped.length) {
+		throw new Error("service capability manifest maps the same tool more than once");
+	}
+	const ids = SERVICE_CAPABILITIES_MANIFEST.capabilities.map((capability) => capability.id);
+	if (new Set(ids).size !== ids.length) {
+		throw new Error("service capability manifest has duplicate capability IDs");
 	}
 };
 
-assertCompleteToolCoverage();
+assertUniqueMappings();
 
 export function serializeServiceCapabilitiesManifest(): string {
 	return JSON.stringify(SERVICE_CAPABILITIES_MANIFEST);

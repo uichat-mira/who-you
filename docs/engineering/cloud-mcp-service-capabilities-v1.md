@@ -73,14 +73,14 @@
 | `capabilities[].title` / `description` | 供通用消费端披露的短描述 |
 | `capabilities[].access` | `read` / `write` / `send` / `destructive`，一个能力只属于一类 |
 | `capabilities[].requiredScopes` | 调用该能力仍至少需要的 bearer scope；不是已授予状态 |
-| `capabilities[].confirmation` | `none` / `user` / `identity-credential` / `draft-credential`；`user` 表示工具要求用户显式确认参数 |
+| `capabilities[].confirmation` | `none` / `confirm-argument` / `identity-credential` / `draft-credential`；`confirm-argument` 仅表示 Tool 要求显式确认参数，**不证明已经得到真人批准** |
 | `capabilities[].tools` | 当前真实注册的工具名称；不复制工具 Schema |
 | `fallback.unknownSchema` | 消费端遇到未知结构时的降级行为 |
 | `fallback.unclassifiedTools` | 对未列入能力的真实工具的兜底行为 |
 
 ## 3. 当前能力与工具映射
 
-`who-you` 当前发布 17 个能力，覆盖 30 个已注册工具。工具名来自代码中的既有常量；服务端启动时校验「每个注册工具恰好出现一次」，仓库测试再与真实 `tools/list` 对照。
+`who-you` 当前发布 17 个能力，覆盖 30 个已注册工具。工具名来自代码中的既有常量；服务端启动时验证分组中不存在重复工具或重复能力 ID；**真实注册项完整性**由 workerd 契约测试与实际 `tools/list` 双向比较，不靠手抄一份工具全集。
 
 | 能力 ID | access | confirmation | 工具 |
 | --- | --- | --- | --- |
@@ -100,19 +100,21 @@
 | `who-you.job.workflow` | write | none | `whoyou_job_create`, `whoyou_job_stage_update`, `whoyou_job_annotate`, `whoyou_job_annotation_resolve`, `whoyou_job_stage_accept`, `whoyou_job_pause`, `whoyou_job_resume` |
 | `who-you.mail.export` | write | none | `whoyou_mail_export` |
 | `who-you.mail.message-delete` | destructive | none | `whoyou_mail_message_delete` |
-| `who-you.mailbox.delete` | destructive | user | `whoyou_mail_mailbox_delete` |
+| `who-you.mailbox.delete` | destructive | confirm-argument | `whoyou_mail_mailbox_delete` |
 
 说明：
 
 - `read` 能力只包含 `readOnlyHint: true` 的工具；查询本身不会因为出现在能力清单中而获得写权限。
 - `write` 仍由原工具 handler 校验 `whoyou.mail.write`；`who-you.mail.export` 只读账号数据但会创建导出记录与签名链接，因此归类为 `write`，其实际 bearer 要求以工具 handler 为准。
 - `send` 必须使用 Cloud Auth 签发的、绑定 draft 版本与 `contentHash` 的一次性确认凭据；manifest 不构成发送授权。
-- `destructive` 包括清理/删除操作。`who-you.mailbox.delete` 需要用户明确确认，`whoyou_mail_mailbox_delete` 另有 `confirm: true` 参数；永久删除单封邮件只接受已进入 trash 的邮件。工具 Schema 仍是权威。
+- `destructive` 包括清理/删除操作。`who-you.mailbox.delete` 要求传入 `confirm: true` 参数；参数本身不能代替消费端所需的真实用户批准；永久删除单封邮件只接受已进入 trash 的邮件。工具 Schema 仍是权威。
 - manifest 不声明 provider 已连接、数据库已就绪、同步已完成或权限已获批。这些只能从真实工具响应与运行证据得知。
 
 ## 4. 消费与降级
 
-最小消费流程：
+**三级只描述信息组织关系，绝非强制的三阶段状态机或固定的发现/模型调用次数。** 已知工具、Schema 与授权仍有效时可直接调用；需要探索时可按任务决定发现顺序、跳过层级、继续同能力内调用、跨能力/跨服务工作。缓存失效与授权撤销须在真实执行入口重验。下面仅演示**其中一种**完整发现与核对方式，不应被 Mobile/OMM 复制为每次请求的硬编码循环。
+
+一次可行的消费流程：
 
 ```ts
 const { resources } = await client.listResources();
@@ -161,7 +163,7 @@ for (const capability of manifest.capabilities) {
   - 删除/重命名能力或工具、改变 `access`/`confirmation` 语义：提升 major；
   - 服务端保持旧客户端可用的 `tools/list` / `tools/call` 不变。
 - 资源是**静态服务描述**，对所有账号返回同一份 JSON，不包含账号、邮箱、邮件或凭据，因此不存在跨账号缓存泄露面。客户端可自行缓存；读取时仍必须先通过 `/mcp` 认证。
-- 若声明与实际注册项不一致，服务端启动校验或测试必须失败；不允许静默返回过期或伪造分组。
+- 若声明与实际注册项不一致，服务端启动会拒绝分组内部重复映射；真实注册项缺失/新增通过 workerd `tools/list` 对照测试失败，消费端运行时也必须验证映射并在不一致时降级；不能凭过期清单调用工具。
 - 本卡不使用实验性 MCP Groups，也不要求消费端或上游实现它。
 
 ## 6. 当前 MCP SDK / 协议兼容性
