@@ -1192,10 +1192,19 @@ export async function handleWebRequest(request: Request, env: WhoYouEnv): Promis
   }
   if (path === "/api/mailboxes") return handleMailboxList(request, env, session, u);
 
+  // An existing session may predate managed enrollment or its grant may
+  // have been explicitly revoked. Never regrant on page load; offer the
+  // same active OAuth login flow that the user already uses.
   let identity: unknown;
   try { identity = await readIdentity(env, session); }
-  catch { return jsonError(502, "authentication_link_unavailable"); }
-  if (!identity) return jsonError(502, "authentication_link_unavailable");
+  catch { identity = null; }
+  if (!identity) {
+    if (path === "/api/whoami") return jsonError(502, "authentication_link_unavailable");
+    return page(`<h1>暂时无法获取账户</h1>
+<p>服务暂时不可用，或当前登录需要重新验证。请重试；如授权已失效，可重新登录。</p>
+<div class="auth-actions"><a class="button secondary" href="/account">重试</a>
+<a class="button" href="/auth/start?returnTo=%2Faccount">重新登录</a></div>`, headers(), 502);
+  }
   if (path === "/api/whoami") {
     const h = headers(); h.set("content-type", "application/json; charset=utf-8");
     return new Response(JSON.stringify(identity), { headers: h });
