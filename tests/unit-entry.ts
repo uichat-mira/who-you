@@ -81,6 +81,18 @@ export {
 	serializeServiceCapabilitiesManifest,
 } from "../src/mcp/service-capabilities";
 export {
+	WHOYOU_SERVICE_DEFINITION,
+	WHOYOU_SERVICE_DEFINITION_SCHEMA,
+	WHOYOU_SERVICE_DISPLAY_NAME,
+	WHOYOU_SERVICE_ID,
+	WHOYOU_SERVICE_PROJECT_ID,
+	WHOYOU_SERVICE_PROTOCOL_NAME,
+	WHOYOU_SERVICE_PROTOCOL_VERSION,
+	WHOYOU_SERVICE_REGISTRATION_ENDPOINT,
+	buildWhoYouServiceDefinition,
+	serializeWhoYouServiceDefinition,
+} from "../src/mcp/service-registration";
+export {
 	GMAIL_READONLY_SCOPE,
 	GMAIL_SCOPES,
 	GMAIL_SEND_SCOPE,
