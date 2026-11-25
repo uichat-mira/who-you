@@ -165,8 +165,6 @@ test("the manifest carries no account, mail or credential fields and records the
 	);
 	assert.deepEqual(SERVICE_CAPABILITIES_MANIFEST.service.mcp.protocolVersions, [
 		"2026-07-28",
-		"2025-11-25",
-		"2025-06-18",
 	]);
 	assert.match(
 		SERVICE_CAPABILITIES_MANIFEST.fallback.unknownSchema,

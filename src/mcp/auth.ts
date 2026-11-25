@@ -4,11 +4,12 @@ import {
 	type AuthInfo,
 } from "@modelcontextprotocol/server";
 import { createRemoteJWKSet, jwtVerify, type JWTVerifyGetKey } from "jose";
+import { WHOYOU_REQUIRED_SCOPE } from "./config";
 
 export type WhoYouPrincipal = {
 	/** Cloud Auth subject; the Cloud Account that owns the consumer. */
 	accountId: string;
-	/** Stable consumer identity minted into the credential, never supplied by a tool argument. */
+	/** Business consumer identity derived from the verified account subject. */
 	consumerId: string;
 	/**
 	 * Cloud Auth username, used only to derive the owned mailbox prefix. It is
@@ -35,9 +36,8 @@ export type CloudAuthVerifierOptions = {
 	issuer: string;
 	audience: string;
 	jwksUrl: URL;
-	consumerClaim: string;
-	/** Claim carrying the Cloud Auth username; absent means "cannot derive". */
-	usernameClaim?: string;
+	appId: string;
+	serviceId: string;
 	/** Test/integration injection point; production uses the configured remote JWKS. */
 	keySet?: JWTVerifyGetKey;
 	clockToleranceSeconds?: number;
@@ -46,84 +46,43 @@ export type CloudAuthVerifierOptions = {
 const invalidToken = (): OAuthError =>
 	new OAuthError(OAuthErrorCode.InvalidToken, "invalid_token");
 
-const tokenScopes = (payload: Record<string, unknown>): string[] => {
-	// Cloud Auth V0 signs scope as an array; standard OAuth access tokens may
-	// encode space-delimited scopes. Reject malformed arrays rather than
-	// silently discarding entries and accidentally broadening authority.
-	if (Array.isArray(payload.scope)) {
-		if (
-			!payload.scope.every(
-				(value) => typeof value === "string" && value.length > 0,
-			)
-		) {
-			throw invalidToken();
-		}
-		return payload.scope;
-	}
-	if (typeof payload.scope === "string") {
-		return payload.scope.split(/\s+/).filter(Boolean);
-	}
-	return [];
-};
+const claimKeys = new Set(["iss", "sub", "device_id", "aud", "app_id",
+  "service_id", "resource", "scope", "iat", "nbf", "exp"]);
 
-/**
- * The deployed verifier: Cloud Auth public JWKS, exact issuer/audience binding,
- * a non-empty subject and a token-bound consumer identity. Anything else is an
- * opaque 401; there is no fallback to a test fixture or unconfigured local trust.
+/** Verify exactly the V1 instance/resource credential. The subject is the
+ * existing mailbox owner; no caller-selected consumer or username is trusted.
  */
-export function createCloudAuthVerifier(
-	options: CloudAuthVerifierOptions,
-): WhoYouTokenVerifier {
-	const keySet = options.keySet ?? createRemoteJWKSet(options.jwksUrl);
-	const usernameClaim = options.usernameClaim ?? "preferred_username";
-	return {
-		async verifyAccessToken(token: string): Promise<WhoYouPrincipal> {
-			let payload: Record<string, unknown>;
-			try {
-				const verified = await jwtVerify(token, keySet, {
-					issuer: options.issuer,
-					audience: options.audience,
-					// The current Cloud Auth public JWKS contains Ed25519 keys only.
-					algorithms: ["EdDSA"],
-					clockTolerance: options.clockToleranceSeconds ?? 5,
-					requiredClaims: ["iss", "aud", "exp", "sub"],
-				});
-				payload = verified.payload as Record<string, unknown>;
-			} catch {
-				throw invalidToken();
-			}
-
-			const accountId = typeof payload.sub === "string" ? payload.sub : "";
-			const consumerId =
-				typeof payload[options.consumerClaim] === "string"
-					? (payload[options.consumerClaim] as string)
-					: "";
-			const expiresAt =
-				typeof payload.exp === "number" ? payload.exp : Number.NaN;
-			if (!accountId || !consumerId || !Number.isFinite(expiresAt)) {
-				throw invalidToken();
-			}
-
-			// A malformed username drops the claim instead of failing the token:
-			// provisioning then asks the user for a prefix rather than rejecting an
-			// otherwise valid credential.
-			const rawUsername = payload[usernameClaim];
-			const username =
-				typeof rawUsername === "string" && rawUsername.trim().length <= 64
-					? rawUsername.trim()
-					: undefined;
-
-			return {
-				accountId,
-				consumerId,
-				...(username ? { username } : {}),
-				scopes: tokenScopes(payload),
-				expiresAt,
-				issuer: options.issuer,
-				audience: options.audience,
-			};
-		},
-	};
+export function createCloudAuthVerifier(options: CloudAuthVerifierOptions): WhoYouTokenVerifier {
+  const keySet = options.keySet ?? createRemoteJWKSet(options.jwksUrl);
+  return {
+    async verifyAccessToken(token: string): Promise<WhoYouPrincipal> {
+      let p: Record<string, unknown>;
+      try {
+        const verified = await jwtVerify(token, keySet, {
+          issuer: options.issuer, audience: options.audience,
+          algorithms: ["EdDSA"], clockTolerance: options.clockToleranceSeconds ?? 0,
+          requiredClaims: [...claimKeys],
+        });
+        p = verified.payload as Record<string, unknown>;
+      } catch { throw invalidToken(); }
+      const now = Math.floor(Date.now() / 1000);
+      if (Object.keys(p).some(key => !claimKeys.has(key)) ||
+          p.aud !== options.audience || p.resource !== options.audience ||
+          p.app_id !== options.appId || p.service_id !== options.serviceId ||
+          typeof p.sub !== "string" || !p.sub.trim() ||
+          typeof p.device_id !== "string" || !p.device_id.trim() ||
+          typeof p.iat !== "number" || !Number.isSafeInteger(p.iat) ||
+          typeof p.nbf !== "number" || !Number.isSafeInteger(p.nbf) ||
+          typeof p.exp !== "number" || !Number.isSafeInteger(p.exp) ||
+          p.iat > now || p.nbf < p.iat || p.nbf > now || p.exp <= now ||
+          p.exp <= p.nbf || p.exp - p.iat > 600 ||
+          !Array.isArray(p.scope) || p.scope.length !== 1 || p.scope[0] !== WHOYOU_REQUIRED_SCOPE) {
+        throw invalidToken();
+      }
+      return { accountId: p.sub, consumerId: p.sub, scopes: [WHOYOU_REQUIRED_SCOPE],
+        expiresAt: p.exp, issuer: options.issuer, audience: options.audience };
+    },
+  };
 }
 
 /** Adapter from the Who You principal to the SDK's auth pass-through shape. */

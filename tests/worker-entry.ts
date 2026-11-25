@@ -960,7 +960,7 @@ export default {
 				env,
 				createFixtureVerifier({
 					issuer: CLOUD_AUTH_TOKEN_ISSUER,
-					audience: env.MCP_AUDIENCE ?? "",
+					audience: env.MCP_RESOURCE_URL ?? "",
 				}),
 			);
 		}
@@ -985,7 +985,7 @@ export default {
 		const resolved = createWhoYouRuntime(env, {
 			verifier: createFixtureVerifier({
 				issuer: CLOUD_AUTH_TOKEN_ISSUER,
-				audience: env.MCP_AUDIENCE ?? "",
+				audience: env.MCP_RESOURCE_URL ?? "",
 			}),
 			confirmationVerifier: createFixtureConfirmationVerifier(),
 			identityConfirmationVerifier: createFixtureIdentityConfirmationVerifier(),

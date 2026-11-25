@@ -37,7 +37,7 @@
       "serverName": "who-you",
       "serverVersion": "0.1.0-who-002",
       "sdk": "@modelcontextprotocol/server@2.4.0",
-      "protocolVersions": ["2026-07-28", "2025-11-25", "2025-06-18"]
+      "protocolVersions": ["2026-07-28"]
     }
   },
   "capabilities": [
@@ -169,7 +169,7 @@ for (const capability of manifest.capabilities) {
 ## 6. 当前 MCP SDK / 协议兼容性
 
 - 服务端 SDK：`@modelcontextprotocol/server@2.4.0`（与 `package.json` 对齐，单元测试校验）。
-- 有仓库内兼容性证据的协议修订：`2026-07-28`（modern stateless）、`2025-11-25`、`2025-06-18`（legacy stateless）。
+- 当前唯一协议修订：`2026-07-28`（modern stateless）；旧 initialize 协议拒绝。
 - `resources/list` / `resources/read` 与 `tools/list` / `tools/call` 均走同一个 `/mcp` Streamable HTTP 入口；不新增 HTTP 能力目录。
 - SDK 可能还兼容更老的 legacy 修订，但仓库没有为它们单独承诺证据；消费端按 MCP 协商结果使用标准 `resources/*` 即可。
 

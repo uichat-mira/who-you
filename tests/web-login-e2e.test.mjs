@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
 import { URLSearchParams } from "node:url";
 import { Miniflare } from "miniflare";
-import { exportJWK, generateKeyPair, SignJWT } from "jose";
 
 const ORIGIN = "https://who-you.tomz.io";
 const AUTH = "https://cloud-auth.tomzlab.cn";
@@ -13,16 +12,13 @@ const tokenUrl = AUTH + "/v1/oauth/token";
 function cookies(res) {
   return res.headers.getSetCookie().map((v) => v.split(";")[0]).join("; ");
 }
-test("real workerd: Web OAuth callback -> server-side credential -> verified whoyou_whoami", async () => {
-  const { publicKey, privateKey } = await generateKeyPair("EdDSA");
-  const jwk = { ...(await exportJWK(publicKey)), kid: "test-key", use: "sig", alg: "EdDSA" };
-  const jwt = await new SignJWT({
-    consumer_id: "account-e2e", scope: ["whoyou.read"], device_id: "web-device-e2e",
-  }).setProtectedHeader({ alg: "EdDSA", typ: "JWT", kid: "test-key" })
-    .setIssuer("mira:cloud-auth").setAudience("mira:who-you")
-    .setSubject("account-e2e").setIssuedAt().setExpirationTime("5m")
-    .sign(privateKey);
-  const counters = {token: 0, issue: 0, jwks: 0};
+test("real workerd: V1 OAuth callback -> app session -> revalidated account", async () => {
+  const token = "mas_v1.fixture.session";
+  const identity = { issuer: "mira:cloud-auth", subject: "account-e2e",
+    appId: "app-fixture-instance", audience: ORIGIN + "/oauth-client",
+    expiresAt: new Date(Date.now() + 1800_000).toISOString() };
+  const counters = { token: 0, session: 0, legacy: 0 };
+  let revoked = false;
   const mf = new Miniflare({
     modules: true, scriptPath: "dist/worker.mjs",
     compatibilityDate: "2026-08-06", cf: false,
@@ -31,32 +27,27 @@ test("real workerd: Web OAuth callback -> server-side credential -> verified who
       MCP_RESOURCE_URL: ORIGIN + "/mcp",
       CLOUD_AUTH_ISSUER: AUTH,
       CLOUD_AUTH_JWKS_URL: jwksUrl,
-      MCP_AUDIENCE: "mira:who-you",
+      WHOYOU_APP_ID: "app-fixture-instance",
+			WHOYOU_APP_SECRET: "fixture-registration-not-a-real-secret",
+			WHOYOU_MANIFEST_REVISION: "1",
     },
     d1Databases: ["DB"], r2Buckets: ["MAIL_BUCKET"],
     outboundService: async (request) => {
       if (request.url === tokenUrl) {
         counters.token++;
         const body = new URLSearchParams(await request.text());
-        assert.equal(body.get("client_id"), "who-you-web");
-        assert.equal(body.get("platform"), "web");
+        assert.equal(body.get("client_id"), ORIGIN + "/oauth-client");
+        assert.equal(body.get("platform"), null);
+        assert.equal(body.get("installation_id"), null);
         assert.equal(body.get("redirect_uri"), ORIGIN + "/auth/callback");
-        return Response.json({
-          sessionToken: "mira-device-session-test-only-placeholder-secret",
-          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
-        });
+        return Response.json({ access_token: token, token_type: "Bearer", expires_in: 1800, ...identity });
       }
-      if (request.url === issuedUrl) {
-        counters.issue++;
-        assert.match(request.headers.get("authorization"), /^Bearer mira-device-session/);
-        assert.deepEqual(await request.json(), {audience: "mira:who-you"});
-        return Response.json({token: jwt, tokenType: "Bearer", audience: "mira:who-you",
-          expiresAt: new Date(Date.now() + 300000).toISOString()});
+      if (request.url === AUTH + "/v1/oauth/application-session") {
+        counters.session++;
+        assert.equal(request.headers.get("authorization"), "Bearer " + token);
+        return revoked ? new Response(null, { status: 401 }) : Response.json(identity);
       }
-      if (request.url === jwksUrl) {
-        counters.jwks++;
-        return Response.json({keys: [jwk]});
-      }
+      if (request.url === issuedUrl) { counters.legacy++; return new Response(null, {status: 404}); }
       return Response.json({error: "unexpected_upstream", url: request.url}, {status: 404});
     },
   });
@@ -88,7 +79,7 @@ test("real workerd: Web OAuth callback -> server-side credential -> verified who
     assert.match(body, /<h1>账户<\/h1>/);
     assert.match(body, /Mira 云账号/);
     assert.match(body, /account-e2e/);
-    assert.match(body, /whoyou.read/);
+    assert.match(body, /应用会话已验证/);
     assert.match(body, /href="\/account\/mailboxes"/);
     assert.match(body, /aria-current="page">账户<\/a>/);
     assert.doesNotMatch(body, /mira-device-session-test-only-placeholder-secret/);
@@ -98,8 +89,12 @@ test("real workerd: Web OAuth callback -> server-side credential -> verified who
     assert.equal(root.status, 303);
     assert.equal(root.headers.get("location"), "/account");
     assert.ok(counters.token >= 1);
-    assert.ok(counters.issue >= 1);
-    assert.ok(counters.jwks >= 1);
+    assert.ok(counters.session >= 1);
+    assert.equal(counters.legacy, 0);
+    revoked = true;
+    const denied = await mf.dispatchFetch(ORIGIN + "/api/whoami", { headers: {cookie: cookies(callback)} });
+    assert.equal(denied.status, 502);
+    assert.doesNotMatch(await denied.text(), /account-e2e/);
   } finally {
     await mf.dispose();
   }

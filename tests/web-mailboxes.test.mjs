@@ -4,7 +4,7 @@ import { Buffer } from "node:buffer";
 import { webcrypto } from "node:crypto";
 import { URLSearchParams } from "node:url";
 import { Miniflare } from "miniflare";
-import { exportJWK, generateKeyPair, SignJWT } from "jose";
+import { exportJWK, generateKeyPair } from "jose";
 import { MIGRATIONS } from "./workerd-harness.mjs";
 
 /**
@@ -16,7 +16,7 @@ import { MIGRATIONS } from "./workerd-harness.mjs";
 const ORIGIN = "https://who-you.tomz.io";
 const AUTH = "https://cloud-auth.tomzlab.cn";
 const TOKEN_URL = AUTH + "/v1/oauth/token";
-const ISSUE_URL = AUTH + "/v1/service-credentials";
+const SESSION_URL = AUTH + "/v1/oauth/application-session";
 const JWKS_URL = AUTH + "/.well-known/jwks.json";
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
 const GOOGLE_REVOKE_URL = "https://oauth2.googleapis.com/revoke";
@@ -25,17 +25,17 @@ const SESSION_KEY = Buffer.alloc(32, 7).toString("base64url");
 const NOW = 1_795_000_000_000;
 
 const SESSIONS = new Map([
-	["session-account-e2e", "account-e2e"],
-	["session-account-other", "account-other"],
-	["session-account-empty", "account-empty"],
+	["mas_v1.fixture.e2e", "account-e2e"],
+	["mas_v1.fixture.other", "account-other"],
+	["mas_v1.fixture.empty", "account-empty"],
 ]);
 const CODES = new Map([
-	["code-e2e", "session-account-e2e"],
-	["code-other", "session-account-other"],
-	["code-empty", "session-account-empty"],
+	["code-e2e", "mas_v1.fixture.e2e"],
+	["code-other", "mas_v1.fixture.other"],
+	["code-empty", "mas_v1.fixture.empty"],
 ]);
 
-const { publicKey, privateKey } = await generateKeyPair("EdDSA");
+const { publicKey } = await generateKeyPair("EdDSA");
 const jwk = {
 	...(await exportJWK(publicKey)),
 	kid: "test-key",
@@ -43,55 +43,31 @@ const jwk = {
 	alg: "EdDSA",
 };
 
-const credential = (accountId, scope = ["whoyou.read"], confirmation) =>
-	new SignJWT({
-		consumer_id: accountId,
-		device_id: "web-device-" + accountId,
-		scope,
-		...(confirmation ? { confirmation } : {}),
-	})
-		.setProtectedHeader({ alg: "EdDSA", typ: "JWT", kid: "test-key" })
-		.setIssuer("mira:cloud-auth")
-		.setAudience("mira:who-you")
-		.setSubject(accountId)
-		.setIssuedAt()
-		.setExpirationTime("5m")
-		.sign(privateKey);
-
 const createOutbound = (trace = {}) => async (request) => {
 	if (request.url === TOKEN_URL) {
-		const sessionToken = CODES.get(new URLSearchParams(await request.text()).get("code"));
-		if (!sessionToken) return Response.json({ error: "invalid_grant" }, { status: 400 });
-		return Response.json({
-			sessionToken,
-			expiresAt: new Date(Date.now() + 3600_000).toISOString(),
-		});
-	}
-	if (request.url === ISSUE_URL) {
-		const sessionToken = request.headers.get("authorization")?.replace(/^Bearer /, "");
-		const accountId = SESSIONS.get(sessionToken ?? "");
-		if (!accountId) return Response.json({ error: "invalid_token" }, { status: 401 });
-		const body = await request.json();
-		assert.equal(body.audience, "mira:who-you");
-		trace.credentialRequests ??= [];
-		trace.credentialRequests.push(body);
-		let scope = ["whoyou.read"];
-		if (body.confirmation) {
-			assert.equal(body.scopes, undefined);
-			assert.equal(body.confirmation.actor, "user");
-			assert.match(body.confirmation.nonce, /^[A-Za-z0-9_-]{16,128}$/);
-			scope = ["whoyou.mail.write"];
-		} else if (body.scopes) {
-			assert.deepEqual(body.scopes, ["whoyou.read", "whoyou.mail.write"]);
-			scope = body.scopes;
-		}
-		return Response.json({
-			token: await credential(accountId, scope, body.confirmation),
-			tokenType: "Bearer",
-			audience: "mira:who-you",
-			expiresAt: new Date(Date.now() + 300_000).toISOString(),
-		});
-	}
+    const form = new URLSearchParams(await request.text());
+    assert.equal(form.get("client_id"), ORIGIN + "/oauth-client");
+    assert.equal(form.get("installation_id"), null);
+    assert.equal(form.get("platform"), null);
+    const token = CODES.get(form.get("code"));
+    if (!token) return Response.json({ error: "invalid_grant" }, { status: 400 });
+    const identity = { issuer: "mira:cloud-auth", subject: SESSIONS.get(token),
+      audience: ORIGIN + "/oauth-client", appId: "app-fixture-instance",
+      expiresAt: new Date(Date.now() + 1800_000).toISOString() };
+    trace.sessions ??= new Map();
+    trace.sessions.set(token, identity);
+    return Response.json({ access_token: token, token_type: "Bearer", expires_in: 1800, ...identity });
+  }
+  if (request.url === SESSION_URL) {
+    const token = request.headers.get("authorization")?.replace(/^Bearer /, "");
+    const identity = trace.sessions?.get(token);
+    trace.sessionChecks = (trace.sessionChecks ?? 0) + 1;
+    return identity ? Response.json(identity) : Response.json({ error: "invalid_token" }, { status: 401 });
+  }
+  if (request.url.endsWith("/v1/service-credentials")) {
+    trace.legacyRequests = (trace.legacyRequests ?? 0) + 1;
+    return new Response(null, { status: 404 });
+  }
 	if (request.url === JWKS_URL) return Response.json({ keys: [jwk] });
 	if (request.url === GOOGLE_TOKEN_URL) {
 		trace.googleTokenExchanges = (trace.googleTokenExchanges ?? 0) + 1;
@@ -132,7 +108,9 @@ function createWorker({ storage = true, mailConfigured = true, gmailConfigured =
 			MCP_RESOURCE_URL: ORIGIN + "/mcp",
 			CLOUD_AUTH_ISSUER: AUTH,
 			CLOUD_AUTH_JWKS_URL: JWKS_URL,
-			MCP_AUDIENCE: "mira:who-you",
+			WHOYOU_APP_ID: "app-fixture-instance",
+			WHOYOU_APP_SECRET: "fixture-registration-not-a-real-secret",
+			WHOYOU_MANIFEST_REVISION: "1",
             ...(mailConfigured ? {
               MAIL_DOMAIN: "tomlab.cn",
               MAIL_CREDENTIAL_KEK: Buffer.alloc(32, 9).toString("base64"),
@@ -643,6 +621,12 @@ test("Web Gmail link -> provider callback -> list -> unlink is account-bound and
 			/session-account|synthetic-google-refresh|synthetic-google-access/,
 		);
 
+        const bare = await mf.dispatchFetch(ORIGIN + "/mail/oauth/gmail/callback?" +
+            new URLSearchParams({ state, code: "must-not-exchange" }), { redirect: "manual" });
+        assert.equal(bare.status, 400);
+        assert.deepEqual(await bare.json(), { error: "invalid_state" });
+        assert.equal(trace.googleTokenExchanges ?? 0, 0);
+
 		const callback = await mf.dispatchFetch(
 			ORIGIN + "/mail/oauth/gmail/callback?" +
 				new URLSearchParams({ state, code: "synthetic-provider-code" }),
@@ -702,24 +686,8 @@ test("Web Gmail link -> provider callback -> list -> unlink is account-bound and
 		assert.equal(gmail.credentialStatus, "active");
 		assert.equal(gmail.availability, "configured");
 
-		const linkConfirmation = trace.credentialRequests.find(
-			(body) => body.confirmation?.action === "link",
-		);
-		assert.deepEqual(
-			{
-				action: linkConfirmation?.confirmation?.action,
-				provider: linkConfirmation?.confirmation?.provider,
-				mailboxId: linkConfirmation?.confirmation?.mailbox_id,
-			},
-			{ action: "link", provider: "gmail", mailboxId: null },
-		);
-		assert.ok(
-			trace.credentialRequests.some(
-				(body) =>
-					Array.isArray(body.scopes) &&
-					body.scopes.join(" ") === "whoyou.read whoyou.mail.write",
-			),
-		);
+		assert.equal(trace.legacyRequests ?? 0, 0);
+		assert.ok(trace.sessionChecks > 0);
 
 		const otherCookie = await login(mf, "code-other");
 		const crossAccount = await mf.dispatchFetch(ORIGIN + "/account/mailboxes/unlink", {
@@ -757,17 +725,7 @@ test("Web Gmail link -> provider callback -> list -> unlink is account-bound and
 		assert.equal(unlink.headers.get("location"), "/account/mailboxes?notice=gmail_unlinked");
 		assert.equal(trace.googleRevokes, 1);
 
-		const unlinkConfirmation = trace.credentialRequests.find(
-			(body) => body.confirmation?.action === "unlink",
-		);
-		assert.deepEqual(
-			{
-				action: unlinkConfirmation?.confirmation?.action,
-				provider: unlinkConfirmation?.confirmation?.provider,
-				mailboxId: unlinkConfirmation?.confirmation?.mailbox_id,
-			},
-			{ action: "unlink", provider: "gmail", mailboxId: gmail.mailboxId },
-		);
+		assert.equal(trace.legacyRequests ?? 0, 0);
 		assert.equal(
 			await db
 				.prepare("SELECT COUNT(*) AS total FROM mailboxes WHERE id = ?")
@@ -1006,7 +964,7 @@ test("Web Gmail link stays disabled when OAuth or credential vault is unavailabl
 			"/account/mailboxes?notice=gmail_unavailable",
 		);
 		assert.equal(
-			(trace.credentialRequests ?? []).filter((body) => body.confirmation).length,
+			trace.legacyRequests ?? 0,
 			0,
 		);
 	} finally {
