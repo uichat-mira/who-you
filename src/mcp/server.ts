@@ -178,7 +178,7 @@ export function createWhoYouMcp(
 	});
 	const handler = createMcpHandler(
 		({ authInfo }) => buildMcpServer(authInfo, services, tools),
-		{ legacy: "stateless", maxRequestBodySize: MAX_REQUEST_BODY_BYTES },
+		{ legacy: "reject", maxRequestBodySize: MAX_REQUEST_BODY_BYTES },
 	);
 	const metadata = buildMcpProtectedResourceMetadata(config);
 	const metadataPath = new URL(config.metadataUrl).pathname;

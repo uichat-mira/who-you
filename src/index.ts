@@ -6,8 +6,6 @@ import {
 	handleSignedDownload,
 	MAIL_DOWNLOAD_PATH,
 } from "./mail/download";
-import { handleGmailCallback } from "./mail/gmail-http";
-import { GMAIL_CALLBACK_PATH } from "./mail/gmail-link";
 import { handleMicrosoftCallback } from "./mail/microsoft-http";
 import { MICROSOFT_CALLBACK_PATH } from "./mail/microsoft-link";
 import { runRetentionSweep } from "./mail/retention";
@@ -16,12 +14,15 @@ import { DELIVERY_WEBHOOK_PATH, handleDeliveryWebhook } from "./mail/webhook";
 import { MCP_METADATA_PATH, MCP_RESOURCE_PATH } from "./mcp/config";
 import { createWhoYouRuntime } from "./mcp/runtime";
 import { handleWebRequest } from "./web/cloud-auth";
+import { handleApplicationRequest } from "./application/instance";
 
 const notFound = (): Response => Response.json({ error: "not_found" }, { status: 404 });
 
 export default {
 	async fetch(request: Request, env: WhoYouEnv): Promise<Response> {
 		const path = new URL(request.url).pathname;
+		const applicationResponse = await handleApplicationRequest(request, env);
+		if (applicationResponse) return applicationResponse;
 		const webResponse = await handleWebRequest(request, env);
 		if (webResponse) return webResponse;
 		// The relay callback is machine-to-machine only: it authenticates with an
@@ -31,9 +32,6 @@ export default {
 		}
 		// The OAuth callback is browser-facing and authenticated by the one-time
 		// `state` plus PKCE verifier, never by an MCP bearer.
-		if (path === GMAIL_CALLBACK_PATH) {
-			return handleGmailCallback(request, env);
-		}
 		if (path === MICROSOFT_CALLBACK_PATH) {
 			return handleMicrosoftCallback(request, env);
 		}
