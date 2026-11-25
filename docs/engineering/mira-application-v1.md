@@ -17,8 +17,15 @@ OPS-048 实现合同；部署验收另行记录。每个部署独立配置稳定
 网页采用授权码 + PKCE S256，校验 state、appId、issuer、subject、clientId、expiry；凭据封装于 HttpOnly/Secure/SameSite=Lax 加密 cookie，所有受保护业务操作查询 /v1/oauth/application-session 复核。退出使用 application-session/logout。账号会话不等于 Agent MCP grant；Web 不请求设备短票。
 
 ## 邮箱业务与 MCP
-Web 邮箱列表、Gmail 连接、解绑及同步复用内部业务服务及真实账号主体。现有同源 POST、provider state/PKCE 单次消费、邮箱所有权、同步 lease 继续生效；应用登录不授权 Google，也不提供智能体写/发权限。MCP 的独立业务确认逻辑保留，不以浏览器会话替代。
+Web 邮箱列表、Gmail 连接、解绑及同步复用内部业务服务及真实账号主体。现有同源 POST、provider state/PKCE 单次消费、邮箱所有权、同步 lease 继续生效；Gmail 回调必须持有有效应用会话和密封 flow cookie，不允许裸回调绕过。应用登录不授权 Google，也不提供智能体写/发权限。MCP 的独立业务确认逻辑保留，不以浏览器会话替代。
 
 MCP 2026-07-28 官方 SDK strict handler，拒绝旧 initialize；JWT 校验 EdDSA/JWKS、issuer、app_id、service_id=mail、resource/aud、sub、device_id、iat/nbf/exp、精确声明 whoyou.read。账号以 sub 隔离。旧 named audience、consumer_id、username claim 不再接受。MCP 与下载路由使用同一 verifier；未授权的写/发送不得运行，已签离线票至 exp 自然失效。
 
 真实 T3/T4 验证须注明使用的 Cloud Auth/狐邮 SHA 和隔离环境。仅 fixture 验证不能证明跨仓部署。生产未获本卡授权。
+
+## 本地真实纵切（非公网 T4）
+在狐邮执行 npm ci 和 npm run build:tests。在已安装依赖并构建 contracts 的 Cloud Auth 独立 checkout 的 apps/api 目录执行：
+
+    pnpm exec tsx /absolute/who-you/tests/ops048-v1-real-issuer.mjs /absolute/cloud-auth
+
+脚本使用真实 Cloud Auth Fastify/SQLite、真实 Worker、真实签名/JWKS 和合成邮箱，传输边界用注入适配器桥接；不替代 Cloud Auth HTTPS DNS/IP 安全传输、公网部署或 Mobile 真机验收。所有密钥运行时生成。

@@ -70,7 +70,7 @@ test("Public disclosures are readable without login or configured secrets", asyn
     assert.match(privacy, /Cloudflare/);
     const oldHost = await mf.dispatchFetch("https://who-you-tomz-preview.dangjingtao.workers.dev/privacy");
     assert.equal(oldHost.status, 404);
-  }, { WHOYOU_WEB_SESSION_KEY: "", GMAIL_OAUTH_CLIENT_SECRET: "" });
+  }, { WHOYOU_WEB_SESSION_KEY: "", GMAIL_OAUTH_CLIENT_SECRET: "", WHOYOU_APP_SECRET: "" });
 });
 
 test("OAuth start pins HTTPS callback, PKCE-S256 and a short HttpOnly state", async () => {

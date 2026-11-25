@@ -10,7 +10,7 @@ import {
 import { createCloudAuthVerifier, type WhoYouTokenVerifier } from "./auth";
 import { createCloudAuthConfirmationVerifier } from "./confirmation";
 import { createCloudAuthIdentityConfirmationVerifier } from "./identity-confirmation";
-import { WHOYOU_SERVICE_AUDIENCE, resolveMcpConfig } from "./config";
+import { WHOYOU_SERVICE_AUDIENCE, WHOYOU_INSTANCE_SERVICE_ID, resolveMcpConfig } from "./config";
 import { createWhoYouMcp, type WhoYouMcpRuntime } from "./server";
 
 export type McpRuntimeOptions = {
@@ -70,7 +70,7 @@ export function createWhoYouRuntime(
 			audience: config.audience,
 			jwksUrl: config.jwksUrl,
 			appId: config.appId,
-			serviceId: "mail",
+			serviceId: WHOYOU_INSTANCE_SERVICE_ID,
 		});
 
 	// A send confirmation is always minted for the dedicated Who You audience,

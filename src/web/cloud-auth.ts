@@ -1,5 +1,5 @@
 import { createMailServices, resolveCredentialKeys, type WhoYouEnv } from "../mail/config";
-import { resolveApplicationInstance } from "../application/instance";
+import { resolveApplicationInstance, resolveInstanceResource } from "../application/instance";
 import { listIdentities, unlinkMailbox } from "../mail/identity";
 import { startGmailLink } from "../mail/gmail-link";
 import { syncGmailMailbox } from "../mail/gmail-sync";
@@ -831,23 +831,23 @@ export async function handleWebRequest(request: Request, env: WhoYouEnv): Promis
     "/account/mailboxes", "/account/mailboxes/gmail/link", "/account/mailboxes/unlink",
     "/account/mailboxes/sync", "/api/whoami", "/api/mailboxes",
   ];
-  const hasWebGmailFlow = path === GMAIL_CALLBACK_PATH
-    && (getCookie(request, MAIL_OAUTH_COOKIE) !== null
-      || getCookie(request, MAIL_OAUTH_RESULT_COOKIE) !== null);
-  if (!webPaths.includes(path) && !hasWebGmailFlow) return null;
-  const instance = resolveApplicationInstance(env);
-  if (!instance) return jsonError(503, "application_not_configured");
-  const ORIGIN = instance.origin;
+  if (!webPaths.includes(path) && path !== GMAIL_CALLBACK_PATH) return null;
+  const resource = resolveInstanceResource(env);
+  if (!resource) return jsonError(503, "application_not_configured");
+  const ORIGIN = resource.origin;
   if (u.origin !== ORIGIN) return jsonError(404, "not_found");
-  // Public disclosures must be readable without a session or any provider secrets.
+  // Public disclosures do not depend on login or registration secrets.
   if (path === "/privacy" || path === "/terms") {
     if (request.method !== "GET") return jsonError(405, "method_not_allowed");
     return page(path === "/privacy" ? privacyPolicy : serviceTerms);
   }
+  const instance = resolveApplicationInstance(env);
+  if (!instance) return jsonError(503, "application_not_configured");
   const key = await importSessionKey(env.WHOYOU_WEB_SESSION_KEY), base = baseUrl(env);
   if (!key || !base) return jsonError(503, "web_login_not_configured");
 
   if (path === GMAIL_CALLBACK_PATH) {
+    if (request.method !== "GET") return jsonError(405, "method_not_allowed");
     const state = u.searchParams.get("state");
     const h = headers();
     const prior = await unseal(key, getCookie(request, MAIL_OAUTH_RESULT_COOKIE));
@@ -857,18 +857,20 @@ export async function handleWebRequest(request: Request, env: WhoYouEnv): Promis
     }
 
     const rawFlowCookie = getCookie(request, MAIL_OAUTH_COOKIE);
-    if (rawFlowCookie === null) return null;
+    // The public V1 MCP grant is read-only. Only the human Web flow can
+    // start Gmail linking; a bare callback cannot bypass app-session checks.
+    if (rawFlowCookie === null) return jsonError(400,
+      u.searchParams.has("error") ? "provider_reauth_required" : "invalid_state");
 
     const flow = await unseal(key, rawFlowCookie);
     const currentSession = await unseal(key, getCookie(request, SESSION_COOKIE));
     if (!isMailOAuthFlow(flow)) {
-      // Keep an unreadable Web flow cookie until its natural expiry so this
-      // browser cannot fall through to the raw provider callback meanwhile.
+      // Never treat an unreadable sealed flow as valid provider authorization.
       return redirect("/account/mailboxes?notice=gmail_link_failed", h);
     }
     if (flow.state !== state) {
       // Do not destroy the legitimate pending flow because an unrelated callback
-      // reached this browser. Keeping the sealed flow cookie prevents raw fallback.
+      // reached this browser.
       return redirect("/account/mailboxes?notice=gmail_link_failed", h);
     }
     if (!isSession(currentSession) || !await validateSession(env, currentSession)

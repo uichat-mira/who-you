@@ -1,9 +1,9 @@
 import { SERVICE_CAPABILITIES_MANIFEST } from "../mcp/service-capabilities";
-import { WHOYOU_REQUIRED_SCOPE } from "../mcp/config";
+import { WHOYOU_REQUIRED_SCOPE, WHOYOU_INSTANCE_SERVICE_ID } from "../mcp/config";
 
 export const APPLICATION_MANIFEST_PATH = "/.well-known/mira-application";
 export const APPLICATION_VERIFY_PATH = "/mira/verify-registration";
-export const APPLICATION_SERVICE_ID = "mail";
+
 
 export type ApplicationEnv = {
   WHOYOU_APP_ID?: string;
@@ -13,21 +13,27 @@ export type ApplicationEnv = {
 };
 
 const appIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,159}$/;
+export function resolveInstanceResource(env: ApplicationEnv): URL | null {
+  try {
+    const resource = new URL(env.MCP_RESOURCE_URL ?? "");
+    if (resource.protocol !== "https:" || resource.pathname !== "/mcp" ||
+        resource.username || resource.password || resource.search || resource.hash ||
+        resource.href !== env.MCP_RESOURCE_URL) return null;
+    return resource;
+  } catch { return null; }
+}
+
 export function resolveApplicationInstance(env: ApplicationEnv) {
   const appId = env.WHOYOU_APP_ID;
   const revision = Number(env.WHOYOU_MANIFEST_REVISION);
   const secret = env.WHOYOU_APP_SECRET;
   if (!appId || !appIdPattern.test(appId) || !secret || secret.length < 16 ||
       secret.length > 512 || !Number.isSafeInteger(revision) || revision < 1) return null;
-  try {
-    const resource = new URL(env.MCP_RESOURCE_URL ?? "");
-    if (resource.protocol !== "https:" || resource.pathname !== "/mcp" ||
-        resource.username || resource.password || resource.search || resource.hash ||
-        resource.href !== env.MCP_RESOURCE_URL) return null;
-    const origin = resource.origin;
-    return { appId, origin, resource: resource.href, revision,
-      clientId: origin + "/oauth-client", callback: origin + "/auth/callback" };
-  } catch { return null; }
+  const resource = resolveInstanceResource(env);
+  if (!resource) return null;
+  const origin = resource.origin;
+  return { appId, origin, resource: resource.href, revision,
+    clientId: origin + "/oauth-client", callback: origin + "/auth/callback" };
 }
 
 export function applicationManifest(instance: NonNullable<ReturnType<typeof resolveApplicationInstance>>) {
@@ -42,7 +48,7 @@ export function applicationManifest(instance: NonNullable<ReturnType<typeof reso
     oauth: { clientId: instance.clientId, redirectUris: [instance.callback] },
     registrationVerification: { endpoint: instance.origin + APPLICATION_VERIFY_PATH },
     services: [{
-      serviceId: APPLICATION_SERVICE_ID, name: "狐邮邮件服务", type: "mcp",
+      serviceId: WHOYOU_INSTANCE_SERVICE_ID, name: "狐邮邮件服务", type: "mcp",
       protocol: { name: "mcp", version: "2026-07-28", endpoint: instance.resource },
       resource: instance.resource, scopes: [WHOYOU_REQUIRED_SCOPE],
       capabilities: readCapabilities.map(capability => ({

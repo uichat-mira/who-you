@@ -621,6 +621,12 @@ test("Web Gmail link -> provider callback -> list -> unlink is account-bound and
 			/session-account|synthetic-google-refresh|synthetic-google-access/,
 		);
 
+        const bare = await mf.dispatchFetch(ORIGIN + "/mail/oauth/gmail/callback?" +
+            new URLSearchParams({ state, code: "must-not-exchange" }), { redirect: "manual" });
+        assert.equal(bare.status, 400);
+        assert.deepEqual(await bare.json(), { error: "invalid_state" });
+        assert.equal(trace.googleTokenExchanges ?? 0, 0);
+
 		const callback = await mf.dispatchFetch(
 			ORIGIN + "/mail/oauth/gmail/callback?" +
 				new URLSearchParams({ state, code: "synthetic-provider-code" }),

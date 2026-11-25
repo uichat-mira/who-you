@@ -6,6 +6,7 @@ import {
 } from "@modelcontextprotocol/server";
 
 export const MCP_RESOURCE_PATH = "/mcp";
+export const WHOYOU_INSTANCE_SERVICE_ID = "mail";
 /** RFC 9728 discovery location for the single `/mcp` resource. */
 export const MCP_METADATA_PATH = "/.well-known/oauth-protected-resource/mcp";
 /** Read-only scope required by the global `/mcp` bearer gate. */

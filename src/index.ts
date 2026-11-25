@@ -6,8 +6,6 @@ import {
 	handleSignedDownload,
 	MAIL_DOWNLOAD_PATH,
 } from "./mail/download";
-import { handleGmailCallback } from "./mail/gmail-http";
-import { GMAIL_CALLBACK_PATH } from "./mail/gmail-link";
 import { handleMicrosoftCallback } from "./mail/microsoft-http";
 import { MICROSOFT_CALLBACK_PATH } from "./mail/microsoft-link";
 import { runRetentionSweep } from "./mail/retention";
@@ -34,9 +32,6 @@ export default {
 		}
 		// The OAuth callback is browser-facing and authenticated by the one-time
 		// `state` plus PKCE verifier, never by an MCP bearer.
-		if (path === GMAIL_CALLBACK_PATH) {
-			return handleGmailCallback(request, env);
-		}
 		if (path === MICROSOFT_CALLBACK_PATH) {
 			return handleMicrosoftCallback(request, env);
 		}

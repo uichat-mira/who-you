@@ -2,6 +2,7 @@ import type { WhoYouTokenVerifier } from "../mcp/auth";
 import { createCloudAuthVerifier } from "../mcp/auth";
 import {
 	WHOYOU_REQUIRED_SCOPE,
+	WHOYOU_INSTANCE_SERVICE_ID,
 	resolveMcpConfig,
 	type McpEnv,
 } from "../mcp/config";
@@ -259,6 +260,6 @@ export function createDownloadVerifier(env: McpEnv & WhoYouEnv): WhoYouTokenVeri
 		audience: resolved.config.audience,
 		jwksUrl: resolved.config.jwksUrl,
 		appId: resolved.config.appId,
-		serviceId: "mail",
+		serviceId: WHOYOU_INSTANCE_SERVICE_ID,
 	});
 }
