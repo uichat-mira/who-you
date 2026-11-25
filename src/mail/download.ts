@@ -258,6 +258,7 @@ export function createDownloadVerifier(env: McpEnv & WhoYouEnv): WhoYouTokenVeri
 		issuer: resolved.config.tokenIssuer,
 		audience: resolved.config.audience,
 		jwksUrl: resolved.config.jwksUrl,
-		consumerClaim: resolved.config.consumerClaim,
+		appId: resolved.config.appId,
+		serviceId: "mail",
 	});
 }

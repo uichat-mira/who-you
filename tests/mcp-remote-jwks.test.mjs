@@ -17,14 +17,14 @@ const METADATA_URL = "https://127.0.0.1/.well-known/oauth-protected-resource/mcp
 const OAUTH_ISSUER = "https://auth.example.com";
 const JWKS_URL = "https://auth.example.com/.well-known/jwks.json";
 const TOKEN_ISSUER = "mira:cloud-auth";
-const AUDIENCE = "mira:who-you";
+const AUDIENCE = RESOURCE_URL;
 const SCOPE = "whoyou.read";
 
 const BINDINGS = {
 	MCP_RESOURCE_URL: RESOURCE_URL,
 	CLOUD_AUTH_ISSUER: OAUTH_ISSUER,
 	CLOUD_AUTH_JWKS_URL: JWKS_URL,
-	MCP_AUDIENCE: AUDIENCE,
+	WHOYOU_APP_ID: "app-fixture-instance",
 	MCP_REQUIRED_SCOPES: SCOPE,
 };
 
@@ -42,13 +42,14 @@ async function signToken({
 	issuer = TOKEN_ISSUER,
 	subject = "account-live",
 	consumer = "consumer-live",
-	expiresIn = 3600,
+	expiresIn = 300,
 } = {}) {
-	return new SignJWT({ scope: [SCOPE], consumer_id: consumer })
+	return new SignJWT({ scope: [SCOPE], device_id: consumer, app_id: "app-fixture-instance", service_id: "mail", resource: RESOURCE_URL })
 		.setProtectedHeader({ alg: "EdDSA", kid: "cloud-auth-key" })
 		.setIssuer(issuer)
 		.setAudience(AUDIENCE)
 		.setSubject(subject)
+        .setIssuedAt().setNotBefore(Math.floor(Date.now()/1000))
 		.setExpirationTime(Math.floor(Date.now() / 1000) + expiresIn)
 		.sign(key);
 }
@@ -102,7 +103,7 @@ test("the deployed entry verifies a real MCP client through the remote JWKS path
 			const whoami = await client.callTool({ name: "whoyou_whoami", arguments: {} });
 			assert.equal(whoami.isError, undefined);
 			assert.equal(whoami.structuredContent.accountId, "account-live");
-			assert.equal(whoami.structuredContent.consumerId, "consumer-live");
+			assert.equal(whoami.structuredContent.consumerId, "account-live");
 			assert.deepEqual(whoami.structuredContent.scopes, [SCOPE]);
 		} finally {
 			await client.close();

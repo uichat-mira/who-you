@@ -10,7 +10,9 @@ const bindings = {
   MCP_RESOURCE_URL: ORIGIN + "/mcp",
   CLOUD_AUTH_ISSUER: AUTH,
   CLOUD_AUTH_JWKS_URL: AUTH + "/.well-known/jwks.json",
-  MCP_AUDIENCE: "mira:who-you",
+  WHOYOU_APP_ID: "app-fixture-instance",
+			WHOYOU_APP_SECRET: "fixture-registration-not-a-real-secret",
+			WHOYOU_MANIFEST_REVISION: "1",
 };
 
 async function withPreview(run, overrides = {}) {
@@ -78,14 +80,14 @@ test("OAuth start pins HTTPS callback, PKCE-S256 and a short HttpOnly state", as
     const location = new URL(r.headers.get("location"));
     assert.equal(location.origin, AUTH);
     assert.equal(location.pathname, "/v1/oauth/authorize");
-    assert.equal(location.searchParams.get("client_id"), "who-you-web");
+    assert.equal(location.searchParams.get("client_id"), ORIGIN + "/oauth-client");
     assert.equal(location.searchParams.get("redirect_uri"), ORIGIN + "/auth/callback");
     assert.equal(location.searchParams.get("code_challenge_method"), "S256");
     assert.match(location.searchParams.get("code_challenge"), /^[\w-]{43}$/);
     assert.match(location.searchParams.get("state"), /^[\w-]{43}$/);
     const cookies = r.headers.getSetCookie();
     assert.ok(cookies.some((v) => v.startsWith("__Host-who_you_oauth=")));
-    assert.ok(cookies.some((v) => v.startsWith("__Host-who_you_installation=")));
+    assert.ok(!cookies.some((v) => v.startsWith("__Host-who_you_installation=")));
     for (const value of cookies) {
       assert.match(value, /HttpOnly/);
       assert.match(value, /Secure/);

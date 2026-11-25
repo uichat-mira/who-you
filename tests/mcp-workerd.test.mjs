@@ -3,8 +3,7 @@ import assert from "node:assert/strict";
 import { Miniflare } from "miniflare";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import {
-	MCP_TEST_AUDIENCE,
-	MCP_TEST_ISSUER,
+		MCP_TEST_ISSUER,
 	MCP_TEST_JWKS_URL,
 	MCP_TEST_RESOURCE_URL,
 	MCP_TEST_SCOPE,
@@ -14,7 +13,7 @@ const FIXTURE_BINDINGS = {
 	MCP_RESOURCE_URL: MCP_TEST_RESOURCE_URL,
 	CLOUD_AUTH_ISSUER: MCP_TEST_ISSUER,
 	CLOUD_AUTH_JWKS_URL: MCP_TEST_JWKS_URL,
-	MCP_AUDIENCE: MCP_TEST_AUDIENCE,
+	WHOYOU_APP_ID: "app-fixture-instance",
 	MCP_REQUIRED_SCOPES: MCP_TEST_SCOPE,
 };
 
@@ -190,8 +189,6 @@ test("a real workerd client discovers the versioned capability resource and ever
 			assert.equal(manifest.service.mcp.sdk, "@modelcontextprotocol/server@2.4.0");
 			assert.deepEqual(manifest.service.mcp.protocolVersions, [
 				"2026-07-28",
-				"2025-11-25",
-				"2025-06-18",
 			]);
 
 			const capabilityIds = manifest.capabilities.map((capability) => capability.id);
@@ -275,40 +272,14 @@ test("the capability resource sits behind the same bearer and scope gate as tool
 	});
 });
 
-test("real 2025-06-18 and 2025-11-25 initialize clients use the stateless legacy path", async () => {
-	await withWorker("dist/test-worker.mjs", FIXTURE_BINDINGS, async ({ mf }) => {
-		for (const version of ["2025-06-18", "2025-11-25"]) {
-			const { client, transport } = await connect(mf, "fixture-consumer-2", {
-				supportedProtocolVersions: [version],
-			});
-			try {
-				assert.equal(client.getProtocolEra(), "legacy");
-				assert.equal(client.getNegotiatedProtocolVersion(), version);
-				assert.equal(transport.sessionId, undefined);
-				const listed = await client.listTools();
-				assert.equal(listed.tools.length, MAIL_TOOL_NAMES.length);
-				const resources = await client.listResources();
-				assert.ok(
-					resources.resources.some(
-						(resource) =>
-							resource.uri === "mira://service/who-you/capabilities",
-					),
-				);
-				const capability = await client.readResource({
-					uri: "mira://service/who-you/capabilities",
-				});
-				assert.equal(
-					JSON.parse(capability.contents[0].text).schema,
-					"mira.service-capabilities/v1",
-				);
-				const whoami = await client.callTool({ name: "whoyou_whoami", arguments: {} });
-				assert.equal(whoami.isError, undefined);
-				assert.equal(whoami.structuredContent.consumerId, "consumer-2");
-			} finally {
-				await client.close();
-			}
-		}
-	});
+test("legacy initialize clients are explicitly rejected", async () => {
+    await withWorker("dist/test-worker.mjs", FIXTURE_BINDINGS, async ({ mf }) => {
+      for (const version of ["2025-06-18", "2025-11-25"]) {
+        await assert.rejects(connect(mf, "fixture-consumer-2", {
+          supportedProtocolVersions: [version],
+        }));
+      }
+    });
 });
 
 test("modern raw requests carry no session id and reject a missing Mcp-Method header", async () => {
@@ -439,8 +410,10 @@ test("RFC 9728 discovery serves cross-origin browsers while /mcp keeps its same-
 				accept: "application/json, text/event-stream",
 				authorization: "Bearer fixture-consumer-1",
 				origin: "https://127.0.0.1",
+				"Mcp-Method": "tools/list",
+				"MCP-Protocol-Version": "2026-07-28",
 			},
-			body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+			body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: { _meta: { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientInfo": { name: "fixture", version: "1" }, "io.modelcontextprotocol/clientCapabilities": {} } } }),
 		});
 		assert.equal(sameOrigin.status, 200);
 	});

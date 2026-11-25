@@ -2,7 +2,6 @@ import { readFileSync } from "node:fs";
 import { Miniflare } from "miniflare";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import {
-	MCP_TEST_AUDIENCE,
 	MCP_TEST_ISSUER,
 	MCP_TEST_JWKS_URL,
 	MCP_TEST_RESOURCE_URL,
@@ -48,7 +47,7 @@ export const BASE_BINDINGS = {
 	MCP_RESOURCE_URL: MCP_TEST_RESOURCE_URL,
 	CLOUD_AUTH_ISSUER: MCP_TEST_ISSUER,
 	CLOUD_AUTH_JWKS_URL: MCP_TEST_JWKS_URL,
-	MCP_AUDIENCE: MCP_TEST_AUDIENCE,
+	WHOYOU_APP_ID: "app-fixture-instance",
 	MCP_REQUIRED_SCOPES: MCP_TEST_SCOPE,
 	MAIL_DOMAIN: "tomlab.cn",
 	MAIL_SIGNING_KEY: "s3-test-signing-key-0123456789abcdef",

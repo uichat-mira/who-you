@@ -1,4 +1,5 @@
 import type { McpEnv } from "../mcp/config";
+import type { ApplicationEnv } from "../application/instance";
 import { resolveMcpConfig } from "../mcp/config";
 import { normalizeDomain } from "./address";
 import { resolveAbusePolicy, type AbuseLimitEnv, type AbusePolicy } from "./abuse";
@@ -32,7 +33,7 @@ import { SyncStateRepository } from "./sync-state";
  * type only so that misconfigured deployments fail closed at runtime instead of
  * failing typecheck; they are not optional for any mail-serving path.
  */
-export type WhoYouEnv = McpEnv &
+export type WhoYouEnv = ApplicationEnv & McpEnv &
 	MailLimitEnv &
 	AbuseLimitEnv &
 	RetentionEnv & {

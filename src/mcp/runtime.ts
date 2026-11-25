@@ -36,8 +36,7 @@ const runtimeCacheKey = (config: {
 	jwksUrl: URL;
 	audience: string;
 	requiredScopes: string[];
-	consumerClaim: string;
-	usernameClaim: string;
+	appId: string;
 }): string =>
 	[
 		config.resourceUrl.href,
@@ -45,8 +44,7 @@ const runtimeCacheKey = (config: {
 		config.jwksUrl.href,
 		config.audience,
 		config.requiredScopes.join(" "),
-		config.consumerClaim,
-		config.usernameClaim,
+		config.appId,
 	].join("\n");
 
 /**
@@ -71,8 +69,8 @@ export function createWhoYouRuntime(
 			issuer: config.tokenIssuer,
 			audience: config.audience,
 			jwksUrl: config.jwksUrl,
-			consumerClaim: config.consumerClaim,
-			usernameClaim: config.usernameClaim,
+			appId: config.appId,
+			serviceId: "mail",
 		});
 
 	// A send confirmation is always minted for the dedicated Who You audience,

@@ -1,5 +1,8 @@
 import { createMailServices, resolveCredentialKeys, type WhoYouEnv } from "../mail/config";
-import { createWhoYouRuntime } from "../mcp/runtime";
+import { resolveApplicationInstance } from "../application/instance";
+import { listIdentities, unlinkMailbox } from "../mail/identity";
+import { startGmailLink } from "../mail/gmail-link";
+import { syncGmailMailbox } from "../mail/gmail-sync";
 import { normalizeDomain } from "../mail/address";
 import { handleGmailCallback } from "../mail/gmail-http";
 import { GMAIL_SYNC_MAX_MESSAGES_PER_RUN } from "../mail/gmail-sync";
@@ -8,17 +11,13 @@ import { GOOGLE_AUTHORIZATION_ENDPOINT } from "../mail/oauth-client";
 import { resolveMicrosoftOAuthConfig } from "../mail/microsoft-link";
 import { publicIntroduction, privacyPolicy, serviceTerms, publicFooter } from "./public-pages";
 
-const CLIENT_ID = "who-you-web";
-const CALLBACK = "https://who-you.tomz.io/auth/callback";
-const ORIGIN = new URL(CALLBACK).origin;
 const STATE_COOKIE = "__Host-who_you_oauth";
 const SESSION_COOKIE = "__Host-who_you_session";
-const INSTALL_COOKIE = "__Host-who_you_installation";
 const MAIL_OAUTH_COOKIE = "__Host-who_you_mail_oauth";
 const MAIL_OAUTH_RESULT_COOKIE = "__Host-who_you_mail_oauth_result";
 type ProtectedPage = "/account" | "/account/mailboxes";
-type Flow = { state: string; verifier: string; installation: string; at: number; returnTo?: ProtectedPage };
-type Session = { sessionToken: string; expiresAt: string };
+type Flow = { state: string; verifier: string; appId: string; at: number; returnTo?: ProtectedPage };
+type Session = { accessToken: string; expiresAt: string; subject: string; audience: string; appId: string; issuer: "mira:cloud-auth" };
 type GmailCallbackNotice = "gmail_connected" | "gmail_relinked" | "gmail_denied" | "gmail_link_failed";
 type MailOAuthFlow = {
   provider: "gmail";
@@ -32,24 +31,6 @@ type MailOAuthResult = {
   notice: GmailCallbackNotice;
   expiresAt: number;
 };
-type WhoYouCredentialRequest = {
-  audience: "mira:who-you";
-  scopes?: ["whoyou.read", "whoyou.mail.write"];
-  confirmation?: {
-    actor: "user";
-    action: "link" | "unlink";
-    provider: "gmail";
-    mailbox_id: string | null;
-    nonce: string;
-  };
-};
-
-type ToolCallResult =
-  | { ok: true; structured: unknown }
-  | { ok: false; reason: "authentication_link_unavailable" }
-  | { ok: false; reason: "not_configured"; detail: string }
-  | { ok: false; reason: "tool_rejected"; code: string };
-
 type MailboxAvailability =
   | "configured"
   | "service_unavailable"
@@ -115,7 +96,7 @@ async function importSessionKey(raw: string | undefined): Promise<CryptoKey | nu
 async function seal(key: CryptoKey, data: Flow | Session | MailOAuthFlow | MailOAuthResult): Promise<string> {
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const encrypted = new Uint8Array(await crypto.subtle.encrypt(
-    { name: "AES-GCM", iv, additionalData: new TextEncoder().encode(ORIGIN) },
+    { name: "AES-GCM", iv, additionalData: new TextEncoder().encode("who-you-application-session-v1") },
     key, new TextEncoder().encode(JSON.stringify(data)),
   ));
   const bytes = new Uint8Array(iv.length + encrypted.length);
@@ -143,14 +124,10 @@ async function unseal(key: CryptoKey, raw: string | null): Promise<unknown> {
     if (bytes.length < 29) return null;
     const clear = await crypto.subtle.decrypt({
       name: "AES-GCM", iv: bytes.slice(0, 12),
-      additionalData: new TextEncoder().encode(ORIGIN),
+      additionalData: new TextEncoder().encode("who-you-application-session-v1"),
     }, key, bytes.slice(12));
     return JSON.parse(new TextDecoder().decode(clear)) as unknown;
   } catch { return null; }
-}
-function validInstallation(v: unknown): v is string {
-  return typeof v === "string" &&
-    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(v);
 }
 function validReturnTo(v: unknown): v is ProtectedPage {
   return v === "/account" || v === "/account/mailboxes";
@@ -166,15 +143,16 @@ function isFlow(v: unknown): v is Flow {
   const x = v as Partial<Flow>;
   return typeof x.state === "string" && /^[\w-]{43}$/.test(x.state)
     && typeof x.verifier === "string" && /^[\w-]{43}$/.test(x.verifier)
-    && validInstallation(x.installation) && typeof x.at === "number"
+    && typeof x.appId === "string" && typeof x.at === "number"
     && (x.returnTo === undefined || validReturnTo(x.returnTo))
     && x.at <= Date.now() && Date.now() - x.at < 300_000;
 }
 function isSession(v: unknown): v is Session {
   if (typeof v !== "object" || v === null) return false;
   const x = v as Partial<Session>;
-  return typeof x.sessionToken === "string" && x.sessionToken.length > 16
-    && x.sessionToken.length < 4096 && typeof x.expiresAt === "string"
+  return typeof x.accessToken === "string" && /^mas_v1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(x.accessToken) && x.accessToken.length < 4096
+    && x.issuer === "mira:cloud-auth" && typeof x.subject === "string" && !!x.subject.trim()
+    && typeof x.appId === "string" && typeof x.audience === "string" && typeof x.expiresAt === "string"
     && Number.isFinite(Date.parse(x.expiresAt)) && Date.parse(x.expiresAt) > Date.now();
 }
 function isMailOAuthFlow(v: unknown): v is MailOAuthFlow {
@@ -199,7 +177,7 @@ function isMailOAuthResult(v: unknown): v is MailOAuthResult {
 async function sessionBinding(session: Session): Promise<string> {
   const digest = await crypto.subtle.digest(
     "SHA-256",
-    new TextEncoder().encode(session.sessionToken),
+    new TextEncoder().encode(session.accessToken),
   );
   return encode(new Uint8Array(digest));
 }
@@ -294,7 +272,7 @@ function renderAccountPage(id: { accountId: string; consumerId: string; scopes: 
 <p class="hint">当前浏览器会话已通过 Cloud Auth 验证。</p>
 <p><code>${escapeText(id.accountId)}</code></p></div><span class="pill ok">已登录</span></div>
 <div class="setting-row"><div><strong>狐邮访问</strong>
-<p class="hint">当前服务凭证范围：${id.scopes.map(escapeText).join("、") || "无"}</p></div><span class="pill ok">已连接</span></div>
+<p class="hint">应用会话已验证；智能体服务授权请在 Mira ID 管理</p></div><span class="pill ok">已连接</span></div>
 </div>
 <div class="setting-actions">
 <a class="button secondary" href="/account/mailboxes">邮箱设置</a>
@@ -305,119 +283,34 @@ function renderAccountPage(id: { accountId: string; consumerId: string; scopes: 
 function baseUrl(env: WhoYouEnv): string | null {
   try {
     const u = new URL(env.CLOUD_AUTH_ISSUER ?? "");
-    return u.protocol === "https:" && u.pathname === "/" && !u.username && !u.password
+    return u.protocol === "https:" && u.pathname === "/" && !u.username && !u.password && !u.search && !u.hash
       ? u.origin : null;
   } catch { return null; }
 }
-/**
- * Exchanges the sealed browser Cloud Session for one short-lived Who You
- * credential. Cloud Auth derives account/device/consumer from the session; the
- * browser never sees this credential.
+/** The app credential is only identity. Every protected request rechecks
+ * issuer, instance, audience, subject and lifetime at the authoritative issuer.
+ * No terminal credential or MCP write authority is minted for browser users.
  */
-async function issueWhoYouCredential(
-  env: WhoYouEnv,
-  session: Session,
-  body: WhoYouCredentialRequest,
-): Promise<
-  | { ok: true; token: string }
-  | { ok: false; reason: "authentication_link_unavailable" | "not_configured"; detail?: string }
-> {
-  const base = baseUrl(env);
-  if (!base) return { ok: false, reason: "not_configured", detail: "cloud_auth_issuer" };
+async function validateSession(env: WhoYouEnv, session: Session): Promise<boolean> {
+  const base = baseUrl(env), instance = resolveApplicationInstance(env);
+  if (!base || !instance || session.appId !== instance.appId ||
+      session.audience !== instance.clientId || !isSession(session)) return false;
   try {
-    const r = await fetch(new URL("/v1/service-credentials", base), {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${session.sessionToken}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify(body),
+    const response = await fetch(new URL("/v1/oauth/application-session", base), {
+      headers: { authorization: "Bearer " + session.accessToken }, redirect: "manual",
+      signal: AbortSignal.timeout(5000),
     });
-    if (!r.ok) return { ok: false, reason: "authentication_link_unavailable" };
-    const issued = await r.json() as { token?: string };
-    return typeof issued.token === "string"
-      ? { ok: true, token: issued.token }
-      : { ok: false, reason: "authentication_link_unavailable" };
-  } catch {
-    return { ok: false, reason: "authentication_link_unavailable" };
-  }
-}
-
-const READ_CREDENTIAL_REQUEST: WhoYouCredentialRequest = {
-  audience: "mira:who-you",
-};
-
-/**
- * Calls one MCP tool with a server-side service credential derived from the
- * browser session. The credential never leaves this Worker: the browser only
- * holds the sealed session cookie.
- */
-async function callWhoYouTool(
-  env: WhoYouEnv,
-  session: Session,
-  name: string,
-  args: Record<string, unknown>,
-  credentialRequest: WhoYouCredentialRequest = READ_CREDENTIAL_REQUEST,
-): Promise<ToolCallResult> {
-  const issued = await issueWhoYouCredential(env, session, credentialRequest);
-  if (!issued.ok) {
-    return issued.reason === "not_configured"
-      ? { ok: false, reason: "not_configured", detail: issued.detail ?? "cloud_auth_issuer" }
-      : { ok: false, reason: "authentication_link_unavailable" };
-  }
-
-  const runtime = createWhoYouRuntime(env);
-  // The runtime is cached per isolate and shared with `/mcp`; closing it after
-  // one BFF call would break every later call in the same isolate.
-  if (!runtime.ok) return { ok: false, reason: "not_configured", detail: runtime.reason };
-  if (!env.MCP_RESOURCE_URL) return { ok: false, reason: "not_configured", detail: "mcp_resource_url" };
-  try {
-    const reply = await runtime.runtime.fetch(new Request(env.MCP_RESOURCE_URL, {
-      method: "POST", headers: {
-        authorization: `Bearer ${issued.token}`,
-        "content-type": "application/json", accept: "application/json, text/event-stream",
-        "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/call",
-        "Mcp-Name": name,
-        // This is a trusted in-process request, not a browser-supplied Host.
-        host: new URL(env.MCP_RESOURCE_URL).host,
-      }, body: JSON.stringify({
-        jsonrpc: "2.0", id: 1, method: "tools/call",
-        params: {
-          name, arguments: args,
-          _meta: {
-            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
-            "io.modelcontextprotocol/clientInfo": { name: "who-you-web", version: "0.1" },
-            "io.modelcontextprotocol/clientCapabilities": {},
-          },
-        },
-      }),
-    }));
-    if (!reply.ok) return { ok: false, reason: "authentication_link_unavailable" };
-    const body = await reply.json() as {
-      result?: { structuredContent?: unknown; isError?: boolean };
-    };
-    if (body.result?.isError) {
-      const structured = body.result.structuredContent;
-      const rawCode = typeof structured === "object" && structured !== null
-        ? (structured as { error?: unknown }).error : null;
-      const code = typeof rawCode === "string" && /^[a-z0-9_]{1,64}$/.test(rawCode)
-        ? rawCode : "tool_rejected";
-      return { ok: false, reason: "tool_rejected", code };
-    }
-    return { ok: true, structured: body.result?.structuredContent };
-  } catch {
-    return { ok: false, reason: "authentication_link_unavailable" };
-  }
+    if (!response.ok) return false;
+    const identity = await response.json() as Record<string, unknown>;
+    return identity.issuer === session.issuer && identity.subject === session.subject &&
+      identity.appId === session.appId && identity.audience === session.audience &&
+      identity.expiresAt === session.expiresAt && Date.parse(session.expiresAt) > Date.now();
+  } catch { return false; }
 }
 
 async function readIdentity(env: WhoYouEnv, session: Session): Promise<unknown | null> {
-  const called = await callWhoYouTool(env, session, "whoyou_whoami", {});
-  if (!called.ok) return null;
-  const id = called.structured as Partial<{ accountId: string;
-    consumerId: string; scopes: unknown[] }> | undefined;
-  return typeof id?.accountId === "string" && typeof id.consumerId === "string"
-    && Array.isArray(id.scopes) && id.scopes.every((x) => typeof x === "string")
-    ? { accountId: id.accountId, consumerId: id.consumerId, scopes: id.scopes } : null;
+  if (!await validateSession(env, session)) return null;
+  return { accountId: session.subject, consumerId: session.subject, scopes: [] };
 }
 
 /**
@@ -515,13 +408,16 @@ type MailboxListOutcome =
   };
 
 async function fetchMailboxList(env: WhoYouEnv, session: Session): Promise<MailboxListOutcome> {
-  const listed = await callWhoYouTool(env, session, "whoyou_mailbox_list", {});
-  if (!listed.ok) {
-    return listed.reason === "not_configured"
-      ? { ok: false, error: "mailboxes_unavailable", reason: listed.detail }
-      : { ok: false, error: "authentication_link_unavailable" };
-  }
-  const mailboxes = projectMailboxes(listed.structured, env);
+  if (!await validateSession(env, session)) return { ok: false, error: "authentication_link_unavailable" };
+  const resolved = createMailServices(env);
+  if (!resolved.ok) return { ok: false, error: "mailboxes_unavailable", reason: resolved.reason };
+  const services = resolved.services;
+  const identities = await listIdentities(services.repository, services.credentials, services.syncStates, session.subject);
+  const mailboxes = projectMailboxes({ identities: identities.map(entry => ({
+    mailboxId: entry.mailbox.id, address: entry.mailbox.address, kind: entry.mailbox.kind,
+    provider: entry.mailbox.provider, status: entry.mailbox.status,
+    credentialStatus: entry.credentialStatus, sync: entry.sync,
+  })) }, env);
   if (!mailboxes) return { ok: false, error: "mailbox_list_invalid" };
   // Storage bindings alone do not mean this preview can actually manage mail.
   // With no account identities and no configured provider/own-domain capability,
@@ -552,10 +448,6 @@ async function handleMailboxList(
   return new Response(JSON.stringify({ mailboxes: outcome.mailboxes }), { headers: h });
 }
 
-const WRITE_SCOPES: ["whoyou.read", "whoyou.mail.write"] = [
-  "whoyou.read", "whoyou.mail.write",
-];
-
 type GmailLinkStart = { authorizationUrl: string; state: string; expiresAt: number };
 type GmailWebAction =
   | { ok: true; start: GmailLinkStart }
@@ -567,23 +459,6 @@ function gmailWebReady(env: WhoYouEnv): boolean {
     && resolveCredentialKeys(env)
     && resolveGmailOAuthConfig(env),
   );
-}
-
-async function issueGmailIdentityConfirmation(
-  env: WhoYouEnv,
-  session: Session,
-  action: "link" | "unlink",
-  mailboxId: string | null,
-): Promise<{ ok: true; token: string } | { ok: false; code: string }> {
-  const issued = await issueWhoYouCredential(env, session, {
-    audience: "mira:who-you",
-    confirmation: {
-      actor: "user", action, provider: "gmail", mailbox_id: mailboxId, nonce: random(),
-    },
-  });
-  return issued.ok
-    ? { ok: true, token: issued.token }
-    : { ok: false, code: issued.reason };
 }
 
 function parseGmailLinkStart(value: unknown): GmailLinkStart | null {
@@ -604,19 +479,17 @@ function parseGmailLinkStart(value: unknown): GmailLinkStart | null {
 }
 
 async function startWebGmailLink(env: WhoYouEnv, session: Session): Promise<GmailWebAction> {
+  if (!await validateSession(env, session)) return { ok: false, code: "authentication_link_unavailable" };
   if (!gmailWebReady(env)) return { ok: false, code: "provider_not_configured" };
-  const confirmation = await issueGmailIdentityConfirmation(env, session, "link", null);
-  if (!confirmation.ok) return confirmation;
-  const called = await callWhoYouTool(
-    env, session, "whoyou_mailbox_link",
-    { provider: "gmail", confirmationCredential: confirmation.token },
-    { audience: "mira:who-you", scopes: WRITE_SCOPES },
-  );
-  if (!called.ok) return {
-    ok: false,
-    code: called.reason === "tool_rejected" ? called.code : called.reason,
-  };
-  const start = parseGmailLinkStart(called.structured);
+  const resolved = createMailServices(env);
+  if (!resolved.ok) return { ok: false, code: resolved.reason };
+  const services = resolved.services;
+  if (!services.oauth || !services.gmailRedirectUri) return { ok: false, code: "provider_not_configured" };
+  // Human-only same-origin POST; the existing provider state is single-use
+  // and account-bound. It cannot be invoked via the MCP bearer surface.
+  const started = await startGmailLink({ states: services.oauthStates, oauth: services.oauth,
+    redirectUri: services.gmailRedirectUri }, { accountId: session.subject, now: Date.now() });
+  const start = parseGmailLinkStart({ provider: "gmail", ...started });
   return start ? { ok: true, start } : { ok: false, code: "invalid_link_response" };
 }
 
@@ -634,20 +507,16 @@ async function unlinkWebGmail(
     return { ok: false, code: "mailbox_not_gmail" };
   }
   if (!resolveCredentialKeys(env)) return { ok: false, code: "credential_vault_unavailable" };
-  const confirmation = await issueGmailIdentityConfirmation(
-    env, session, "unlink", mailbox.mailboxId,
-  );
-  if (!confirmation.ok) return confirmation;
-  const called = await callWhoYouTool(
-    env, session, "whoyou_mailbox_unlink",
-    { mailboxId: mailbox.mailboxId, confirmationCredential: confirmation.token },
-    { audience: "mira:who-you", scopes: WRITE_SCOPES },
-  );
-  if (!called.ok) return {
-    ok: false,
-    code: called.reason === "tool_rejected" ? called.code : called.reason,
-  };
-  return { ok: true };
+  const resolved = createMailServices(env);
+  if (!resolved.ok) return { ok: false, code: resolved.reason };
+  const services = resolved.services;
+  if (!await validateSession(env, session)) return { ok: false, code: "authentication_link_unavailable" };
+  // Ownership is resolved again under the existing unlink lease. Same-origin
+  // human POST is separate from the agent's identity-confirmation credential.
+  const result = await unlinkMailbox({ repository: services.repository, credentials: services.credentials,
+    keys: services.credentialKeys, oauth: services.oauth, remoteTargets: services.remoteTargets,
+    syncStates: services.syncStates }, { accountId: session.subject, mailboxId: mailbox.mailboxId, now: Date.now() });
+  return result.ok ? { ok: true } : { ok: false, code: result.code };
 }
 
 type WebGmailSync =
@@ -655,10 +524,8 @@ type WebGmailSync =
   | { ok: false; code: string };
 
 /**
- * Starts one bounded Gmail batch through the write-scoped MCP tool. The browser
- * session never holds the credential and the read scope is never reused for a
- * persistent write. Ownership is checked twice: the BFF list narrows the
- * account, and the tool re-resolves the mailbox from the bearer account.
+ * Starts one bounded Gmail batch for the verified human account; the existing
+ * sync lease and owner checks are shared with the MCP business implementation.
  */
 async function syncWebGmail(
   env: WhoYouEnv,
@@ -674,16 +541,20 @@ async function syncWebGmail(
   }
   if (!gmailWebReady(env)) return { ok: false, code: "provider_not_configured" };
 
-  const called = await callWhoYouTool(
-    env, session, "whoyou_mailbox_sync",
-    { mailboxId: mailbox.mailboxId },
-    { audience: "mira:who-you", scopes: WRITE_SCOPES },
-  );
-  if (!called.ok) return {
-    ok: false,
-    code: called.reason === "tool_rejected" ? called.code : called.reason,
-  };
-  const counts = parseSyncCounts(called.structured);
+  const resolved = createMailServices(env);
+  if (!resolved.ok) return { ok: false, code: resolved.reason };
+  const services = resolved.services;
+  const { credentialKeys, oauth, gmail } = services;
+  if (!credentialKeys || !oauth || !gmail) return { ok: false, code: "provider_not_configured" };
+  const owned = await services.repository.findMailboxById(session.subject, mailboxId);
+  if (!owned || owned.kind !== "third_party" || owned.provider !== "gmail") return { ok: false, code: "mailbox_not_found" };
+  if (owned.status !== "active") return { ok: false, code: "mailbox_disabled" };
+  if (!await validateSession(env, session)) return { ok: false, code: "authentication_link_unavailable" };
+  const outcome = await syncGmailMailbox({ repository: services.repository, limits: services.limits,
+    credentials: services.credentials, keys: credentialKeys, oauth, gmail,
+    syncStates: services.syncStates, now: Date.now() }, owned);
+  if (!outcome.ok) return { ok: false, code: outcome.code };
+  const counts = parseSyncCounts(outcome);
   return counts ? { ok: true, counts } : { ok: false, code: "invalid_sync_response" };
 }
 
@@ -964,6 +835,9 @@ export async function handleWebRequest(request: Request, env: WhoYouEnv): Promis
     && (getCookie(request, MAIL_OAUTH_COOKIE) !== null
       || getCookie(request, MAIL_OAUTH_RESULT_COOKIE) !== null);
   if (!webPaths.includes(path) && !hasWebGmailFlow) return null;
+  const instance = resolveApplicationInstance(env);
+  if (!instance) return jsonError(503, "application_not_configured");
+  const ORIGIN = instance.origin;
   if (u.origin !== ORIGIN) return jsonError(404, "not_found");
   // Public disclosures must be readable without a session or any provider secrets.
   if (path === "/privacy" || path === "/terms") {
@@ -997,7 +871,7 @@ export async function handleWebRequest(request: Request, env: WhoYouEnv): Promis
       // reached this browser. Keeping the sealed flow cookie prevents raw fallback.
       return redirect("/account/mailboxes?notice=gmail_link_failed", h);
     }
-    if (!isSession(currentSession)
+    if (!isSession(currentSession) || !await validateSession(env, currentSession)
         || flow.sessionBinding !== await sessionBinding(currentSession)) {
       if (await discardWebGmailState(env, flow.state)) {
         addCookie(h, MAIL_OAUTH_COOKIE, "", 0);
@@ -1041,7 +915,7 @@ export async function handleWebRequest(request: Request, env: WhoYouEnv): Promis
   if (path === "/") {
     if (request.method !== "GET") return jsonError(405, "method_not_allowed");
     const session = await unseal(key, getCookie(request, SESSION_COOKIE));
-    if (isSession(session)) return redirect("/account");
+    if (isSession(session) && await validateSession(env, session)) return redirect("/account");
     const returnTo = returnToFrom(u.searchParams.get("returnTo"));
     const blocked = u.searchParams.get("reason") === "sign_in_required";
     return page(renderLoginPage(returnTo, blocked));
@@ -1049,19 +923,16 @@ export async function handleWebRequest(request: Request, env: WhoYouEnv): Promis
 
   if (path === "/auth/start") {
     if (request.method !== "GET") return jsonError(405, "method_not_allowed");
-    const prior = getCookie(request, INSTALL_COOKIE);
-    const installation = validInstallation(prior) ? prior : crypto.randomUUID();
     const returnTo = returnToFrom(u.searchParams.get("returnTo"));
     const state = random(), verifier = random();
     const hash = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)));
     const h = headers();
     addCookie(h, STATE_COOKIE, await seal(key, {
-      state, verifier, installation, returnTo, at: Date.now(),
+      state, verifier, appId: instance.appId, returnTo, at: Date.now(),
     }), 300);
-    addCookie(h, INSTALL_COOKIE, installation, 365 * 86400);
     const authorize = new URL("/v1/oauth/authorize", base);
     authorize.search = new URLSearchParams({
-      response_type: "code", client_id: CLIENT_ID, redirect_uri: CALLBACK,
+      response_type: "code", client_id: instance.clientId, redirect_uri: instance.callback,
       state, code_challenge: encode(hash), code_challenge_method: "S256",
     }).toString();
     return redirect(authorize.href, h);
@@ -1071,23 +942,29 @@ export async function handleWebRequest(request: Request, env: WhoYouEnv): Promis
     if (request.method !== "GET") return jsonError(405, "method_not_allowed");
     const flow = await unseal(key, getCookie(request, STATE_COOKIE));
     const h = headers(); addCookie(h, STATE_COOKIE, "", 0);
-    if (!isFlow(flow) || flow.state !== u.searchParams.get("state")
+    if (!isFlow(flow) || flow.appId !== instance.appId || flow.state !== u.searchParams.get("state")
       || u.searchParams.has("error") || !u.searchParams.get("code"))
       return page(`<h1>登录没有完成</h1>
 <p>登录已过期、被取消或验证失败。</p>
 <div class="auth-actions"><a class="button" href="/">重新登录</a></div>`, h);
     try {
       const r = await fetch(new URL("/v1/oauth/token", base), {
-        method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" },
+        method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, redirect: "manual", signal: AbortSignal.timeout(5000),
         body: new URLSearchParams({
-          grant_type: "authorization_code", client_id: CLIENT_ID,
-          code: u.searchParams.get("code")!, redirect_uri: CALLBACK,
-          code_verifier: flow.verifier, installation_id: flow.installation, platform: "web",
+          grant_type: "authorization_code", client_id: instance.clientId,
+          code: u.searchParams.get("code")!, redirect_uri: instance.callback,
+          code_verifier: flow.verifier,
         }).toString(),
       });
       if (!r.ok) return jsonError(401, "cloud_auth_code_rejected", h);
-      const issued = await r.json() as unknown;
-      if (!isSession(issued)) return jsonError(502, "cloud_auth_invalid_session", h);
+      const value = await r.json() as Record<string, unknown>;
+      const issued = { accessToken: value.access_token, expiresAt: value.expiresAt, subject: value.subject,
+        audience: value.audience, appId: value.appId, issuer: value.issuer };
+      if (Object.keys(value).some(k => !["access_token","token_type","expires_in","expiresAt","issuer","subject","audience","appId"].includes(k)) ||
+          value.token_type !== "Bearer" || typeof value.expires_in !== "number" ||
+          !Number.isInteger(value.expires_in) || value.expires_in <= 0 || value.expires_in > 3600 ||
+          !isSession(issued) || Date.parse(issued.expiresAt) > Date.now() + 3600_000 ||
+          !await validateSession(env, issued)) return jsonError(502, "cloud_auth_invalid_session", h);
       const age = Math.min(3600, Math.floor((Date.parse(issued.expiresAt) - Date.now()) / 1000));
       addCookie(h, SESSION_COOKIE, await seal(key, issued), age);
       return redirect(flow.returnTo ?? "/account", h);
@@ -1099,10 +976,10 @@ export async function handleWebRequest(request: Request, env: WhoYouEnv): Promis
     if (request.headers.get("origin") !== ORIGIN) return jsonError(403, "origin_not_allowed");
     const raw = await unseal(key, getCookie(request, SESSION_COOKIE));
     const h = headers(); addCookie(h, SESSION_COOKIE, "", 0);
-    if (isSession(raw)) {
+    if (isSession(raw) && raw.appId === instance.appId && raw.audience === instance.clientId) {
       try {
-        const r = await fetch(new URL("/v1/auth/logout", base), {
-          method: "POST", headers: { authorization: `Bearer ${raw.sessionToken}` },
+        const r = await fetch(new URL("/v1/oauth/application-session/logout", base), {
+          method: "POST", headers: { authorization: `Bearer ${raw.accessToken}` }, redirect: "manual", signal: AbortSignal.timeout(5000),
         });
         if (!r.ok && r.status !== 401) return jsonError(502, "logout_unconfirmed", h);
       } catch { return jsonError(502, "logout_unconfirmed", h); }
