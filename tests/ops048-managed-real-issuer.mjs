@@ -12,8 +12,8 @@ const WHO_ORIGIN="https://who-you.tomz.io";
 const AUTH_CWD=process.env.OPS048_AUTH_API_DIR;
 if (!AUTH_CWD) throw new Error("Set OPS048_AUTH_API_DIR to a compiled, isolated Cloud Auth apps/api checkout");
 const expectedSha="6c48415f4f5f7180e12ddbf8d643374eb43f3b55";
-assert.equal(execFileSync("git",["rev-parse","HEAD"],{cwd:AUTH_CWD,encoding:"utf8"}).trim(),expectedSha);
-assert.equal(execFileSync("git",["status","--porcelain","--untracked-files=no"],{cwd:AUTH_CWD,encoding:"utf8"}).trim(),"");
+assert.equal(execFileSync("/usr/bin/git",["rev-parse","HEAD"],{cwd:AUTH_CWD,encoding:"utf8",env:{PATH:"/usr/bin:/bin"}}).trim(),expectedSha);
+assert.equal(execFileSync("/usr/bin/git",["status","--porcelain","--untracked-files=no"],{cwd:AUTH_CWD,encoding:"utf8",env:{PATH:"/usr/bin:/bin"}}).trim(),"");
 import { generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
 import { execFileSync, spawn } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -31,7 +31,7 @@ const port = portProbe.address().port;
 await new Promise(resolve => portProbe.close(resolve));
 const { privateKey } = generateKeyPairSync("ed25519");
 const env = {
-  PATH: process.env.PATH ?? "",
+  PATH: "/usr/bin:/bin",
   HOST: "127.0.0.1", PORT: String(port), LOG_LEVEL: "error",
   MIRA_AUTH_DB_PATH: join(directory, "auth.sqlite"),
   MIRA_AUTH_SERVICE_CREDENTIAL_ACTIVE_KID: "isolated-smoke",
