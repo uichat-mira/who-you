@@ -6,6 +6,7 @@ import {
 } from "@modelcontextprotocol/server";
 
 export const MCP_RESOURCE_PATH = "/mcp";
+export const WHOYOU_INSTANCE_SERVICE_ID = "mail";
 /** RFC 9728 discovery location for the single `/mcp` resource. */
 export const MCP_METADATA_PATH = "/.well-known/oauth-protected-resource/mcp";
 /** Read-only scope required by the global `/mcp` bearer gate. */
@@ -30,11 +31,7 @@ export type McpEnv = {
 	MCP_RESOURCE_URL?: string;
 	CLOUD_AUTH_ISSUER?: string;
 	CLOUD_AUTH_JWKS_URL?: string;
-	MCP_AUDIENCE?: string;
-	MCP_REQUIRED_SCOPES?: string;
-	MCP_CONSUMER_CLAIM?: string;
-	/** Claim carrying the Cloud Auth username used to derive the mailbox prefix. */
-	MCP_USERNAME_CLAIM?: string;
+	WHOYOU_APP_ID?: string;
 };
 
 export type McpConfig = {
@@ -47,9 +44,7 @@ export type McpConfig = {
 	jwksUrl: URL;
 	audience: string;
 	requiredScopes: string[];
-	consumerClaim: string;
-	/** Optional by design: a token without it just cannot derive an address. */
-	usernameClaim: string;
+	appId: string;
 };
 
 export type McpConfigResult =
@@ -68,10 +63,6 @@ const secureUrl = (value: string): URL | null => {
 		return null;
 	}
 };
-const scopeToken = /^[\x21\x23-\x5B\x5D-\x7E]+$/;
-const claimName = /^[A-Za-z0-9_.-]+$/;
-const withoutTrailingSlash = (value: string) =>
-	value.endsWith("/") ? value.slice(0, -1) : value;
 
 /**
  * Resolves the fail-closed resource-server boundary from deployment bindings.
@@ -92,33 +83,13 @@ export function resolveMcpConfig(env: McpEnv): McpConfigResult {
 	const jwksUrl = secureUrl(env.CLOUD_AUTH_JWKS_URL?.trim() ?? "");
 	if (!jwksUrl) return { ok: false, reason: "cloud_auth_jwks_url" };
 
-	const audience = env.MCP_AUDIENCE?.trim() ?? "";
-	if (!audience) return { ok: false, reason: "mcp_audience" };
-	// Cloud Auth service credentials use a named Who You audience. A future
-	// RFC 8707 resource-URI token may carry the exact /mcp resource instead.
-	// Guanlan, Shiyan and Relay audiences are never accepted.
-	if (
-		audience !== WHOYOU_SERVICE_AUDIENCE &&
-		withoutTrailingSlash(audience) !== withoutTrailingSlash(resourceUrl.href)
-	) {
-		return { ok: false, reason: "mcp_audience_not_who_you" };
+	const appId = env.WHOYOU_APP_ID;
+	if (!appId || !/^[A-Za-z0-9][A-Za-z0-9._:-]{7,159}$/.test(appId)) {
+		return { ok: false, reason: "application_id" };
 	}
-
-	const scopes = (env.MCP_REQUIRED_SCOPES?.trim() || WHOYOU_REQUIRED_SCOPE)
-		.split(/\s+/)
-		.filter(Boolean);
-	if (!scopes.length || scopes.some((scope) => !scopeToken.test(scope))) {
-		return { ok: false, reason: "mcp_required_scopes" };
-	}
-
-	const consumerClaim = env.MCP_CONSUMER_CLAIM?.trim() || "consumer_id";
-	if (!claimName.test(consumerClaim)) {
-		return { ok: false, reason: "mcp_consumer_claim" };
-	}
-
-	const usernameClaim = env.MCP_USERNAME_CLAIM?.trim() || "preferred_username";
-	if (!claimName.test(usernameClaim)) {
-		return { ok: false, reason: "mcp_username_claim" };
+	if (resourceUrl.protocol !== "https:" || resourceUrl.search ||
+		resourceUrl.href !== env.MCP_RESOURCE_URL) {
+		return { ok: false, reason: "mcp_resource_url" };
 	}
 
 	return {
@@ -129,10 +100,9 @@ export function resolveMcpConfig(env: McpEnv): McpConfigResult {
 			issuer,
 			tokenIssuer: CLOUD_AUTH_TOKEN_ISSUER,
 			jwksUrl,
-			audience,
-			requiredScopes: scopes,
-			consumerClaim,
-			usernameClaim,
+			audience: resourceUrl.href,
+			requiredScopes: [WHOYOU_REQUIRED_SCOPE],
+			appId,
 		},
 	};
 }

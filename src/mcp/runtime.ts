@@ -10,7 +10,7 @@ import {
 import { createCloudAuthVerifier, type WhoYouTokenVerifier } from "./auth";
 import { createCloudAuthConfirmationVerifier } from "./confirmation";
 import { createCloudAuthIdentityConfirmationVerifier } from "./identity-confirmation";
-import { WHOYOU_SERVICE_AUDIENCE, resolveMcpConfig } from "./config";
+import { WHOYOU_SERVICE_AUDIENCE, WHOYOU_INSTANCE_SERVICE_ID, resolveMcpConfig } from "./config";
 import { createWhoYouMcp, type WhoYouMcpRuntime } from "./server";
 
 export type McpRuntimeOptions = {
@@ -36,8 +36,7 @@ const runtimeCacheKey = (config: {
 	jwksUrl: URL;
 	audience: string;
 	requiredScopes: string[];
-	consumerClaim: string;
-	usernameClaim: string;
+	appId: string;
 }): string =>
 	[
 		config.resourceUrl.href,
@@ -45,8 +44,7 @@ const runtimeCacheKey = (config: {
 		config.jwksUrl.href,
 		config.audience,
 		config.requiredScopes.join(" "),
-		config.consumerClaim,
-		config.usernameClaim,
+		config.appId,
 	].join("\n");
 
 /**
@@ -71,8 +69,8 @@ export function createWhoYouRuntime(
 			issuer: config.tokenIssuer,
 			audience: config.audience,
 			jwksUrl: config.jwksUrl,
-			consumerClaim: config.consumerClaim,
-			usernameClaim: config.usernameClaim,
+			appId: config.appId,
+			serviceId: WHOYOU_INSTANCE_SERVICE_ID,
 		});
 
 	// A send confirmation is always minted for the dedicated Who You audience,

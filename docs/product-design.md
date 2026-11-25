@@ -22,7 +22,9 @@
 
 **三层归属一句话**：Cloud Auth 管「谁在登录、能否签发服务凭证」；Who You 管「哪些邮箱及凭据归属当前账号、邮件工具如何工作」；Mira 管「用哪些授权的 MCP 工具完成用户任务」。
 
-## 3. 可证明的实现和部署边界（2026-11-21 核对）
+## 3. 历史实现和部署边界（2026-11-21 核对，不代表当前 dev）
+
+当前 dev 的实例接入、OAuth、授权与 MCP 凭据合同已切换到 [V1](engineering/mira-application-v1.md)。以下保留历史部署证据，不作为现行源码接入方法。
 
 - **Cloud Auth 代码**：`packages/contracts/src/oauth.ts` 注册 `who-you-web` / `web`，精确回调 `https://who-you.tomz.io/auth/callback`；原 Desktop、Mobile 客户端仍在。OAuth 是 PKCE S256 授权码登录；`/v1/service-credentials` 对已验证且绑定设备的 Cloud Session 签发 `mira:who-you` 受众的短期票据，默认 `whoyou.read`。
 - **Who You 代码**：`src/web/cloud-auth.ts` 处理首页、Cloud Auth 登录/退出、`/account`、`/account/mailboxes`、邮箱列表 BFF，以及 Gmail 连接/重授权/解绑的 Web 接线；真实 Gmail OAuth/PKCE、凭据密封与删除仍复用 `src/mail/` / `src/mcp/` 的现有合同。浏览器不接触 Cloud Session 原文、服务 JWT 或 identity-confirmation JWT。`src/index.ts` 同时承载 `/mcp`、认证元数据和既有邮件接口。

@@ -305,7 +305,7 @@ const manifestInput = {
 			// Keep in step with package.json; the unit test enforces the match.
 			sdk: "@modelcontextprotocol/server@2.4.0",
 			// Versions with explicit compatibility evidence in this repository.
-			protocolVersions: ["2026-07-28", "2025-11-25", "2025-06-18"],
+			protocolVersions: ["2026-07-28"],
 		},
 	},
 	capabilities,

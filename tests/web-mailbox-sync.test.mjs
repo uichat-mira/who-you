@@ -16,11 +16,11 @@ import { MIGRATIONS } from "./workerd-harness.mjs";
  * scripted. Every account, address, message and token below is synthetic.
  */
 
-const ORIGIN = "https://who-you.tomz.io";
-const MCP_ORIGIN = "https://127.0.0.1";
+const ORIGIN = "https://127.0.0.1";
+const MCP_ORIGIN = ORIGIN;
 const AUTH = "https://cloud-auth.tomzlab.cn";
 const TOKEN_URL = AUTH + "/v1/oauth/token";
-const ISSUE_URL = AUTH + "/v1/service-credentials";
+const SESSION_URL = AUTH + "/v1/oauth/application-session";
 const JWKS_URL = AUTH + "/.well-known/jwks.json";
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
 const GOOGLE_REVOKE_URL = "https://oauth2.googleapis.com/revoke";
@@ -32,12 +32,12 @@ const GMAIL_MESSAGES_PATH = new URL(GMAIL_MESSAGES_URL).pathname;
 const SESSION_KEY = Buffer.alloc(32, 7).toString("base64url");
 
 const SESSIONS = new Map([
-	["session-sync-owner", "account-sync-owner"],
-	["session-sync-other", "account-sync-other"],
+	["mas_v1.fixture.owner", "account-sync-owner"],
+	["mas_v1.fixture.syncother", "account-sync-other"],
 ]);
 const CODES = new Map([
-	["code-sync-owner", "session-sync-owner"],
-	["code-sync-other", "session-sync-other"],
+	["code-sync-owner", "mas_v1.fixture.owner"],
+	["code-sync-other", "mas_v1.fixture.syncother"],
 ]);
 
 const { publicKey, privateKey } = await generateKeyPair("EdDSA");
@@ -50,16 +50,16 @@ const jwk = {
 
 const accessCredential = (accountId, scope = ["whoyou.read"], confirmation) =>
 	new SignJWT({
-		consumer_id: accountId,
+		app_id: "app-fixture-instance", service_id: "mail", resource: ORIGIN + "/mcp",
 		device_id: "web-device-" + accountId,
 		scope,
 		...(confirmation ? { confirmation } : {}),
 	})
 		.setProtectedHeader({ alg: "EdDSA", typ: "JWT", kid: "test-key" })
 		.setIssuer("mira:cloud-auth")
-		.setAudience("mira:who-you")
+		.setAudience(ORIGIN + "/mcp")
 		.setSubject(accountId)
-		.setIssuedAt()
+		.setIssuedAt().setNotBefore(Math.floor(Date.now() / 1000))
 		.setExpirationTime("5m")
 		.sign(privateKey);
 
@@ -91,43 +91,29 @@ const createOutbound = (trace = {}) => async (request) => {
 	const url = new URL(request.url);
 
 	if (request.url === TOKEN_URL) {
-		const sessionToken = CODES.get(new URLSearchParams(await request.text()).get("code"));
-		if (!sessionToken) return Response.json({ error: "invalid_grant" }, { status: 400 });
-		return Response.json({
-			sessionToken,
-			expiresAt: new Date(Date.now() + 3600_000).toISOString(),
-		});
-	}
-
-	if (request.url === ISSUE_URL) {
-		const sessionToken = request.headers.get("authorization")?.replace(/^Bearer /, "");
-		const accountId = SESSIONS.get(sessionToken ?? "");
-		if (!accountId) return Response.json({ error: "invalid_token" }, { status: 401 });
-		const body = await request.json();
-		assert.equal(body.audience, "mira:who-you");
-		trace.credentialRequests ??= [];
-		trace.credentialRequests.push(body);
-		if (body.confirmation) {
-			return Response.json({
-				token: await accessCredential(
-					accountId,
-					["whoyou.mail.write"],
-					body.confirmation,
-				),
-				tokenType: "Bearer",
-				audience: "mira:who-you",
-				expiresAt: new Date(Date.now() + 300_000).toISOString(),
-			});
-		}
-		const scope = body.scopes ?? ["whoyou.read"];
-		return Response.json({
-			token: await accessCredential(accountId, scope),
-			tokenType: "Bearer",
-			audience: "mira:who-you",
-			expiresAt: new Date(Date.now() + 300_000).toISOString(),
-		});
-	}
-
+    const form = new URLSearchParams(await request.text());
+    assert.equal(form.get("client_id"), ORIGIN + "/oauth-client");
+    assert.equal(form.get("installation_id"), null);
+    assert.equal(form.get("platform"), null);
+    const token = CODES.get(form.get("code"));
+    if (!token) return Response.json({ error: "invalid_grant" }, { status: 400 });
+    const identity = { issuer: "mira:cloud-auth", subject: SESSIONS.get(token),
+      audience: ORIGIN + "/oauth-client", appId: "app-fixture-instance",
+      expiresAt: new Date(Date.now() + 1800_000).toISOString() };
+    trace.sessions ??= new Map();
+    trace.sessions.set(token, identity);
+    return Response.json({ access_token: token, token_type: "Bearer", expires_in: 1800, ...identity });
+  }
+  if (request.url === SESSION_URL) {
+    const token = request.headers.get("authorization")?.replace(/^Bearer /, "");
+    const identity = trace.sessions?.get(token);
+    trace.sessionChecks = (trace.sessionChecks ?? 0) + 1;
+    return identity ? Response.json(identity) : Response.json({ error: "invalid_token" }, { status: 401 });
+  }
+  if (request.url.endsWith("/v1/service-credentials")) {
+    trace.legacyRequests = (trace.legacyRequests ?? 0) + 1;
+    return new Response(null, { status: 404 });
+  }
 	if (request.url === JWKS_URL) return Response.json({ keys: [jwk] });
 
 	if (request.url === GOOGLE_TOKEN_URL) {
@@ -225,7 +211,9 @@ function createWorker(trace = {}, options = {}) {
 			MCP_RESOURCE_URL: MCP_ORIGIN + "/mcp",
 			CLOUD_AUTH_ISSUER: AUTH,
 			CLOUD_AUTH_JWKS_URL: JWKS_URL,
-			MCP_AUDIENCE: "mira:who-you",
+			WHOYOU_APP_ID: "app-fixture-instance",
+			WHOYOU_APP_SECRET: "fixture-registration-not-a-real-secret",
+			WHOYOU_MANIFEST_REVISION: "1",
 			MAIL_DOMAIN: "tomlab.cn",
 			MAIL_CREDENTIAL_KEK: Buffer.alloc(32, 9).toString("base64"),
 			GMAIL_OAUTH_CLIENT_ID: "synthetic-client",
@@ -337,7 +325,7 @@ async function seedThirdPartyMailbox(db, input) {
 
 async function mcpClient(mf, token) {
 	const transport = new StreamableHTTPClientTransport(new URL(MCP_ORIGIN + "/mcp"), {
-		requestInit: { headers: { authorization: `Bearer ${token}` } },
+		requestInit: { headers: { authorization: `Bearer ${token}`, host: new URL(MCP_ORIGIN).host } },
 		fetch: (input, init) =>
 			mf.dispatchFetch(
 				typeof input === "string" ? input : input instanceof URL ? input.href : input.url,
@@ -730,22 +718,11 @@ test("manual sync requires a write credential and refuses read-only callers", as
 			await readOnly.close();
 		}
 
-		// The same tool with write scope rejects an id outside the caller's account
-		// before any provider call.
-		const writer = await mcpClient(
-			mf,
-			await accessCredential("account-sync-owner", ["whoyou.read", "whoyou.mail.write"]),
-		);
-		try {
-			const notFound = await writer.callTool({
-				name: "whoyou_mailbox_sync",
-				arguments: { mailboxId: "mbx_not_this_account" },
-			});
-			assert.equal(notFound.structuredContent.error, "mailbox_not_found");
-			assert.equal(trace.googleRefreshes ?? 0, 0);
-		} finally {
-			await writer.close();
-		}
+		// This application declares only read scope; even a valid signature
+        // carrying an undeclared write scope must not reach the service.
+        await assert.rejects(mcpClient(mf,
+          await accessCredential("account-sync-owner", ["whoyou.read", "whoyou.mail.write"])));
+        assert.equal(trace.googleRefreshes ?? 0, 0);
 	} finally {
 		await mf.dispose();
 	}
