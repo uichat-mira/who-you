@@ -6,9 +6,9 @@ import {
 } from "./config";
 
 /**
- * The trusted operator input for the Mira ID service registry (OPS-047).
+ * The canonical declaration for Mira ID service registration (OPS-048/049).
  *
- * Registration itself belongs to Cloud Auth's administrator CLI. This module
+ * Application enrollment belongs to Cloud Auth; the operator publication script uses the managed declaration API. This module
  * owns only Who You's side of that contract: the stable service identity, the
  * one protocol revision this repository can prove, the actual HTTPS MCP
  * endpoint and the already-approved canonical read grant. It never contains an
@@ -52,7 +52,7 @@ const whoYouServiceEndpoint = z
 /**
  * Mirrors the closed A1 `serviceDefinitionSchema` shape for the canonical Who
  * You grant. Keeping the schema strict here catches an accidental extra field
- * before a maintainer pipes this document into the trusted admin CLI.
+ * before the service-side publication script uses the declaration.
  */
 export const WHOYOU_SERVICE_DEFINITION_SCHEMA = z.strictObject({
 	serviceId: z.literal(WHOYOU_SERVICE_ID),
