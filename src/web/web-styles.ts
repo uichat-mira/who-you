@@ -41,7 +41,7 @@ code{overflow-wrap:anywhere;font-family:var(--font-mono);font-size:var(--text-sm
 .site-nav .button{min-height:40px;padding:6px 16px}
 .hero{max-width:var(--site-width);margin:auto;padding:var(--section-space) var(--gutter);display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,.95fr);align-items:center;gap:clamp(32px,6vw,88px)}
 .hero-copy{min-width:0}
-.brand-ruby{ruby-position:over;ruby-align:center;white-space:nowrap}.brand-ruby rt{font-size:.25em;line-height:1.25;font-weight:var(--weight-bold);letter-spacing:.10em;color:var(--link);text-align:center;padding-bottom:.16em}
+.brand-ruby{ruby-position:over;ruby-align:center;white-space:nowrap}.brand-ruby rt{font-size:.25em;line-height:1.25;font-weight:var(--weight-bold);letter-spacing:.06em;color:var(--link);text-align:center;padding-bottom:.30em}
 .hero h1{font-size:var(--text-display);line-height:1.14;letter-spacing:-.055em;margin:0 0 var(--space-6);font-weight:var(--weight-bold)}
 .hero .lead{font-size:var(--text-hero-lead);line-height:1.7;max-width:34ch}
 .hero .auth-actions{display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-5);margin:var(--space-8) 0 var(--space-6)}
@@ -100,7 +100,7 @@ code{overflow-wrap:anywhere;font-family:var(--font-mono);font-size:var(--text-sm
 @media(max-width:720px){.mira-feature-inner{grid-template-columns:1fr;gap:var(--space-6)}}
 
 .account-identity{display:flex;align-items:flex-start;gap:var(--space-3);min-width:0}
-.account-avatar{display:grid;place-items:center;flex:none;width:var(--control-height);height:var(--control-height);background:var(--primary-soft);color:var(--foreground);border:var(--stroke-control) solid var(--ink-outline);border-radius:var(--radius-md);font-weight:var(--weight-bold)}
+.account-avatar{display:block;flex:none;width:var(--control-height);height:var(--control-height);object-fit:contain}
 .account-identity code{overflow-wrap:anywhere}
 .instance-details{margin-top:var(--space-10);border-top:1px solid var(--border);padding-top:var(--space-4)}
 .instance-details summary{cursor:pointer;font-weight:var(--weight-semibold);color:var(--foreground)}
