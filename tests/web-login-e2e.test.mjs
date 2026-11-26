@@ -77,11 +77,22 @@ test("real workerd: V1 OAuth callback -> app session -> revalidated account", as
       .find((directive) => directive.startsWith("form-action ")), "form-action 'self'");
     assert.match(body, /action="\/auth\/logout"/);
     assert.match(body, /<h1>账户<\/h1>/);
-    assert.match(body, /Mira 云账号/);
+    assert.match(body, /Mira ID 已连接/);
     assert.match(body, /account-e2e/);
-    assert.match(body, /应用会话已验证/);
+    assert.match(body, /狐邮应用访问/);
+    assert.match(body, /狐邮邮件服务/);
+    assert.match(body, /暂时无法获取邮箱状态/);
     assert.match(body, /href="\/account\/mailboxes"/);
     assert.match(body, /aria-current="page">账户<\/a>/);
+    assert.match(body, /<details class="instance-details">/);
+    assert.ok(body.includes(identity.appId));
+    assert.ok(body.includes(ORIGIN + "/mcp"));
+    assert.ok(body.includes(AUTH + "/account/applications"));
+    assert.ok(body.includes(AUTH + "/account/services"));
+    assert.match(body, /实例声明权限（非当前用户授权）/);
+    assert.match(body, /不代表你拥有或管理此应用/);
+    assert.ok(!body.includes(token));
+    assert.doesNotMatch(body, /fixture-registration-not-a-real-secret|AppSecret|WHOYOU_APP_SECRET|邮箱已连接/);
     assert.doesNotMatch(body, /mira-device-session-test-only-placeholder-secret/);
     const root = await mf.dispatchFetch(ORIGIN + "/", {
       redirect: "manual", headers: {cookie: cookies(callback)},
@@ -95,6 +106,9 @@ test("real workerd: V1 OAuth callback -> app session -> revalidated account", as
     const denied = await mf.dispatchFetch(ORIGIN + "/api/whoami", { headers: {cookie: cookies(callback)} });
     assert.equal(denied.status, 502);
     assert.doesNotMatch(await denied.text(), /account-e2e/);
+    const rejected = await mf.dispatchFetch(ORIGIN + "/account/mailboxes", {headers: {cookie: cookies(callback)}});
+    assert.equal(rejected.status, 502);
+    assert.doesNotMatch(await rejected.text(), /Mira ID 已连接/);
   } finally {
     await mf.dispose();
   }

@@ -1,5 +1,8 @@
+import { errorIllustration } from "./error-illustrations";
+import { webIcon } from "./icons";
+import { webStylesCss } from "./web-styles";
 import { createMailServices, resolveCredentialKeys, type WhoYouEnv } from "../mail/config";
-import { resolveApplicationInstance, resolveInstanceResource } from "../application/instance";
+import { applicationManifest, resolveApplicationInstance, resolveInstanceResource } from "../application/instance";
 import { listIdentities, unlinkMailbox } from "../mail/identity";
 import { startGmailLink } from "../mail/gmail-link";
 import { syncGmailMailbox } from "../mail/gmail-sync";
@@ -9,7 +12,7 @@ import { GMAIL_SYNC_MAX_MESSAGES_PER_RUN } from "../mail/gmail-sync";
 import { GMAIL_CALLBACK_PATH, resolveGmailOAuthConfig } from "../mail/gmail-link";
 import { GOOGLE_AUTHORIZATION_ENDPOINT } from "../mail/oauth-client";
 import { resolveMicrosoftOAuthConfig } from "../mail/microsoft-link";
-import { publicIntroduction, privacyPolicy, serviceTerms, publicFooter } from "./public-pages";
+import { publicIntroduction, miraIntroduction, privacyPolicy, serviceTerms, publicFooter } from "./public-pages";
 
 const STATE_COOKIE = "__Host-who_you_oauth";
 const SESSION_COOKIE = "__Host-who_you_session";
@@ -195,8 +198,9 @@ function escapeText(s: string): string {
     '"': "&quot;", "'": "&#39;" })[c]!);
 }
 type PageOptions = {
-  shell?: "auth" | "app";
+  shell?: "auth" | "app" | "home";
   active?: "account" | "mailboxes";
+  sessionVerified?: boolean;
 };
 
 function page(content: string, outgoing = headers(), status = 200,
@@ -204,12 +208,13 @@ function page(content: string, outgoing = headers(), status = 200,
   const h = outgoing;
   h.set("content-type", "text/html; charset=utf-8");
   const app = options.shell === "app";
+  const home = options.shell === "home";
   // Chromium applies form-action to the redirect after a native POST as well.
   // Only the mailbox page may navigate a form flow to the pinned Google endpoint.
   const formAction = app && options.active === "mailboxes"
     ? `'self' ${GOOGLE_AUTHORIZATION_ENDPOINT}` : "'self'";
   h.set("content-security-policy",
-    `default-src 'none'; style-src 'unsafe-inline'; form-action ${formAction}; base-uri 'none'; frame-ancestors 'none'`);
+    `default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; form-action ${formAction}; base-uri 'none'; frame-ancestors 'none'`);
   // Native same-origin POST forms need a non-null Origin. Keep OAuth redirects,
   // callback error pages and JSON responses on the default no-referrer policy.
   if (app) h.set("referrer-policy", "same-origin");
@@ -218,66 +223,129 @@ function page(content: string, outgoing = headers(), status = 200,
 <a href="/account/mailboxes"${options.active === "mailboxes" ? ' aria-current="page"' : ""}>邮箱</a>
 </nav>` : "";
   return new Response(`<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>狐邮 · Who You</title>
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>狐邮 · Who-You</title>
+<link rel="icon" href="/brand/favicon/favicon.ico" sizes="any">
+<link rel="icon" href="/brand/favicon/favicon-32.png" type="image/png" sizes="32x32">
+<link rel="apple-touch-icon" href="/brand/favicon/apple-touch-icon.png">
 <style>
-:root{color-scheme:light;--ink:#232426;--muted:#686b70;--line:#e5e6e7;--soft:#f4f5f5;--accent:#155867;--accent-soft:#edf4f5}
-*{box-sizing:border-box}body{margin:0;background:#f6f6f4;color:var(--ink);font:15px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
-body:before{content:"";display:block;height:6px;background:var(--accent)}
-main{width:min(620px,calc(100% - 28px));margin:5vh auto;background:#fff;border:1px solid var(--line);border-radius:12px;overflow:hidden;box-shadow:0 10px 34px rgba(28,35,38,.035)}
-.brandbar{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:24px 28px 18px}
-.brand{color:var(--ink);text-decoration:none;font:600 24px/1.1 "Iowan Old Style",Georgia,serif;letter-spacing:.01em}.brand span{font-weight:400;color:#45484b}
-.session-mark{font-size:12px;color:#3d6a54;background:#eef6f1;border:1px solid #d5e8dc;border-radius:999px;padding:3px 9px}
-.appnav{display:flex;gap:4px;padding:0 20px 10px;border-bottom:1px solid var(--line)}.appnav a{color:#555b60;text-decoration:none;padding:7px 10px;border-radius:6px}
-.appnav a[aria-current="page"]{color:var(--ink);background:var(--soft);font-weight:600}
-.content{padding:28px}.content.auth{padding-top:18px;padding-bottom:34px}
-h1{font:600 27px/1.25 "Iowan Old Style",Georgia,serif;margin:0 0 10px}h2{font-size:17px;margin:28px 0 10px}p{color:#52565a;margin:8px 0 14px}.lead{font-size:16px;max-width:44ch}.eyebrow{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:#73777c;margin:0 0 12px}
-a{color:#1762b0}.button,button{display:inline-flex;align-items:center;justify-content:center;min-height:42px;border-radius:7px;padding:9px 15px;border:1px solid #282a2c;background:#282a2c;color:#fff;text-decoration:none;font:inherit;cursor:pointer}
-.button.secondary{background:#fff;color:#282a2c;border-color:#d5d7d8}.button:focus-visible,button:focus-visible,a:focus-visible{outline:3px solid #8ab4e8;outline-offset:2px}
-button[disabled]{background:#e5e5e5;border-color:#e5e5e5;color:#777;cursor:not-allowed}
-.auth-actions{margin:22px 0 14px}.footnote{font-size:13px;color:#767a7e;max-width:50ch}
-.settings{border-top:1px solid var(--line);margin-top:22px}.setting-row{display:flex;justify-content:space-between;align-items:flex-start;gap:18px;padding:18px 0;border-bottom:1px solid var(--line)}
-.setting-row strong{font-size:15px}.setting-row p{margin:4px 0 0}.setting-actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:20px}.setting-actions form{margin:0}
-code{overflow-wrap:anywhere;font-size:13px;background:#f3f3f2;padding:2px 5px;border-radius:4px}
-.mailboxes,.providers{list-style:none;margin:0;padding:0}.mailbox,.providers li{border:1px solid var(--line);border-radius:8px;padding:14px;margin:0 0 10px}
-.address{overflow-wrap:anywhere;margin:0 0 6px}.meta{margin:0 0 6px;color:#333}.hint{color:#707479;font-size:13px;margin:4px 0 0}
-.pill{display:inline-block;border:1px solid currentColor;border-radius:999px;padding:1px 9px;font-size:12px;line-height:1.55;white-space:nowrap}.pill.ok{color:#2f6b48}.pill.warn{color:#8a5b12}.pill.bad{color:#a33a35}.pill.muted{color:#74777b}
-.notice{background:var(--soft);border:1px solid #e0e2e3;border-radius:8px;padding:12px 14px;margin:16px 0}.notice p:last-child{margin-bottom:0}.notice.error{background:#fcf3f2;border-color:#efd6d3}.notice.auth-required{background:var(--accent-soft);border-color:#d7e7ea}
-.inline-actions{display:flex;gap:14px;flex-wrap:wrap}.inline-actions a{text-decoration:none;font-weight:600}
-.mailbox-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}.mailbox-actions form{margin:0}
-.notice.ok{background:#eef6f1;border-color:#d5e8dc}
-.public-intro{border-top:1px solid var(--line);margin-top:26px;padding-top:4px}.public-intro h2,.legal h2{margin-top:22px}.legal p,.legal li,.public-intro p{overflow-wrap:anywhere}.legal ul{padding-left:1.3em}.public-footer{border-top:1px solid var(--line);padding:16px 20px;text-align:center;font-size:13px;color:var(--muted)}.public-footer a{color:var(--muted);margin:0 7px;text-decoration:underline;text-underline-offset:3px}
-@media (max-width:520px){main{margin:0;width:100%;min-height:100vh;border:0;border-radius:0;box-shadow:none}.brandbar{padding:20px 20px 14px}.content{padding:22px 20px}.appnav{padding-left:12px}.setting-row{gap:10px}}
-</style></head><body><main>
-<header class="brandbar"><a class="brand" href="/">狐邮 <span>· Who You</span></a>${app ? '<span class="session-mark">云账号已登录</span>' : ""}</header>
+${webStylesCss}
+</style></head><body class="page-${home ? "home" : app ? "app" : "auth"}"><main>
+<header class="brandbar"><a class="brand" href="/"><img src="/brand/logo/light/horizontal-bilingual.webp" alt="狐邮 Who-You" width="1536" height="472"></a>${app ? (options.sessionVerified ? '<span class="session-mark">Mira ID 已连接</span>' : '') : home ? '<nav class="site-nav" aria-label="网站导航"><a href="#about">关于狐邮</a><a class="button secondary" href="#login">使用 Mira ID 继续</a></nav>' : ""}</header>
 ${nav}<div class="content${app ? "" : " auth"}">${content}</div>${publicFooter}</main></body></html>`, { status, headers: h });
+}
+
+// Browser document navigation only; API clients retain the existing JSON contract.
+function acceptsHtml(request: Request): boolean {
+  if (request.headers.has("authorization")) return false;
+  return (request.headers.get("accept") ?? "").split(",").some(part => {
+    const [media, ...params] = part.trim().toLowerCase().split(";");
+    return media?.trim() === "text/html" && !params.some(p => /^q\s*=\s*0(?:\.0*)?$/.test(p.trim()));
+  });
+}
+
+type ErrorContent = { title: string; detail: string; action?: string; href?: string; secondary?: string; secondaryHref?: string };
+function errorContent(status: number, code: string): ErrorContent {
+  if (code === "logout_unconfirmed") return { title: "退出尚未确认", detail: "本机登录凭据已清除，但未能确认远端会话已结束。你可以返回首页，或在 Mira ID 检查授权状态。" };
+  if (code === "cloud_auth_code_rejected" || code === "login_incomplete") return { title: "登录没有完成", detail: "登录已过期、被取消或验证失败。请重新登录。", action: "重新登录", href: "/" };
+  if (code === "invalid_state" || code === "provider_reauth_required") return { title: "邮箱连接没有完成", detail: "授权请求可能已过期或被取消。请返回邮箱管理，重新发起连接。", action: "返回邮箱管理", href: "/account/mailboxes" };
+  if (code === "authentication_link_unavailable") return { title: "暂时无法获取账户", detail: "服务暂时不可用，或当前登录需要重新验证。请重试；如授权已失效，可重新登录。", action: "重新登录", href: "/auth/start?returnTo=%2Faccount", secondary: "重试", secondaryHref: "/account" };
+  if (status === 404) return { title: "这封信走错了路。", detail: "你要找的页面不存在，或已经移动。返回狐邮首页，重新出发。" };
+  if (status === 403) return { title: "这一步无法继续", detail: "当前请求未通过安全验证。请返回狐邮，从原来的入口重新操作。" };
+  if (status === 401) return { title: "需要重新登录", detail: "当前登录状态无法验证，请重新登录后继续。", action: "重新登录", href: "/" };
+  if (status === 405) return { title: "这个操作暂不可用", detail: "请从狐邮页面中的正常入口发起操作。" };
+  if (status === 400 || status === 413 || status === 415) return { title: "请求没有完成", detail: "提交的内容无法处理，请返回原页面检查后再试。" };
+  if (status === 503) return { title: "狐邮暂时无法服务", detail: "服务正在准备中或暂时不可用。请稍后再试。", action: "返回首页", href: "/" };
+  return { title: "暂时遇到一点问题", detail: "服务没有按预期响应，请稍后再试。", action: "返回首页", href: "/" };
+}
+
+function errorPage(status: number, code: string, outgoing = headers()): Response {
+  const content = errorContent(status, code);
+  const label = code === "login_incomplete" ? "SIGN IN / 未完成" : `ERROR / ${status}`;
+  outgoing.set("vary", "Accept");
+  return page(`<section class="error-page" aria-labelledby="error-title">
+<div class="error-copy"><p class="eyebrow">${label}</p>
+<h1 id="error-title">${content.title}</h1><p class="lead">${content.detail}</p>
+<div class="auth-actions"><a class="button" href="${content.href ?? "/"}">${content.action ?? "返回首页"} ${webIcon("arrow")}</a>
+${content.secondary ? `<a class="button secondary" href="${content.secondaryHref}">${content.secondary}</a>` : ""}</div></div>
+<div class="error-art" aria-hidden="true">${errorIllustration(status, code)}</div></section>`, outgoing, status);
+}
+
+const machinePaths = /^\/(?:api|mcp|\.well-known|mira|mail|brand)(?:\/|$)/;
+export function webNotFound(request: Request, env: WhoYouEnv): Response | null {
+  const url = new URL(request.url);
+  const resource = resolveInstanceResource(env);
+  if (request.method !== "GET" || machinePaths.test(url.pathname) || !acceptsHtml(request)
+      || !resource || resource.origin !== url.origin) return null;
+  return errorPage(404, "not_found");
 }
 
 function renderLoginPage(returnTo: ProtectedPage, blocked: boolean): string {
   const href = "/auth/start?" + new URLSearchParams({ returnTo }).toString();
-  return `<p class="eyebrow">Mail capability settings</p>
-<h1>狐邮 · 邮件能力服务</h1>
-<p class="lead">连接 Mira 云账号，独立管理邮箱授权，让获准的客户端以 MCP 使用邮件能力。狐邮不是传统网页邮箱客户端。</p>
+  return `<section class="hero" aria-labelledby="hero-title">
+<div class="hero-copy">
+<h1 id="hero-title"><ruby class="brand-ruby">狐邮<rt lang="en">Who You</rt></ruby>，<br>不止于忽悠。</h1>
+<p class="lead">连接你的邮箱与智能体，让查找邮件、整理信息和日常通信变得更加自然。</p>
 ${blocked ? `<div class="notice auth-required" role="status"><strong>这个页面需要先登录</strong>
 <p>登录完成后会回到你刚才要访问的位置。</p></div>` : ""}
-<div class="auth-actions"><a class="button" href="${escapeText(href)}">使用 Mira 云账号登录</a></div>
-<p class="footnote">登录由 Cloud Auth 完成。登录只确认你的 Mira 云账号身份，不会自动授权 Gmail、Microsoft 或其他邮箱。</p>
-${publicIntroduction}`;
+<div class="auth-actions" id="login"><a class="button" href="${escapeText(href)}">使用 Mira ID 继续 ${webIcon("arrow")}</a><a href="#about">了解狐邮</a></div>
+<p class="footnote">连接 Mira ID 后，你可以管理自己的邮箱，并授权 Mira 客户端使用狐邮提供的邮件能力。登录不会自动授予邮箱访问权限。</p>
+</div>
+<div class="hero-poster" aria-hidden="true">
+<div class="poster-top"><span>WHO-YOU</span><span>MAIL / MCP</span></div>
+<div class="poster-orbit"></div><span class="poster-dot"></span>
+<img class="poster-mark" src="/brand/logo/dark/symbol.webp" width="720" height="720" alt="">
+<div class="poster-bottom"><span>YOUR MAIL.</span><span>YOUR CALL.</span></div>
+</div>
+</section>
+<section class="capabilities" aria-label="产品定位"><div class="capabilities-inner">
+<div class="capability"><span class="capability-icon">${webIcon("connect")}</span><div><h2>连接</h2><p>让邮箱与智能体相遇。</p></div></div>
+<div class="capability"><span class="capability-icon">${webIcon("collaborate")}</span><div><h2>协作</h2><p>让邮件信息为你所用。</p></div></div>
+<div class="capability"><span class="capability-icon">${webIcon("control")}</span><div><h2>掌控</h2><p>每一份授权，由你决定。</p></div></div>
+</div></section>
+${publicIntroduction}
+${miraIntroduction}`;
 }
 
-function renderAccountPage(id: { accountId: string; consumerId: string; scopes: string[] }): string {
+function renderAccountPage(
+  id: { accountId: string },
+  instance: NonNullable<ReturnType<typeof resolveApplicationInstance>>,
+  base: string,
+  outcome: MailboxListOutcome,
+): string {
+  const manifest = applicationManifest(instance);
+  const service = manifest.services[0]!;
+  const appsUrl = escapeText(new URL("/account/applications", base).href);
+  const grantsUrl = escapeText(new URL("/account/services", base).href);
+  const mailboxStatus = outcome.ok
+    ? outcome.mailboxes.length === 0 ? "尚未连接" : `已登记 ${outcome.mailboxes.length} 个邮箱`
+    : "暂时无法获取邮箱状态";
   return `<h1>账户</h1>
-<p class="lead">Who You 只保留与邮件能力有关的少量配置。身份由 Cloud Auth 管理，邮箱授权由狐邮单独管理。</p>
+<p class="lead">使用 Mira ID 进入狐邮。你的身份、应用授权与邮箱连接分别管理。</p>
 <div class="settings">
-<div class="setting-row"><div><strong>Mira 云账号</strong>
-<p class="hint">当前浏览器会话已通过 Cloud Auth 验证。</p>
-<p><code>${escapeText(id.accountId)}</code></p></div><span class="pill ok">已登录</span></div>
-<div class="setting-row"><div><strong>狐邮访问</strong>
-<p class="hint">应用会话已验证；智能体服务授权请在 Mira ID 管理</p></div><span class="pill ok">已连接</span></div>
+<div class="setting-row"><div class="account-identity"><span class="account-avatar" aria-hidden="true">M</span><div><strong>Mira ID</strong>
+<p class="hint">当前账号</p><p><code>${escapeText(id.accountId)}</code></p></div></div><span class="pill ok">已连接</span></div>
+<div class="setting-row"><div><strong>狐邮应用访问</strong>
+<p class="hint">你已授权狐邮使用你的 Mira ID 身份。此状态不代表邮件服务权限或邮箱授权。</p></div><span class="pill ok">已授权</span></div>
+<div class="setting-row"><div><strong>授权能力 · ${escapeText(service.name)}</strong>
+<p class="hint">在 Mira ID 查看和管理智能体的实际服务授权。</p></div><a href="${grantsUrl}">查看授权 ${webIcon("arrow")}</a></div>
+<div class="setting-row"><div><strong>邮箱</strong><p class="hint">${mailboxStatus}</p></div><a href="/account/mailboxes">管理邮箱 ${webIcon("arrow")}</a></div>
 </div>
-<div class="setting-actions">
-<a class="button secondary" href="/account/mailboxes">邮箱设置</a>
-<form method="post" action="/auth/logout"><button type="submit">退出登录</button></form>
-</div>`;
+<div class="setting-actions"><form method="post" action="/auth/logout"><button class="button secondary" type="submit">退出狐邮</button></form></div>
+<p class="footnote">退出狐邮不会解绑你的邮箱，也不会撤销 Mira ID 中的服务授权。</p>
+<details class="instance-details">
+<summary>应用实例</summary>
+<div class="instance-content">
+<h2>${escapeText(manifest.name)}</h2>
+<p class="hint">当前部署公开信息，不代表你拥有或管理此应用。</p>
+<dl class="instance-fields">
+<div><dt>应用 ID</dt><dd><code>${escapeText(manifest.appId)}</code></dd></div>
+<div><dt>应用地址</dt><dd><code>${escapeText(instance.origin)}</code></dd></div>
+<div><dt>MCP</dt><dd><code>${escapeText(service.protocol.endpoint)}</code></dd></div>
+<div><dt>实例声明权限（非当前用户授权）</dt><dd><code>${escapeText(service.scopes.join(", "))}</code></dd></div>
+</dl>
+<p class="hint">登记凭据由部署环境安全保管。应用登记与所有权管理在 Mira ID 的「我的应用」完成。</p>
+<a class="button secondary" href="${appsUrl}">在 Mira ID 中管理 ${webIcon("arrow")}</a>
+</div></details>`;
 }
 
 function baseUrl(env: WhoYouEnv): string | null {
@@ -409,10 +477,15 @@ type MailboxListOutcome =
 
 async function fetchMailboxList(env: WhoYouEnv, session: Session): Promise<MailboxListOutcome> {
   if (!await validateSession(env, session)) return { ok: false, error: "authentication_link_unavailable" };
+  return listVerifiedAccountMailboxes(env, session.subject);
+}
+
+// Caller has already verified the application session for this exact account.
+async function listVerifiedAccountMailboxes(env: WhoYouEnv, accountId: string): Promise<MailboxListOutcome> {
   const resolved = createMailServices(env);
   if (!resolved.ok) return { ok: false, error: "mailboxes_unavailable", reason: resolved.reason };
   const services = resolved.services;
-  const identities = await listIdentities(services.repository, services.credentials, services.syncStates, session.subject);
+  const identities = await listIdentities(services.repository, services.credentials, services.syncStates, accountId);
   const mailboxes = projectMailboxes({ identities: identities.map(entry => ({
     mailboxId: entry.mailbox.id, address: entry.mailbox.address, kind: entry.mailbox.kind,
     provider: entry.mailbox.provider, status: entry.mailbox.status,
@@ -793,9 +866,10 @@ function renderMailboxesPage(
   const mailboxSection = outcome.ok
     ? (outcome.mailboxes.length
       ? `<ul class="mailboxes">${outcome.mailboxes.map((mailbox) => renderMailbox(mailbox, env)).join("")}</ul>`
-      : `<div class="notice"><p>当前账号还没有登记邮箱。</p>
+      : `<div class="notice"><p>当前账号还没有登记邮箱。尚未连接。</p>
 <p>连接 Gmail 后，真实授权成功的邮箱会出现在这里。</p></div>`)
     : `<div class="notice error" role="alert">
+<strong class="notice-heading">${webIcon("control")} 暂时无法获取邮箱</strong>
 <p>${escapeText(mailboxFailureMessage(outcome.error))}</p>
 <div class="inline-actions"><a href="/account/mailboxes">重试</a>
 <a href="/auth/start?returnTo=%2Faccount%2Fmailboxes">重新登录</a></div></div>`;
@@ -811,12 +885,12 @@ ${mailboxSection}
 <h2 id="add-mailbox">添加邮箱</h2>
 <ul class="providers">
 <li><strong>Gmail</strong> ${gmailReady ? '<span class="pill ok">可接入</span>' : '<span class="pill muted">尚未配置</span>'}
-<p class="hint">通过 Google OAuth 授权狐邮读取与发送邮件；登录 Mira 云账号本身不会授予 Gmail 权限。</p>
+<p class="hint">通过 Google OAuth 授权狐邮读取与发送邮件；连接 Mira ID 本身不会授予 Gmail 权限。</p>
 ${gmailReady ? '<form method="post" action="/account/mailboxes/gmail/link"><button type="submit">连接 Gmail</button></form>' : ""}</li>
 <li><strong>Microsoft</strong> <span class="pill muted">尚未开放</span>
-<p class="hint">本卡不开放 Microsoft 真实接入。</p></li>
+<p class="hint">暂不支持连接 Microsoft 邮箱。</p></li>
 <li><strong>IMAP/SMTP</strong> <span class="pill muted">尚未开放</span>
-<p class="hint">本卡不开放自填服务器真实接入。</p></li>
+<p class="hint">暂不支持自定义邮箱服务器。</p></li>
 </ul>
 </section>
 <p class="footnote">“本地配置就绪”只说明狐邮运行环境已准备好必要依赖，不代表邮箱连接成功或可以收发邮件。
@@ -824,7 +898,7 @@ ${gmailReady ? '<form method="post" action="/account/mailboxes/gmail/link"><butt
 }
 
 /** Isolated browser login/BFF. The existing /mcp bearer gate is unchanged. */
-export async function handleWebRequest(request: Request, env: WhoYouEnv): Promise<Response | null> {
+async function handleWebRequestInternal(request: Request, env: WhoYouEnv): Promise<Response | null> {
   const u = new URL(request.url), path = u.pathname;
   const webPaths = [
     "/", "/privacy", "/terms", "/auth/start", "/auth/callback", "/auth/logout", "/account",
@@ -832,22 +906,29 @@ export async function handleWebRequest(request: Request, env: WhoYouEnv): Promis
     "/account/mailboxes/sync", "/api/whoami", "/api/mailboxes",
   ];
   if (!webPaths.includes(path) && path !== GMAIL_CALLBACK_PATH) return null;
+  const browser = !path.startsWith("/api/") && acceptsHtml(request);
+  const respondError = (status: number, code: string, outgoing = headers()): Response => {
+    if (browser) return errorPage(status, code, outgoing);
+    if (!path.startsWith("/api/")) outgoing.set("vary", "Accept");
+    return jsonError(status, code, outgoing);
+  };
+
   const resource = resolveInstanceResource(env);
-  if (!resource) return jsonError(503, "application_not_configured");
+  if (!resource) return respondError(503, "application_not_configured");
   const ORIGIN = resource.origin;
   if (u.origin !== ORIGIN) return jsonError(404, "not_found");
   // Public disclosures do not depend on login or registration secrets.
   if (path === "/privacy" || path === "/terms") {
-    if (request.method !== "GET") return jsonError(405, "method_not_allowed");
+    if (request.method !== "GET") return respondError(405, "method_not_allowed");
     return page(path === "/privacy" ? privacyPolicy : serviceTerms);
   }
   const instance = resolveApplicationInstance(env);
-  if (!instance) return jsonError(503, "application_not_configured");
+  if (!instance) return respondError(503, "application_not_configured");
   const key = await importSessionKey(env.WHOYOU_WEB_SESSION_KEY), base = baseUrl(env);
-  if (!key || !base) return jsonError(503, "web_login_not_configured");
+  if (!key || !base) return respondError(503, "web_login_not_configured");
 
   if (path === GMAIL_CALLBACK_PATH) {
-    if (request.method !== "GET") return jsonError(405, "method_not_allowed");
+    if (request.method !== "GET") return respondError(405, "method_not_allowed");
     const state = u.searchParams.get("state");
     const h = headers();
     const prior = await unseal(key, getCookie(request, MAIL_OAUTH_RESULT_COOKIE));
@@ -859,7 +940,7 @@ export async function handleWebRequest(request: Request, env: WhoYouEnv): Promis
     const rawFlowCookie = getCookie(request, MAIL_OAUTH_COOKIE);
     // The public V1 MCP grant is read-only. Only the human Web flow can
     // start Gmail linking; a bare callback cannot bypass app-session checks.
-    if (rawFlowCookie === null) return jsonError(400,
+    if (rawFlowCookie === null) return respondError(400,
       u.searchParams.has("error") ? "provider_reauth_required" : "invalid_state");
 
     const flow = await unseal(key, rawFlowCookie);
@@ -915,16 +996,16 @@ export async function handleWebRequest(request: Request, env: WhoYouEnv): Promis
   }
 
   if (path === "/") {
-    if (request.method !== "GET") return jsonError(405, "method_not_allowed");
+    if (request.method !== "GET") return respondError(405, "method_not_allowed");
     const session = await unseal(key, getCookie(request, SESSION_COOKIE));
     if (isSession(session) && await validateSession(env, session)) return redirect("/account");
     const returnTo = returnToFrom(u.searchParams.get("returnTo"));
     const blocked = u.searchParams.get("reason") === "sign_in_required";
-    return page(renderLoginPage(returnTo, blocked));
+    return page(renderLoginPage(returnTo, blocked), headers(), 200, { shell: "home" });
   }
 
   if (path === "/auth/start") {
-    if (request.method !== "GET") return jsonError(405, "method_not_allowed");
+    if (request.method !== "GET") return respondError(405, "method_not_allowed");
     const returnTo = returnToFrom(u.searchParams.get("returnTo"));
     const state = random(), verifier = random();
     const hash = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)));
@@ -941,14 +1022,12 @@ export async function handleWebRequest(request: Request, env: WhoYouEnv): Promis
   }
 
   if (path === "/auth/callback") {
-    if (request.method !== "GET") return jsonError(405, "method_not_allowed");
+    if (request.method !== "GET") return respondError(405, "method_not_allowed");
     const flow = await unseal(key, getCookie(request, STATE_COOKIE));
     const h = headers(); addCookie(h, STATE_COOKIE, "", 0);
     if (!isFlow(flow) || flow.appId !== instance.appId || flow.state !== u.searchParams.get("state")
       || u.searchParams.has("error") || !u.searchParams.get("code"))
-      return page(`<h1>登录没有完成</h1>
-<p>登录已过期、被取消或验证失败。</p>
-<div class="auth-actions"><a class="button" href="/">重新登录</a></div>`, h);
+      return errorPage(200, "login_incomplete", h);
     try {
       const r = await fetch(new URL("/v1/oauth/token", base), {
         method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, redirect: "manual", signal: AbortSignal.timeout(5000),
@@ -958,7 +1037,7 @@ export async function handleWebRequest(request: Request, env: WhoYouEnv): Promis
           code_verifier: flow.verifier,
         }).toString(),
       });
-      if (!r.ok) return jsonError(401, "cloud_auth_code_rejected", h);
+      if (!r.ok) return respondError(401, "cloud_auth_code_rejected", h);
       const value = await r.json() as Record<string, unknown>;
       const issued = { accessToken: value.access_token, expiresAt: value.expiresAt, subject: value.subject,
         audience: value.audience, appId: value.appId, issuer: value.issuer };
@@ -966,16 +1045,16 @@ export async function handleWebRequest(request: Request, env: WhoYouEnv): Promis
           value.token_type !== "Bearer" || typeof value.expires_in !== "number" ||
           !Number.isInteger(value.expires_in) || value.expires_in <= 0 || value.expires_in > 3600 ||
           !isSession(issued) || Date.parse(issued.expiresAt) > Date.now() + 3600_000 ||
-          !await validateSession(env, issued)) return jsonError(502, "cloud_auth_invalid_session", h);
+          !await validateSession(env, issued)) return respondError(502, "cloud_auth_invalid_session", h);
       const age = Math.min(3600, Math.floor((Date.parse(issued.expiresAt) - Date.now()) / 1000));
       addCookie(h, SESSION_COOKIE, await seal(key, issued), age);
       return redirect(flow.returnTo ?? "/account", h);
-    } catch { return jsonError(502, "cloud_auth_unavailable", h); }
+    } catch { return respondError(502, "cloud_auth_unavailable", h); }
   }
 
   if (path === "/auth/logout") {
-    if (request.method !== "POST") return jsonError(405, "method_not_allowed");
-    if (request.headers.get("origin") !== ORIGIN) return jsonError(403, "origin_not_allowed");
+    if (request.method !== "POST") return respondError(405, "method_not_allowed");
+    if (request.headers.get("origin") !== ORIGIN) return respondError(403, "origin_not_allowed");
     const raw = await unseal(key, getCookie(request, SESSION_COOKIE));
     const h = headers(); addCookie(h, SESSION_COOKIE, "", 0);
     if (isSession(raw) && raw.appId === instance.appId && raw.audience === instance.clientId) {
@@ -983,8 +1062,8 @@ export async function handleWebRequest(request: Request, env: WhoYouEnv): Promis
         const r = await fetch(new URL("/v1/oauth/application-session/logout", base), {
           method: "POST", headers: { authorization: `Bearer ${raw.accessToken}` }, redirect: "manual", signal: AbortSignal.timeout(5000),
         });
-        if (!r.ok && r.status !== 401) return jsonError(502, "logout_unconfirmed", h);
-      } catch { return jsonError(502, "logout_unconfirmed", h); }
+        if (!r.ok && r.status !== 401) return respondError(502, "logout_unconfirmed", h);
+      } catch { return respondError(502, "logout_unconfirmed", h); }
     }
     return redirect("/", h);
   }
@@ -993,16 +1072,16 @@ export async function handleWebRequest(request: Request, env: WhoYouEnv): Promis
     || path === "/account/mailboxes/unlink"
     || path === "/account/mailboxes/sync";
   if (mutation) {
-    if (request.method !== "POST") return jsonError(405, "method_not_allowed");
-    if (request.headers.get("origin") !== ORIGIN) return jsonError(403, "origin_not_allowed");
-    if (request.headers.has("authorization")) return jsonError(400, "unexpected_authorization");
-    if ([...u.searchParams.keys()].length > 0) return jsonError(400, "unexpected_parameter");
-  } else if (request.method !== "GET") return jsonError(405, "method_not_allowed");
+    if (request.method !== "POST") return respondError(405, "method_not_allowed");
+    if (request.headers.get("origin") !== ORIGIN) return respondError(403, "origin_not_allowed");
+    if (request.headers.has("authorization")) return respondError(400, "unexpected_authorization");
+    if ([...u.searchParams.keys()].length > 0) return respondError(400, "unexpected_parameter");
+  } else if (request.method !== "GET") return respondError(405, "method_not_allowed");
   const session = await unseal(key, getCookie(request, SESSION_COOKIE));
   if (!isSession(session)) {
     if (mutation) return redirect(guardLocation("/account/mailboxes"));
     if (validReturnTo(path)) return redirect(guardLocation(path));
-    return jsonError(401, "sign_in_required");
+    return respondError(401, "sign_in_required");
   }
 
   if (path === "/account/mailboxes/gmail/link") {
@@ -1026,17 +1105,17 @@ export async function handleWebRequest(request: Request, env: WhoYouEnv): Promis
   if (path === "/account/mailboxes/unlink") {
     const contentType = request.headers.get("content-type") ?? "";
     if (!contentType.toLowerCase().startsWith("application/x-www-form-urlencoded")) {
-      return jsonError(415, "unsupported_media_type");
+      return respondError(415, "unsupported_media_type");
     }
     const raw = await request.text();
-    if (raw.length > 512) return jsonError(413, "request_too_large");
+    if (raw.length > 512) return respondError(413, "request_too_large");
     const form = new URLSearchParams(raw);
     if ([...form.keys()].some((name) => name !== "mailboxId")) {
-      return jsonError(400, "unexpected_parameter");
+      return respondError(400, "unexpected_parameter");
     }
     const mailboxId = form.get("mailboxId") ?? "";
     if (!/^[A-Za-z0-9._:-]{1,80}$/.test(mailboxId)) {
-      return jsonError(400, "invalid_mailbox_id");
+      return respondError(400, "invalid_mailbox_id");
     }
     const unlinked = await unlinkWebGmail(env, session, mailboxId);
     return redirect(`/account/mailboxes?notice=${unlinked.ok ? "gmail_unlinked" : unlinked.code === "sync_in_progress" ? "gmail_unlink_busy" : "gmail_unlink_failed"}`);
@@ -1045,17 +1124,17 @@ export async function handleWebRequest(request: Request, env: WhoYouEnv): Promis
   if (path === "/account/mailboxes/sync") {
     const contentType = request.headers.get("content-type") ?? "";
     if (!contentType.toLowerCase().startsWith("application/x-www-form-urlencoded")) {
-      return jsonError(415, "unsupported_media_type");
+      return respondError(415, "unsupported_media_type");
     }
     const raw = await request.text();
-    if (raw.length > 512) return jsonError(413, "request_too_large");
+    if (raw.length > 512) return respondError(413, "request_too_large");
     const form = new URLSearchParams(raw);
     if ([...form.keys()].some((name) => name !== "mailboxId")) {
-      return jsonError(400, "unexpected_parameter");
+      return respondError(400, "unexpected_parameter");
     }
     const mailboxId = form.get("mailboxId") ?? "";
     if (!/^[A-Za-z0-9._:-]{1,80}$/.test(mailboxId)) {
-      return jsonError(400, "invalid_mailbox_id");
+      return respondError(400, "invalid_mailbox_id");
     }
     const synced = await syncWebGmail(env, session, mailboxId);
     return redirect(syncRedirectLocation(synced));
@@ -1067,7 +1146,7 @@ export async function handleWebRequest(request: Request, env: WhoYouEnv): Promis
     const counts = notice === "gmail_sync_completed" ? syncCountsFromQuery(u) : null;
     return page(renderMailboxesPage(outcome, env, notice, counts), headers(),
       outcome.ok ? 200 : outcome.error === "mailboxes_unavailable" ? 503 : 502,
-      { shell: "app", active: "mailboxes" });
+      { shell: "app", active: "mailboxes", sessionVerified: outcome.ok || outcome.error !== "authentication_link_unavailable" });
   }
   if (path === "/api/mailboxes") return handleMailboxList(request, env, session, u);
 
@@ -1078,16 +1157,32 @@ export async function handleWebRequest(request: Request, env: WhoYouEnv): Promis
   try { identity = await readIdentity(env, session); }
   catch { identity = null; }
   if (!identity) {
-    if (path === "/api/whoami") return jsonError(502, "authentication_link_unavailable");
-    return page(`<h1>暂时无法获取账户</h1>
-<p>服务暂时不可用，或当前登录需要重新验证。请重试；如授权已失效，可重新登录。</p>
-<div class="auth-actions"><a class="button secondary" href="/account">重试</a>
-<a class="button" href="/auth/start?returnTo=%2Faccount">重新登录</a></div>`, headers(), 502);
+    if (path === "/api/whoami") return respondError(502, "authentication_link_unavailable");
+    return errorPage(502, "authentication_link_unavailable");
   }
   if (path === "/api/whoami") {
     const h = headers(); h.set("content-type", "application/json; charset=utf-8");
     return new Response(JSON.stringify(identity), { headers: h });
   }
   const id = identity as { accountId: string; consumerId: string; scopes: string[] };
-  return page(renderAccountPage(id), headers(), 200, { shell: "app", active: "account" });
+  // An unavailable mailbox list is not an empty list or a failed identity.
+  let mailboxOutcome: MailboxListOutcome;
+  try { mailboxOutcome = await listVerifiedAccountMailboxes(env, id.accountId); }
+  catch { mailboxOutcome = { ok: false, error: "mailboxes_unavailable" }; }
+  return page(renderAccountPage(id, instance, base, mailboxOutcome), headers(), 200,
+    { shell: "app", active: "account", sessionVerified: true });
+}
+
+/** Preserve fail-closed behavior; only a document gets a branded unexpected-error response. */
+export async function handleWebRequest(request: Request, env: WhoYouEnv): Promise<Response | null> {
+  try {
+    return await handleWebRequestInternal(request, env);
+  } catch (error) {
+    const url = new URL(request.url);
+    const resource = resolveInstanceResource(env);
+    if (!acceptsHtml(request) || url.pathname.startsWith("/api/") || !resource || resource.origin !== url.origin) throw error;
+    // Do not log the exception text: provider errors can contain sensitive data.
+    console.error("who_you_web_unexpected_error");
+    return errorPage(500, "unexpected_error");
+  }
 }

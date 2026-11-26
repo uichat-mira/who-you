@@ -33,15 +33,25 @@ test("Web login shows a human entrance without exposing a credential", async () 
     assert.equal(r.status, 200);
     assert.equal(r.headers.get("cache-control"), "no-store");
     const body = await r.text();
-    assert.match(body, /连接 Mira 云账号/);
-    assert.match(body, /邮件能力服务/);
+    assert.match(body, /连接你的邮箱与智能体/);
+    assert.match(body, /Mira 组织出品/);
+    assert.match(body, /href="https:\/\/mira\.tomz\.io\/"/);
+    assert.match(body, /href="https:\/\/github\.com\/uichat-mira"/);
+    assert.match(body, /<ruby class="brand-ruby">狐邮<rt lang="en">Who You<\/rt><\/ruby>，<br>不止于忽悠。/);
+    assert.match(body, /狐邮 Who-You 是独立的邮件服务/);
+    assert.match(body, /src="\/brand\/logo\/light\/horizontal-bilingual\.webp"/);
+    assert.match(body, /href="\/brand\/favicon\/favicon\.ico"/);
+    assert.match(r.headers.get("content-security-policy"), /img-src 'self'/);
     assert.match(body, /href="\/privacy"/);
     assert.match(body, /href="\/terms"/);
     assert.match(body, /gmail\.readonly/);
     assert.match(body, /gmail\.send/);
-    assert.match(body, /使用 Mira 云账号登录/);
-    assert.match(body, /登录只确认你的 Mira 云账号身份/);
+    assert.match(body, /使用 Mira ID 继续/);
+    assert.match(body, /登录不会自动授予邮箱访问权限/);
     assert.doesNotMatch(body, /sessionToken|Bearer |client_secret/);
+    assert.ok(!body.includes(bindings.WHOYOU_APP_SECRET));
+    assert.doesNotMatch(body, /AppSecret|WHOYOU_APP_SECRET|app-fixture-instance|已登记|实例所有者|注册狐邮/);
+    assert.doesNotMatch(body, /<details class="instance-details">/);
   });
 });
 
@@ -171,4 +181,61 @@ test("Unknown paths remain 404; existing MCP bearer gate remains authoritative",
     });
     assert.ok([401, 403].includes(mcp.status));
   });
+});
+
+test("Browser errors render recovery pages without changing machine contracts", async () => {
+  await withPreview(async (mf) => {
+    const html = { accept: "text/html,application/xhtml+xml" };
+    const missing = await mf.dispatchFetch(ORIGIN + "/lost", { headers: html });
+    assert.equal(missing.status, 404);
+    assert.match(missing.headers.get("content-type"), /text\/html/);
+    assert.equal(missing.headers.get("cache-control"), "no-store");
+    const body = await missing.text();
+    assert.match(body, /这封信走错了路/);
+    assert.match(body, /href="\/"/);
+    assert.match(body, /data-scene="lost"/);
+    assert.doesNotMatch(body, /brand\/logo\/dark\/symbol\.webp/);
+    const forbidden = await mf.dispatchFetch(ORIGIN + "/auth/logout", {
+      method: "POST", headers: { ...html, origin: "https://evil.invalid" },
+    });
+    assert.equal(forbidden.status, 403);
+    const forbiddenBody = await forbidden.text();
+    assert.match(forbiddenBody, /这一步无法继续/);
+    assert.match(forbiddenBody, /data-scene="locked"/);
+    assert.equal(forbidden.headers.get("set-cookie"), null);
+    const method = await mf.dispatchFetch(ORIGIN + "/auth/logout", { headers: html });
+    assert.equal(method.status, 405);
+    assert.match(await method.text(), /这个操作暂不可用/);
+    const bare = await mf.dispatchFetch(ORIGIN + "/auth/callback?code=untrusted-test-value", {headers: html});
+    assert.equal(bare.status, 200);
+    const callbackBody = await bare.text();
+    assert.match(callbackBody, /登录没有完成/);
+    assert.match(callbackBody, /data-scene="expired"/);
+    assert.doesNotMatch(callbackBody, /untrusted-test-value/);
+    assert.match(bare.headers.get("set-cookie"), /Max-Age=0/);
+    for (const route of ["/api/unknown", "/mcp/unknown", "/.well-known/unknown", "/mira/unknown", "/brand/missing.webp"]) {
+      const r = await mf.dispatchFetch(ORIGIN + route, { headers: html });
+      assert.equal(r.status, 404);
+      assert.deepEqual(await r.json(), { error: "not_found" });
+    }
+    const api = await mf.dispatchFetch(ORIGIN + "/api/whoami", {headers: html});
+    assert.equal(api.status, 401);
+    assert.deepEqual(await api.json(), {error: "sign_in_required"});
+    const wrong = await mf.dispatchFetch("https://other.invalid/", {headers: html});
+    assert.equal(wrong.status, 404);
+    assert.deepEqual(await wrong.json(), {error: "not_found"});
+    const machine = await mf.dispatchFetch(ORIGIN + "/lost", {headers: {accept: "application/json"}});
+    assert.deepEqual(await machine.json(), {error: "not_found"});
+  });
+  await withPreview(async (mf) => {
+    const browser = await mf.dispatchFetch(ORIGIN + "/", {headers: {accept: "text/html"}});
+    assert.equal(browser.status, 503);
+    const body = await browser.text();
+    assert.match(body, /狐邮暂时无法服务/);
+    assert.match(body, /data-scene="paused"/);
+    assert.doesNotMatch(body, /web_login_not_configured/);
+    const machine = await mf.dispatchFetch(ORIGIN + "/");
+    assert.equal(machine.status, 503);
+    assert.deepEqual(await machine.json(), {error: "web_login_not_configured"});
+  }, {WHOYOU_WEB_SESSION_KEY: ""});
 });
