@@ -64,6 +64,12 @@ const createOutbound = (trace = {}) => async (request) => {
     trace.sessionChecks = (trace.sessionChecks ?? 0) + 1;
     return identity ? Response.json(identity) : Response.json({ error: "invalid_token" }, { status: 401 });
   }
+  if (request.url === SESSION_URL + "/logout" && request.method === "POST") {
+    const token = request.headers.get("authorization")?.replace(/^Bearer /, "");
+    if (!trace.sessions?.delete(token)) return new Response(null, {status: 401});
+    trace.logouts = (trace.logouts ?? 0) + 1;
+    return new Response(null, {status: 204});
+  }
   if (request.url.endsWith("/v1/service-credentials")) {
     trace.legacyRequests = (trace.legacyRequests ?? 0) + 1;
     return new Response(null, { status: 404 });
@@ -590,7 +596,13 @@ test("Web Gmail link -> provider callback -> list -> unlink is account-bound and
 	try {
 		const db = await mf.getD1Database("DB");
 		await db.batch(MIGRATIONS.map((statement) => db.prepare(statement)));
-		const ownerCookie = await login(mf, "code-empty");
+		let ownerCookie = await login(mf, "code-empty");
+        const emptyAccount = await mf.dispatchFetch(ORIGIN + "/account", {headers: {cookie: ownerCookie}});
+        assert.equal(emptyAccount.status, 200);
+        const emptyHtml = await emptyAccount.text();
+        assert.match(emptyHtml, /Mira ID 已连接/);
+        assert.match(emptyHtml, /<strong>邮箱<\/strong><p class="hint">尚未连接/);
+        assert.doesNotMatch(emptyHtml, /邮箱已连接|fixture-registration-not-a-real-secret|mas_v1\.fixture/);
 
 		const started = await mf.dispatchFetch(ORIGIN + "/account/mailboxes/gmail/link", {
 			method: "POST",
@@ -686,6 +698,19 @@ test("Web Gmail link -> provider callback -> list -> unlink is account-bound and
 		assert.equal(gmail.credentialStatus, "active");
 		assert.equal(gmail.availability, "configured");
 
+        const linkedAccount = await mf.dispatchFetch(ORIGIN + "/account", {headers: {cookie: ownerCookie}});
+        assert.equal(linkedAccount.status, 200);
+        assert.match(await linkedAccount.text(), /已登记 1 个邮箱/);
+        const logout = await mf.dispatchFetch(ORIGIN + "/auth/logout", {method: "POST", redirect: "manual", headers: {cookie: ownerCookie, origin: ORIGIN}});
+        assert.equal(logout.status, 303);
+        assert.equal(trace.logouts, 1);
+        assert.equal(trace.googleRevokes ?? 0, 0);
+        assert.equal((await mf.dispatchFetch(ORIGIN + "/api/whoami", {headers: {cookie: ownerCookie}})).status, 502);
+        assert.equal((await db.prepare("SELECT COUNT(*) AS total FROM provider_credentials WHERE mailbox_id = ?").bind(gmail.mailboxId).first()).total, 1);
+        ownerCookie = await login(mf, "code-empty");
+        const restored = await mf.dispatchFetch(ORIGIN + "/api/mailboxes", {headers: {cookie: ownerCookie}});
+        assert.ok((await restored.json()).mailboxes.some(entry => entry.mailboxId === gmail.mailboxId));
+
 		assert.equal(trace.legacyRequests ?? 0, 0);
 		assert.ok(trace.sessionChecks > 0);
 
@@ -724,6 +749,12 @@ test("Web Gmail link -> provider callback -> list -> unlink is account-bound and
 		assert.equal(unlink.status, 303);
 		assert.equal(unlink.headers.get("location"), "/account/mailboxes?notice=gmail_unlinked");
 		assert.equal(trace.googleRevokes, 1);
+        const unlinkedAccount = await mf.dispatchFetch(ORIGIN + "/account", {headers: {cookie: ownerCookie}});
+        assert.equal(unlinkedAccount.status, 200);
+        const unlinkedHtml = await unlinkedAccount.text();
+        assert.match(unlinkedHtml, /Mira ID 已连接/);
+        assert.match(unlinkedHtml, /<strong>邮箱<\/strong><p class="hint">尚未连接/);
+        assert.equal(trace.logouts, 1);
 
 		assert.equal(trace.legacyRequests ?? 0, 0);
 		assert.equal(

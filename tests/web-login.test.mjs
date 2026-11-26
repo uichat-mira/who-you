@@ -46,9 +46,12 @@ test("Web login shows a human entrance without exposing a credential", async () 
     assert.match(body, /href="\/terms"/);
     assert.match(body, /gmail\.readonly/);
     assert.match(body, /gmail\.send/);
-    assert.match(body, /使用 Mira ID 登录/);
+    assert.match(body, /使用 Mira ID 继续/);
     assert.match(body, /登录不会自动授予邮箱访问权限/);
     assert.doesNotMatch(body, /sessionToken|Bearer |client_secret/);
+    assert.ok(!body.includes(bindings.WHOYOU_APP_SECRET));
+    assert.doesNotMatch(body, /AppSecret|WHOYOU_APP_SECRET|app-fixture-instance|已登记|实例所有者|注册狐邮/);
+    assert.doesNotMatch(body, /<details class="instance-details">/);
   });
 });
 

@@ -2,7 +2,7 @@ import { errorIllustration } from "./error-illustrations";
 import { webIcon } from "./icons";
 import { webStylesCss } from "./web-styles";
 import { createMailServices, resolveCredentialKeys, type WhoYouEnv } from "../mail/config";
-import { resolveApplicationInstance, resolveInstanceResource } from "../application/instance";
+import { applicationManifest, resolveApplicationInstance, resolveInstanceResource } from "../application/instance";
 import { listIdentities, unlinkMailbox } from "../mail/identity";
 import { startGmailLink } from "../mail/gmail-link";
 import { syncGmailMailbox } from "../mail/gmail-sync";
@@ -200,6 +200,7 @@ function escapeText(s: string): string {
 type PageOptions = {
   shell?: "auth" | "app" | "home";
   active?: "account" | "mailboxes";
+  sessionVerified?: boolean;
 };
 
 function page(content: string, outgoing = headers(), status = 200,
@@ -229,7 +230,7 @@ function page(content: string, outgoing = headers(), status = 200,
 <style>
 ${webStylesCss}
 </style></head><body class="page-${home ? "home" : app ? "app" : "auth"}"><main>
-<header class="brandbar"><a class="brand" href="/"><img src="/brand/logo/light/horizontal-bilingual.webp" alt="狐邮 Who-You" width="1536" height="472"></a>${app ? '<span class="session-mark">云账号已登录</span>' : home ? '<nav class="site-nav" aria-label="网站导航"><a href="#about">关于狐邮</a><a class="button secondary" href="#login">登录</a></nav>' : ""}</header>
+<header class="brandbar"><a class="brand" href="/"><img src="/brand/logo/light/horizontal-bilingual.webp" alt="狐邮 Who-You" width="1536" height="472"></a>${app ? (options.sessionVerified ? '<span class="session-mark">Mira ID 已连接</span>' : '') : home ? '<nav class="site-nav" aria-label="网站导航"><a href="#about">关于狐邮</a><a class="button secondary" href="#login">使用 Mira ID 继续</a></nav>' : ""}</header>
 ${nav}<div class="content${app ? "" : " auth"}">${content}</div>${publicFooter}</main></body></html>`, { status, headers: h });
 }
 
@@ -286,8 +287,8 @@ function renderLoginPage(returnTo: ProtectedPage, blocked: boolean): string {
 <p class="lead">连接你的邮箱与智能体，让查找邮件、整理信息和日常通信变得更加自然。</p>
 ${blocked ? `<div class="notice auth-required" role="status"><strong>这个页面需要先登录</strong>
 <p>登录完成后会回到你刚才要访问的位置。</p></div>` : ""}
-<div class="auth-actions" id="login"><a class="button" href="${escapeText(href)}">使用 Mira ID 登录 ${webIcon("arrow")}</a><a href="#about">了解狐邮</a></div>
-<p class="footnote">登录后，你可以自行选择连接的邮箱。登录不会自动授予邮箱访问权限。</p>
+<div class="auth-actions" id="login"><a class="button" href="${escapeText(href)}">使用 Mira ID 继续 ${webIcon("arrow")}</a><a href="#about">了解狐邮</a></div>
+<p class="footnote">连接 Mira ID 后，你可以管理自己的邮箱，并授权 Mira 客户端使用狐邮提供的邮件能力。登录不会自动授予邮箱访问权限。</p>
 </div>
 <div class="hero-poster" aria-hidden="true">
 <div class="poster-top"><span>WHO-YOU</span><span>MAIL / MCP</span></div>
@@ -305,20 +306,46 @@ ${publicIntroduction}
 ${miraIntroduction}`;
 }
 
-function renderAccountPage(id: { accountId: string; consumerId: string; scopes: string[] }): string {
+function renderAccountPage(
+  id: { accountId: string },
+  instance: NonNullable<ReturnType<typeof resolveApplicationInstance>>,
+  base: string,
+  outcome: MailboxListOutcome,
+): string {
+  const manifest = applicationManifest(instance);
+  const service = manifest.services[0]!;
+  const appsUrl = escapeText(new URL("/account/applications", base).href);
+  const grantsUrl = escapeText(new URL("/account/services", base).href);
+  const mailboxStatus = outcome.ok
+    ? outcome.mailboxes.length === 0 ? "尚未连接" : `已登记 ${outcome.mailboxes.length} 个邮箱`
+    : "暂时无法获取邮箱状态";
   return `<h1>账户</h1>
-<p class="lead">Who You 只保留与邮件能力有关的少量配置。身份由 Cloud Auth 管理，邮箱授权由狐邮单独管理。</p>
+<p class="lead">使用 Mira ID 进入狐邮。你的身份、应用授权与邮箱连接分别管理。</p>
 <div class="settings">
-<div class="setting-row"><div><strong>Mira 云账号</strong>
-<p class="hint">当前浏览器会话已通过 Cloud Auth 验证。</p>
-<p><code>${escapeText(id.accountId)}</code></p></div><span class="pill ok">已登录</span></div>
-<div class="setting-row"><div><strong>狐邮访问</strong>
-<p class="hint">应用会话已验证；智能体服务授权请在 Mira ID 管理</p></div><span class="pill ok">已连接</span></div>
+<div class="setting-row"><div class="account-identity"><span class="account-avatar" aria-hidden="true">M</span><div><strong>Mira ID</strong>
+<p class="hint">当前账号</p><p><code>${escapeText(id.accountId)}</code></p></div></div><span class="pill ok">已连接</span></div>
+<div class="setting-row"><div><strong>狐邮应用访问</strong>
+<p class="hint">你已授权狐邮使用你的 Mira ID 身份。此状态不代表邮件服务权限或邮箱授权。</p></div><span class="pill ok">已授权</span></div>
+<div class="setting-row"><div><strong>授权能力 · ${escapeText(service.name)}</strong>
+<p class="hint">在 Mira ID 查看和管理智能体的实际服务授权。</p></div><a href="${grantsUrl}">查看授权 ${webIcon("arrow")}</a></div>
+<div class="setting-row"><div><strong>邮箱</strong><p class="hint">${mailboxStatus}</p></div><a href="/account/mailboxes">管理邮箱 ${webIcon("arrow")}</a></div>
 </div>
-<div class="setting-actions">
-<a class="button secondary" href="/account/mailboxes">邮箱设置</a>
-<form method="post" action="/auth/logout"><button type="submit">退出登录</button></form>
-</div>`;
+<div class="setting-actions"><form method="post" action="/auth/logout"><button class="button secondary" type="submit">退出狐邮</button></form></div>
+<p class="footnote">退出狐邮不会解绑你的邮箱，也不会撤销 Mira ID 中的服务授权。</p>
+<details class="instance-details">
+<summary>应用实例</summary>
+<div class="instance-content">
+<h2>${escapeText(manifest.name)}</h2>
+<p class="hint">当前部署公开信息，不代表你拥有或管理此应用。</p>
+<dl class="instance-fields">
+<div><dt>应用 ID</dt><dd><code>${escapeText(manifest.appId)}</code></dd></div>
+<div><dt>应用地址</dt><dd><code>${escapeText(instance.origin)}</code></dd></div>
+<div><dt>MCP</dt><dd><code>${escapeText(service.protocol.endpoint)}</code></dd></div>
+<div><dt>实例声明权限（非当前用户授权）</dt><dd><code>${escapeText(service.scopes.join(", "))}</code></dd></div>
+</dl>
+<p class="hint">登记凭据由部署环境安全保管。应用登记与所有权管理在 Mira ID 的「我的应用」完成。</p>
+<a class="button secondary" href="${appsUrl}">在 Mira ID 中管理 ${webIcon("arrow")}</a>
+</div></details>`;
 }
 
 function baseUrl(env: WhoYouEnv): string | null {
@@ -450,10 +477,15 @@ type MailboxListOutcome =
 
 async function fetchMailboxList(env: WhoYouEnv, session: Session): Promise<MailboxListOutcome> {
   if (!await validateSession(env, session)) return { ok: false, error: "authentication_link_unavailable" };
+  return listVerifiedAccountMailboxes(env, session.subject);
+}
+
+// Caller has already verified the application session for this exact account.
+async function listVerifiedAccountMailboxes(env: WhoYouEnv, accountId: string): Promise<MailboxListOutcome> {
   const resolved = createMailServices(env);
   if (!resolved.ok) return { ok: false, error: "mailboxes_unavailable", reason: resolved.reason };
   const services = resolved.services;
-  const identities = await listIdentities(services.repository, services.credentials, services.syncStates, session.subject);
+  const identities = await listIdentities(services.repository, services.credentials, services.syncStates, accountId);
   const mailboxes = projectMailboxes({ identities: identities.map(entry => ({
     mailboxId: entry.mailbox.id, address: entry.mailbox.address, kind: entry.mailbox.kind,
     provider: entry.mailbox.provider, status: entry.mailbox.status,
@@ -834,7 +866,7 @@ function renderMailboxesPage(
   const mailboxSection = outcome.ok
     ? (outcome.mailboxes.length
       ? `<ul class="mailboxes">${outcome.mailboxes.map((mailbox) => renderMailbox(mailbox, env)).join("")}</ul>`
-      : `<div class="notice"><p>当前账号还没有登记邮箱。</p>
+      : `<div class="notice"><p>当前账号还没有登记邮箱。尚未连接。</p>
 <p>连接 Gmail 后，真实授权成功的邮箱会出现在这里。</p></div>`)
     : `<div class="notice error" role="alert">
 <strong class="notice-heading">${webIcon("control")} 暂时无法获取邮箱</strong>
@@ -853,12 +885,12 @@ ${mailboxSection}
 <h2 id="add-mailbox">添加邮箱</h2>
 <ul class="providers">
 <li><strong>Gmail</strong> ${gmailReady ? '<span class="pill ok">可接入</span>' : '<span class="pill muted">尚未配置</span>'}
-<p class="hint">通过 Google OAuth 授权狐邮读取与发送邮件；登录 Mira 云账号本身不会授予 Gmail 权限。</p>
+<p class="hint">通过 Google OAuth 授权狐邮读取与发送邮件；连接 Mira ID 本身不会授予 Gmail 权限。</p>
 ${gmailReady ? '<form method="post" action="/account/mailboxes/gmail/link"><button type="submit">连接 Gmail</button></form>' : ""}</li>
 <li><strong>Microsoft</strong> <span class="pill muted">尚未开放</span>
-<p class="hint">本卡不开放 Microsoft 真实接入。</p></li>
+<p class="hint">暂不支持连接 Microsoft 邮箱。</p></li>
 <li><strong>IMAP/SMTP</strong> <span class="pill muted">尚未开放</span>
-<p class="hint">本卡不开放自填服务器真实接入。</p></li>
+<p class="hint">暂不支持自定义邮箱服务器。</p></li>
 </ul>
 </section>
 <p class="footnote">“本地配置就绪”只说明狐邮运行环境已准备好必要依赖，不代表邮箱连接成功或可以收发邮件。
@@ -1114,7 +1146,7 @@ async function handleWebRequestInternal(request: Request, env: WhoYouEnv): Promi
     const counts = notice === "gmail_sync_completed" ? syncCountsFromQuery(u) : null;
     return page(renderMailboxesPage(outcome, env, notice, counts), headers(),
       outcome.ok ? 200 : outcome.error === "mailboxes_unavailable" ? 503 : 502,
-      { shell: "app", active: "mailboxes" });
+      { shell: "app", active: "mailboxes", sessionVerified: outcome.ok || outcome.error !== "authentication_link_unavailable" });
   }
   if (path === "/api/mailboxes") return handleMailboxList(request, env, session, u);
 
@@ -1133,7 +1165,12 @@ async function handleWebRequestInternal(request: Request, env: WhoYouEnv): Promi
     return new Response(JSON.stringify(identity), { headers: h });
   }
   const id = identity as { accountId: string; consumerId: string; scopes: string[] };
-  return page(renderAccountPage(id), headers(), 200, { shell: "app", active: "account" });
+  // An unavailable mailbox list is not an empty list or a failed identity.
+  let mailboxOutcome: MailboxListOutcome;
+  try { mailboxOutcome = await listVerifiedAccountMailboxes(env, id.accountId); }
+  catch { mailboxOutcome = { ok: false, error: "mailboxes_unavailable" }; }
+  return page(renderAccountPage(id, instance, base, mailboxOutcome), headers(), 200,
+    { shell: "app", active: "account", sessionVerified: true });
 }
 
 /** Preserve fail-closed behavior; only a document gets a branded unexpected-error response. */

@@ -6,10 +6,10 @@ export const publicIntroduction = `<section id="about" class="public-intro" aria
 <span class="intro-icon">${webIcon("mail")}</span>
 <h2>你的邮箱，多一种用法。</h2>
 <p>狐邮 Who-You 是独立的邮件服务。把邮箱连接到狐邮，再授权支持 MCP 的智能体使用邮件信息，你就可以在日常对话与工作中查找邮件、读取内容。草稿与发送等能力取决于实际连接及授权。</p>
-<p>通过 Mira ID 登录，在狐邮集中管理邮箱连接。可连接的邮箱与可用功能以管理页面显示为准。</p>
+<p>使用 Mira ID 继续，在狐邮集中管理邮箱连接。可连接的邮箱与可用功能以管理页面显示为准。</p>
 </div><div><span class="intro-icon">${webIcon("key")}</span>
 <h2>邮件的决定权，始终在你。</h2>
-<p>连接 Gmail 时，狐邮请求读取邮件与发送邮件的权限：<code>gmail.readonly</code> 用于识别邮箱、读取和同步你授权的邮件；<code>gmail.send</code> 用于经你确认后的发送。登录不会自动授予这些权限。</p>
+<p>连接 Gmail 时，狐邮请求读取邮件与发送邮件的权限：<code>gmail.readonly</code> 用于识别邮箱、读取和同步你授权的邮件；<code>gmail.send</code> 用于经你确认后的发送。连接 Mira ID 不会自动授予这些权限。</p>
 <p>你可以随时在邮箱管理中撤销连接。狐邮不会将你的 Google 邮件数据用于广告、出售或通用 AI 模型训练。</p>
 </div><p class="disclosure-links">了解更多，请阅读<a href="/privacy">隐私政策</a>与<a href="/terms">服务条款</a>。</p>
 </section>`;

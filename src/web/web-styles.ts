@@ -98,4 +98,15 @@ code{overflow-wrap:anywhere;font-family:var(--font-mono);font-size:var(--text-sm
 .mira-feature-actions{display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-6);margin-top:var(--space-6)}
 .mira-source{display:inline-flex;align-items:center;gap:var(--space-1);color:var(--foreground);font-weight:var(--weight-semibold);text-underline-offset:4px}
 @media(max-width:720px){.mira-feature-inner{grid-template-columns:1fr;gap:var(--space-6)}}
+
+.account-identity{display:flex;align-items:flex-start;gap:var(--space-3);min-width:0}
+.account-avatar{display:grid;place-items:center;flex:none;width:var(--control-height);height:var(--control-height);background:var(--primary-soft);color:var(--foreground);border:var(--stroke-control) solid var(--ink-outline);border-radius:var(--radius-md);font-weight:var(--weight-bold)}
+.account-identity code{overflow-wrap:anywhere}
+.instance-details{margin-top:var(--space-10);border-top:1px solid var(--border);padding-top:var(--space-4)}
+.instance-details summary{cursor:pointer;font-weight:var(--weight-semibold);color:var(--foreground)}
+.instance-content{padding-block:var(--space-3)}
+.instance-fields{margin:var(--space-4) 0;display:grid;gap:var(--space-3)}
+.instance-fields div{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,2fr);gap:var(--space-3)}
+.instance-fields dt{color:var(--foreground-secondary)}.instance-fields dd{margin:0;overflow-wrap:anywhere;user-select:text}
+@media(max-width:520px){.instance-fields div{grid-template-columns:1fr;gap:var(--space-1)}.setting-row{flex-wrap:wrap}}
 `;
