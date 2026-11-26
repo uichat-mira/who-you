@@ -92,6 +92,20 @@ try {
   assert.equal(callback.status,303,await callback.text());
   assert.equal(context.db.prepare("SELECT COUNT(*) AS n FROM sessions").get().n,nativeSessions);
   const webCookie=cookies(callback);
+  const accountPage=await mf.dispatchFetch(origin+"/account",{headers:{cookie:webCookie,accept:"text/html"}});
+  assert.equal(accountPage.status,200);
+  const accountHtml=await accountPage.text();
+  assert.match(accountHtml,/brand\/logo\/light\/horizontal-bilingual\.webp/);
+  assert.match(accountHtml,/Mira ID 已连接/);
+  assert.match(accountHtml,/已登记 1 个邮箱/);
+  for(const field of [appId,origin,origin+"/mcp",issuer+"/account/applications",issuer+"/account/services"]) assert.ok(accountHtml.includes(field));
+  assert.ok(!accountHtml.includes(secret));
+  assert.doesNotMatch(accountHtml,/mas_v1\.|AppSecret|实例所有者|一键登记/);
+  const mailPage=await mf.dispatchFetch(origin+"/account/mailboxes",{headers:{cookie:webCookie,accept:"text/html"}});
+  assert.equal(mailPage.status,200);
+  const mailHtml=await mailPage.text();
+  assert.match(mailHtml,/alice@fixture\.example/);
+  assert.doesNotMatch(mailHtml,/bob@fixture\.example/);
   const web=await mf.dispatchFetch(origin+"/api/mailboxes",{headers:{cookie:webCookie}});
   assert.equal(web.status,200,await web.clone().text());
   assert.deepEqual((await web.json()).mailboxes.map(m=>m.mailboxId),["mbx_alice"]);
@@ -124,10 +138,26 @@ try {
     assert.match(text,/Synthetic owner message/);assert.doesNotMatch(text,/Synthetic other message/);
     const denied=await client.callTool({name:"whoyou_mailbox_sync",arguments:{mailboxId:"mbx_alice"}});
     assert.equal(denied.structuredContent.error,"insufficient_scope");
+    const serviceRevoked=await rpc("POST","/v1/application-services/"+appId+"/mail/revoke",alice.sessionToken,body);
+    assert.equal(serviceRevoked.statusCode,200,serviceRevoked.body);
+    assert.deepEqual((await rpc("GET","/v1/application-services",alice.sessionToken)).json().services,[]);
+    const stillSignedIn=await mf.dispatchFetch(origin+"/account",{headers:{cookie:webCookie,accept:"text/html"}});
+    assert.equal(stillSignedIn.status,200);
+    const stillHtml=await stillSignedIn.text();
+    assert.match(stillHtml,/Mira ID 已连接/);
+    assert.match(stillHtml,/实例声明权限（非当前用户授权）/);
+    assert.doesNotMatch(stillHtml,/狐邮邮件服务<\/strong>\s*<span[^>]*>已授权/);
     const revoked=await rpc("POST","/v1/account/application-authorizations/"+appId+"/revoke",alice.sessionToken);
     assert.equal(revoked.statusCode,204,revoked.body);
     assert.equal((await rpc("POST",path,alice.sessionToken,body)).statusCode,404);
     assert.equal((await mf.dispatchFetch(origin+"/api/mailboxes",{headers:{cookie:webCookie}})).status,502);
+    const revokedPage=await mf.dispatchFetch(origin+"/account",{headers:{cookie:webCookie,accept:"text/html"}});
+    assert.equal(revokedPage.status,502);
+    const revokedHtml=await revokedPage.text();
+    assert.match(revokedHtml,/暂时无法获取账户/);
+    assert.match(revokedHtml,/重新登录/);
+    assert.doesNotMatch(revokedHtml,/alice@fixture\.example/);
+
     const offline=await client.callTool({name:"whoyou_whoami",arguments:{}});
     assert.equal(offline.structuredContent.accountId,alice.account.id);
   } finally {await client.close();}

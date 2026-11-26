@@ -14,7 +14,7 @@ OPS-048 实现合同；部署验收另行记录。每个部署独立配置稳定
 ## 登记与登录
 在 Mira ID 我的应用中输入 HTTPS Origin、APP_ID、AppSecret。公开 GET /.well-known/mira-application 自动声明回调和只读 mail 服务；POST /mira/verify-registration 只接受精确 appId/appSecret，并仅返回 ok/appId。部署验证使用 Cloud Auth 当前合同，不能把 AppSecret 传给 OAuth。
 
-网页采用授权码 + PKCE S256，校验 state、appId、issuer、subject、clientId、expiry；凭据封装于 HttpOnly/Secure/SameSite=Lax 加密 cookie，所有受保护业务操作查询 /v1/oauth/application-session 复核。退出使用 application-session/logout。账号会话不等于 Agent MCP grant；Web 不请求设备短票。
+网页采用授权码 + PKCE S256，校验 state、appId、issuer、subject、clientId、expiry；凭据封装于 HttpOnly/Secure/SameSite=Lax 加密 cookie，所有受保护业务操作查询 /v1/oauth/application-session 复核。退出使用 application-session/logout。账号会话不等于 Agent MCP grant；Web 不请求设备短票。 狐邮账户页只确认应用会话身份与应用访问；服务授权可独立撤销，其实际状态由 Mira ID「关联服务」管理。公开实例字段从同一 manifest/instance 派生，「我的应用」管理登记与 ownership；不向浏览器传递登记凭据或新增一键登记协议。
 
 ## 邮箱业务与 MCP
 Web 邮箱列表、Gmail 连接、解绑及同步复用内部业务服务及真实账号主体。现有同源 POST、provider state/PKCE 单次消费、邮箱所有权、同步 lease 继续生效；Gmail 回调必须持有有效应用会话和密封 flow cookie，不允许裸回调绕过。应用登录不授权 Google，也不提供智能体写/发权限。MCP 的独立业务确认逻辑保留，不以浏览器会话替代。
