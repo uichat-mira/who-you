@@ -37,7 +37,7 @@ test("Web login shows a human entrance without exposing a credential", async () 
     assert.match(body, /Mira 组织出品/);
     assert.match(body, /href="https:\/\/mira\.tomz\.io\/"/);
     assert.match(body, /href="https:\/\/github\.com\/uichat-mira"/);
-    assert.match(body, /<ruby class="brand-ruby">狐邮<rt lang="en">Who You<\/rt><\/ruby>，<br>不止于忽悠。/);
+    assert.match(body, /<ruby class="brand-ruby">狐<rt lang="en">Who<\/rt>邮<rt lang="en">You<\/rt><\/ruby>，<br>不止于忽悠。/);
     assert.match(body, /狐邮 Who-You 是独立的邮件服务/);
     assert.match(body, /src="\/brand\/logo\/light\/horizontal-bilingual\.webp"/);
     assert.match(body, /href="\/brand\/favicon\/favicon\.ico"/);
@@ -47,6 +47,7 @@ test("Web login shows a human entrance without exposing a credential", async () 
     assert.match(body, /gmail\.readonly/);
     assert.match(body, /gmail\.send/);
     assert.match(body, /使用 Mira ID 继续/);
+    assert.doesNotMatch(body, /href="#about"/);
     assert.match(body, /登录不会自动授予邮箱访问权限/);
     assert.doesNotMatch(body, /sessionToken|Bearer |client_secret/);
     assert.ok(!body.includes(bindings.WHOYOU_APP_SECRET));
