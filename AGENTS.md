@@ -27,7 +27,7 @@ Read the **current** `uichat-mira/.github@main/AGENTS.md`, then the current Issu
 - `prod` is the sole production-source branch. The initial docs-only bootstrap was a repository-initialization exception, not a permission for future direct production pushes.
 - `bash scripts/check.sh` is the trusted local, CI, and external Worker entrypoint. With runtime files, it must execute a **real** package check with a frozen lockfile; the docs-only check is not a runtime test.
 - Use the Organization's T1–T5 testing semantics and stable aggregate `Mira Gate` status.
-- Keep deployment disabled until a separate release task proves Cloudflare account scope, branch secrets, preview/test/prod isolation, rollback, and smoke tests.
+- Production publication is governed by [the production deployment contract](docs/engineering/production-deployment.md): only `prod`, Organization deployment gate, existing production bindings, rollback version and smoke verification. Resource provisioning, migrations and secret rotation remain separate release tasks.
 
 ## Contribution procedure
 
