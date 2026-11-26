@@ -78,6 +78,7 @@ test("real workerd: V1 OAuth callback -> app session -> revalidated account", as
     assert.match(body, /action="\/auth\/logout"/);
     assert.match(body, /<h1>账户<\/h1>/);
     assert.match(body, /Mira ID 已连接/);
+    assert.match(body, /class="account-avatar" src="\/brand\/mira-id\/mira-id-app\.svg"/);
     assert.match(body, /account-e2e/);
     assert.match(body, /狐邮应用访问/);
     assert.match(body, /狐邮邮件服务/);
