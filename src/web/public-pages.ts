@@ -1,13 +1,29 @@
+import { webIcon } from "./icons";
 // Static public disclosures. No account, provider, session or environment data is interpolated.
 export const publicFooter = `<footer class="public-footer"><a href="/">首页</a><a href="/privacy">隐私政策</a><a href="/terms">服务条款</a></footer>`;
 
-export const publicIntroduction = `<section class="public-intro" aria-label="关于狐邮">
-<h2>狐邮是什么</h2>
-<p>Who You（狐邮）是独立维护的邮件能力服务（MCP Server）。它集中管理邮箱身份与授权，为用户明确授权的 Mira 等客户端提供邮件查询、读取、草稿与发送能力。实际可用能力取决于邮箱服务商授权、部署配置及客户端权限。当前网页提供 Mira 云账号登录、邮箱连接管理、Gmail 授权与解绑入口；Microsoft 与 IMAP/SMTP 接入尚未开放。</p>
-<h2>为什么需要 Gmail 权限</h2>
-<p><code>gmail.readonly</code> 用于识别邮箱、读取和同步用户授权的邮件；<code>gmail.send</code> 用于用户确认后的发信。登录 Mira 不会自动授予这些权限。当前预览服务尚未开启定时同步，真实 Gmail 接入仍在验收。</p>
-<p>连接前请阅读<a href="/privacy">隐私政策</a>与<a href="/terms">服务条款</a>。你可以在邮箱管理中撤销连接。</p>
+export const publicIntroduction = `<section id="about" class="public-intro" aria-label="关于狐邮"><div>
+<span class="intro-icon">${webIcon("mail")}</span>
+<h2>你的邮箱，多一种用法。</h2>
+<p>狐邮 Who-You 是独立的邮件服务。把邮箱连接到狐邮，再授权支持 MCP 的智能体使用邮件信息，你就可以在日常对话与工作中查找邮件、读取内容。草稿与发送等能力取决于实际连接及授权。</p>
+<p>通过 Mira ID 登录，在狐邮集中管理邮箱连接。可连接的邮箱与可用功能以管理页面显示为准。</p>
+</div><div><span class="intro-icon">${webIcon("key")}</span>
+<h2>邮件的决定权，始终在你。</h2>
+<p>连接 Gmail 时，狐邮请求读取邮件与发送邮件的权限：<code>gmail.readonly</code> 用于识别邮箱、读取和同步你授权的邮件；<code>gmail.send</code> 用于经你确认后的发送。登录不会自动授予这些权限。</p>
+<p>你可以随时在邮箱管理中撤销连接。狐邮不会将你的 Google 邮件数据用于广告、出售或通用 AI 模型训练。</p>
+</div><p class="disclosure-links">了解更多，请阅读<a href="/privacy">隐私政策</a>与<a href="/terms">服务条款</a>。</p>
 </section>`;
+
+// First-party product attribution, not an advertising integration.
+export const miraIntroduction = `<section class="mira-feature" aria-labelledby="mira-feature-title">
+<div class="mira-feature-inner">
+<div class="mira-feature-brand"><span class="mira-feature-kicker">MADE BY MIRA</span><span class="mira-feature-wordmark" aria-hidden="true">Mira<span>.</span></span><span class="mira-feature-signature">Mira 组织出品</span></div>
+<div class="mira-feature-copy">
+<h2 id="mira-feature-title">智能体，不止于聊天。</h2>
+<p>狐邮是 Mira 组织的独立产品之一。我们探索智能体如何连接真实世界的工具与服务，让 AI 走进日常生活与工作。</p>
+<div class="mira-feature-actions"><a class="button secondary" href="https://mira.tomz.io/">探索 Mira ${webIcon("arrow")}</a><a class="mira-source" href="https://github.com/uichat-mira">GitHub ${webIcon("arrow")}</a></div>
+</div>
+</div></section>`;
 
 export const privacyPolicy = `<article class="legal">
 <h1>隐私政策</h1>

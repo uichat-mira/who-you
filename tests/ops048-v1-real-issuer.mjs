@@ -92,6 +92,14 @@ try {
   assert.equal(callback.status,303,await callback.text());
   assert.equal(context.db.prepare("SELECT COUNT(*) AS n FROM sessions").get().n,nativeSessions);
   const webCookie=cookies(callback);
+  const accountPage=await mf.dispatchFetch(origin+"/account",{headers:{cookie:webCookie,accept:"text/html"}});
+  assert.equal(accountPage.status,200);
+  assert.match(await accountPage.text(),/brand\/logo\/light\/horizontal-bilingual\.webp/);
+  const mailPage=await mf.dispatchFetch(origin+"/account/mailboxes",{headers:{cookie:webCookie,accept:"text/html"}});
+  assert.equal(mailPage.status,200);
+  const mailHtml=await mailPage.text();
+  assert.match(mailHtml,/alice@fixture\.example/);
+  assert.doesNotMatch(mailHtml,/bob@fixture\.example/);
   const web=await mf.dispatchFetch(origin+"/api/mailboxes",{headers:{cookie:webCookie}});
   assert.equal(web.status,200,await web.clone().text());
   assert.deepEqual((await web.json()).mailboxes.map(m=>m.mailboxId),["mbx_alice"]);
@@ -128,6 +136,13 @@ try {
     assert.equal(revoked.statusCode,204,revoked.body);
     assert.equal((await rpc("POST",path,alice.sessionToken,body)).statusCode,404);
     assert.equal((await mf.dispatchFetch(origin+"/api/mailboxes",{headers:{cookie:webCookie}})).status,502);
+    const revokedPage=await mf.dispatchFetch(origin+"/account",{headers:{cookie:webCookie,accept:"text/html"}});
+    assert.equal(revokedPage.status,502);
+    const revokedHtml=await revokedPage.text();
+    assert.match(revokedHtml,/暂时无法获取账户/);
+    assert.match(revokedHtml,/重新登录/);
+    assert.doesNotMatch(revokedHtml,/alice@fixture\.example/);
+
     const offline=await client.callTool({name:"whoyou_whoami",arguments:{}});
     assert.equal(offline.structuredContent.accountId,alice.account.id);
   } finally {await client.close();}
