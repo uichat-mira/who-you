@@ -22,6 +22,7 @@ Who You 是独立的云端邮件服务和 **MCP Server**。Mira Desktop / Mobile
 
 - [组织规则](https://github.com/uichat-mira/.github/blob/main/AGENTS.md) 与本仓库 [AGENTS.md](AGENTS.md)
 - [工程历史基线 / 代码分片说明](docs/engineering/FOUNDATION.md)（含早期时间截面，不作为现时部署清单）
+- [生产发布与回滚](docs/engineering/production-deployment.md)
 - [现有凭据安全契约](docs/engineering/CREDENTIAL-SECURITY-CONTRACT.md)
 - [Mira ID 应用实例接入 V1（OPS-048）](docs/engineering/mira-application-v1.md)
 - [Gmail 服务端定时增量同步与回滚](docs/engineering/gmail-scheduled-sync.md)
