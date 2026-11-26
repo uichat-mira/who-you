@@ -230,7 +230,7 @@ function page(content: string, outgoing = headers(), status = 200,
 <style>
 ${webStylesCss}
 </style></head><body class="page-${home ? "home" : app ? "app" : "auth"}"><main>
-<header class="brandbar"><a class="brand" href="/"><img src="/brand/logo/light/horizontal-bilingual.webp" alt="狐邮 Who-You" width="1536" height="472"></a>${app ? (options.sessionVerified ? '<span class="session-mark">Mira ID 已连接</span>' : '') : home ? '<nav class="site-nav" aria-label="网站导航"><a href="#about">关于狐邮</a><a class="button secondary" href="#login">使用 Mira ID 继续</a></nav>' : ""}</header>
+<header class="brandbar"><a class="brand" href="/"><img src="/brand/logo/light/horizontal-bilingual.webp" alt="狐邮 Who-You" width="1536" height="472"></a>${app ? (options.sessionVerified ? '<span class="session-mark">Mira ID 已连接</span>' : '') : home ? '<nav class="site-nav" aria-label="网站导航"><a class="button secondary" href="#login">使用 Mira ID 继续</a></nav>' : ""}</header>
 ${nav}<div class="content${app ? "" : " auth"}">${content}</div>${publicFooter}</main></body></html>`, { status, headers: h });
 }
 
@@ -283,11 +283,11 @@ function renderLoginPage(returnTo: ProtectedPage, blocked: boolean): string {
   const href = "/auth/start?" + new URLSearchParams({ returnTo }).toString();
   return `<section class="hero" aria-labelledby="hero-title">
 <div class="hero-copy">
-<h1 id="hero-title"><ruby class="brand-ruby">狐邮<rt lang="en">Who You</rt></ruby>，<br>不止于忽悠。</h1>
+<h1 id="hero-title"><ruby class="brand-ruby">狐<rt lang="en">Who</rt>邮<rt lang="en">You</rt></ruby>，<br>不止于忽悠。</h1>
 <p class="lead">连接你的邮箱与智能体，让查找邮件、整理信息和日常通信变得更加自然。</p>
 ${blocked ? `<div class="notice auth-required" role="status"><strong>这个页面需要先登录</strong>
 <p>登录完成后会回到你刚才要访问的位置。</p></div>` : ""}
-<div class="auth-actions" id="login"><a class="button" href="${escapeText(href)}">使用 Mira ID 继续 ${webIcon("arrow")}</a><a href="#about">了解狐邮</a></div>
+<div class="auth-actions" id="login"><a class="button" href="${escapeText(href)}">使用 Mira ID 继续 ${webIcon("arrow")}</a></div>
 <p class="footnote">连接 Mira ID 后，你可以管理自己的邮箱，并授权 Mira 客户端使用狐邮提供的邮件能力。登录不会自动授予邮箱访问权限。</p>
 </div>
 <div class="hero-poster" aria-hidden="true">
@@ -322,7 +322,7 @@ function renderAccountPage(
   return `<h1>账户</h1>
 <p class="lead">使用 Mira ID 进入狐邮。你的身份、应用授权与邮箱连接分别管理。</p>
 <div class="settings">
-<div class="setting-row"><div class="account-identity"><span class="account-avatar" aria-hidden="true">M</span><div><strong>Mira ID</strong>
+<div class="setting-row"><div class="account-identity"><img class="account-avatar" src="/brand/mira-id/mira-id-app.svg" alt="" width="48" height="48"><div><strong>Mira ID</strong>
 <p class="hint">当前账号</p><p><code>${escapeText(id.accountId)}</code></p></div></div><span class="pill ok">已连接</span></div>
 <div class="setting-row"><div><strong>狐邮应用访问</strong>
 <p class="hint">你已授权狐邮使用你的 Mira ID 身份。此状态不代表邮件服务权限或邮箱授权。</p></div><span class="pill ok">已授权</span></div>
