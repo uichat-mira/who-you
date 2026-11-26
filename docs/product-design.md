@@ -15,10 +15,11 @@
 
 | 位置 | 所有者 | 期望入口及职责 | 当前状态 |
 | --- | --- | --- | --- |
-| `https://cloud-auth.tomzlab.cn/account/services` | Cloud Auth | 「狐邮 Who You」关联服务入口，呈现**有可靠依据**的连接/授权状态，提供进入狐邮的链接；服务范围或撤销动作须有真正的后端授权事实，不能用“已签发过 JWT”伪造长期授权 | 现有「关联服务」页已存在，**狐邮条目及其独立授权 UI 尚未实现** |
-| `https://who-you.tomz.io/account` | Who You | 已登录的云账号认证联调页；显示当前账号及 `whoyou.read`，可退出登录 | **已部署** Web 登录、Cloud Auth OAuth 回调、只读 `whoyou_whoami` 验证；不是邮箱列表或发信 UI |
+| `https://cloud-auth.tomzlab.cn/account/services` | Cloud Auth | 「关联服务」按实际授权动态投影关联应用服务；狐邮不是编译期静态特例 | 当前 dev 已有实例服务目录及撤销入口；上线状态另行验证 |
+| `https://cloud-auth.tomzlab.cn/account/applications` | Cloud Auth | 「我的应用」管理登记、实例所有权；与普通用户服务授权分离 | 当前 dev 已有真实入口；V1 登记合同见 [应用实例 V1](engineering/mira-application-v1.md) |
+| `https://who-you.tomz.io/account` | Who You | 通过 Mira ID 进入狐邮；显示已复核身份、应用访问、邮箱状态及二级公开实例信息 | V1 app-scoped session；不将 manifest 声明权限当作当前服务授权，不管理平台凭据 |
 | `https://who-you.tomz.io/account/mailboxes` | Who You | 邮箱配置页：列出当前账号邮箱，承载第三方邮箱连接、重授权与解绑；具体操作必须由已实现的邮箱合同和真实部署能力支撑 | **已实现账号隔离的邮箱列表与状态页；OPS-041 接入 Gmail 连接 / 重授权 / 解绑源码链路。真实 Gmail 可用性仍取决于生产 provider bindings、KEK 与单账号 T4；Microsoft / IMAP-SMTP Web 入口未开放** |
-| Mira 的 MCP 连接设置 | Mira 各客户端 | 发现/连接狐邮 MCP Server，使用 Cloud Auth 签发的受限凭证；必要时跳至狐邮管理邮箱 | 产品责任已确认，**客户端 UI 和端到端消费验收须分别核对，不能假定已经存在** |
+| Mira 的 MCP 连接设置 | Mira 各客户端 | Mobile 按 Mira ID 实例授权目录动态呈现插件，使用通用实例级受限凭据；必要时跳至狐邮管理邮箱 | V1 纵切验收由 OPS-053 负责，不将目录模型等同于上线验收 |
 
 **三层归属一句话**：Cloud Auth 管「谁在登录、能否签发服务凭证」；Who You 管「哪些邮箱及凭据归属当前账号、邮件工具如何工作」；Mira 管「用哪些授权的 MCP 工具完成用户任务」。
 
@@ -44,7 +45,7 @@
 ## 5. 单一真相源与历史材料的使用方式
 
 - **本文**只拥有跨产品定位和接入 UI 所属位置，不重复实现级路由定义、参数枚举或各业务卡验收条款。
-- **Cloud Auth 认证技术事实**：`uichat-mira/cloud-auth/packages/contracts/src/oauth.ts`、`apps/api/src/`、`docs/oauth-authorization-v0.md` 和 `docs/service-credentials-v0.md`。用户界面现状以 `apps/web/src/` 为准。
+- **Cloud Auth 认证技术事实**：`uichat-mira/cloud-auth` 的当前 V1 application OAuth / open platform contracts、`apps/api/src/`、`docs/application-oauth-v1.md`、`docs/open-platform-protocol-v1.md` 和 `docs/open-platform-service-credentials-v1.md`。用户界面现状以 `apps/web/src/` 为准。
 - **狐邮技术事实**：本仓库的 `src/`、`migrations/`、`cloudflare.config.ts` 与真实 Worker 绑定、域名、部署版本；本地 config 并不代表所有线上环境。
 - **任务范围与结果**：现行 GitHub Issue 为准；[S1–S7 历史任务卡](task-cards/README.md) 只是设计/施工档案，不得用旧卡内的「未部署」「待开工」「v1 §x」覆盖当前代码和发布证据。
 - 原 `docs/product-design.md v1` 被旧卡引用，但其原始内容**未在当前 `dev/prod` 分支找到**。本文不是对原 v1 的恢复或补写，不宣称保留原章节号。旧卡中的 `v1 §` 只作为历史备注；如需恢复原文，应从真实历史分支/PR 取证，不得猜测。

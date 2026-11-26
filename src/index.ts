@@ -13,7 +13,7 @@ import { MAIL_SYNC_CRON, runScheduledSync } from "./mail/scheduled-sync";
 import { DELIVERY_WEBHOOK_PATH, handleDeliveryWebhook } from "./mail/webhook";
 import { MCP_METADATA_PATH, MCP_RESOURCE_PATH } from "./mcp/config";
 import { createWhoYouRuntime } from "./mcp/runtime";
-import { handleWebRequest } from "./web/cloud-auth";
+import { handleWebRequest, webNotFound } from "./web/cloud-auth";
 import { handleApplicationRequest } from "./application/instance";
 
 const notFound = (): Response => Response.json({ error: "not_found" }, { status: 404 });
@@ -46,7 +46,7 @@ export default {
 			return handleSignedDownload(request, env, verifier);
 		}
 		if (path !== MCP_RESOURCE_PATH && path !== MCP_METADATA_PATH) {
-			return notFound();
+			return webNotFound(request, env) ?? notFound();
 		}
 
 		const resolved = createWhoYouRuntime(env);
