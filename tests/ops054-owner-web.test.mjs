@@ -231,7 +231,10 @@ test("Owner first login is password-change gated and rotates credentials and ses
 
 		const wrongCurrent = await changeOwnerPassword(mf, pending, "wrong-current-password", NEW_PASSWORD);
 		assert.equal(wrongCurrent.status, 400);
-		assert.ok(!await wrongCurrent.text().then((body) => body.includes(NEW_PASSWORD)));
+		const wrongCurrentBody = await wrongCurrent.text();
+		assert.match(wrongCurrentBody, /密码没有修改/);
+		assert.match(wrongCurrentBody, /管理员账号/);
+		assert.ok(!wrongCurrentBody.includes(NEW_PASSWORD));
 
 		const weak = await changeOwnerPassword(mf, pending, INITIAL_PASSWORD, "short");
 		assert.equal(weak.status, 400);
