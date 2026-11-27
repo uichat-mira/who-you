@@ -436,7 +436,7 @@ test("Owner and Mira ID principals see one shell but never each other's mailboxe
 	});
 });
 
-test("Owner login fails closed for missing initialization, bad input, cross-origin and throttling", async () => {
+test("Owner login rejects bad input, cross-origin requests and throttled attempts while supporting default bootstrap", async () => {
 	await withWorker(async ({ mf, db }) => {
 		const crossOrigin = await mf.dispatchFetch(ORIGIN + "/auth/owner/login", {
 			method: "POST",
