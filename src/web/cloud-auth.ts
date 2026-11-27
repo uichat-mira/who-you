@@ -275,10 +275,9 @@ function page(content: string, outgoing = headers(), status = 200,
     ? `'self' ${GOOGLE_AUTHORIZATION_ENDPOINT}` : "'self'";
   h.set("content-security-policy",
     `default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; form-action ${formAction}; base-uri 'none'; frame-ancestors 'none'`);
-  // Native same-origin forms need browser-supplied same-origin evidence on POST.
-  // Keep all HTML documents on same-origin so login forms can emit Referer without
-  // leaking referrers to external origins; redirects and JSON keep their own headers.
-  h.set("referrer-policy", "same-origin");
+  // Native same-origin forms on home/app pages need browser-supplied same-origin
+  // evidence on POST. OAuth/error HTML keeps the stricter default no-referrer policy.
+  if (home || app) h.set("referrer-policy", "same-origin");
   const navItems = options.ownerPendingPasswordChange
     ? [{ href: APPLICATIONS_PATH, label: "应用管理", key: "applications" }]
     : [
