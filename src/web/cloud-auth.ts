@@ -114,9 +114,11 @@ function sameOriginPost(request: Request, expectedOrigin: string): boolean {
   const origin = request.headers.get("origin");
   if (origin !== null) return origin === expectedOrigin;
   const referer = request.headers.get("referer");
-  if (!referer) return false;
-  try { return new URL(referer).origin === expectedOrigin; }
-  catch { return false; }
+  if (referer !== null) {
+    try { return new URL(referer).origin === expectedOrigin; }
+    catch { return false; }
+  }
+  return request.headers.get("sec-fetch-site") === "same-origin";
 }
 function getCookie(req: Request, name: string): string | null {
   const items = (req.headers.get("cookie") ?? "").split(";")
@@ -273,9 +275,9 @@ function page(content: string, outgoing = headers(), status = 200,
     ? `'self' ${GOOGLE_AUTHORIZATION_ENDPOINT}` : "'self'";
   h.set("content-security-policy",
     `default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; form-action ${formAction}; base-uri 'none'; frame-ancestors 'none'`);
-  // Native same-origin POST forms need a non-null Origin. Keep OAuth redirects,
-  // callback error pages and JSON responses on the default no-referrer policy.
-  if (app) h.set("referrer-policy", "same-origin");
+  // Native same-origin forms on home/app pages need browser-supplied same-origin
+  // evidence on POST. OAuth/error HTML keeps the stricter default no-referrer policy.
+  if (home || app) h.set("referrer-policy", "same-origin");
   const navItems = options.ownerPendingPasswordChange
     ? [{ href: APPLICATIONS_PATH, label: "应用管理", key: "applications" }]
     : [
