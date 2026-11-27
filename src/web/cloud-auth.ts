@@ -41,10 +41,11 @@ const MAIL_OAUTH_RESULT_COOKIE = "__Host-who_you_mail_oauth_result";
 const SESSION_AAD = "who-you-application-session-v1";
 const OWNER_SESSION_AAD = "who-you-owner-session-v1";
 const APPLICATIONS_PATH = "/account/applications";
+const APPLICATION_INSTANCE_PATH = "/account/applications/current";
 const APPLICATIONS_PASSWORD_PATH = "/account/applications/password";
 const APPLICATIONS_SECRET_VIEW_PATH = "/account/applications/secret/view";
 const APPLICATIONS_SECRET_ROTATE_PATH = "/account/applications/secret/rotate";
-type ProtectedPage = "/account" | "/account/mailboxes" | typeof APPLICATIONS_PATH;
+type ProtectedPage = "/account" | "/account/mailboxes" | typeof APPLICATIONS_PATH | typeof APPLICATION_INSTANCE_PATH;
 type Flow = { state: string; verifier: string; appId: string; at: number; returnTo?: ProtectedPage };
 type Session = { accessToken: string; expiresAt: string; subject: string; audience: string; appId: string; issuer: "mira:cloud-auth" };
 type OwnerPrincipal = {
@@ -186,7 +187,8 @@ async function unseal(key: CryptoKey, raw: string | null, aad = SESSION_AAD): Pr
   } catch { return null; }
 }
 function validReturnTo(v: unknown): v is ProtectedPage {
-  return v === "/account" || v === "/account/mailboxes" || v === APPLICATIONS_PATH;
+  return v === "/account" || v === "/account/mailboxes"
+    || v === APPLICATIONS_PATH || v === APPLICATION_INSTANCE_PATH;
 }
 function returnToFrom(value: string | null): ProtectedPage {
   return validReturnTo(value) ? value : "/account";
@@ -279,7 +281,7 @@ function page(content: string, outgoing = headers(), status = 200,
   // evidence on POST. OAuth/error HTML keeps the stricter default no-referrer policy.
   if (home || app) h.set("referrer-policy", "same-origin");
   const navItems = options.ownerPendingPasswordChange
-    ? [{ href: APPLICATIONS_PATH, label: "应用管理", key: "applications" }]
+    ? [{ href: "/account", label: "账户", key: "account" }]
     : [
       { href: "/account", label: "账户", key: "account" },
       { href: "/account/mailboxes", label: "邮箱", key: "mailboxes" },
@@ -290,7 +292,7 @@ ${navItems.map((item) => `<a href="${item.href}"${options.active === item.key ? 
 </nav>` : "";
   const sessionMark = options.sessionVerified
     ? (options.isOwner
-      ? '<span class="session-mark">本地 Owner 已登录</span>'
+      ? '<span class="session-mark">管理员已登录</span>'
       : '<span class="session-mark">Mira ID 已连接</span>')
     : "";
   return new Response(`<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
@@ -360,16 +362,16 @@ function renderLoginPage(returnTo: ProtectedPage, blocked: boolean, ownerError =
 ${blocked ? `<div class="notice auth-required" role="status"><strong>这个页面需要先登录</strong>
 <p>登录完成后会回到你刚才要访问的位置。</p></div>` : ""}
 ${ownerError ? `<div class="notice error" role="alert"><strong>登录没有完成</strong>
-<p>登录名或密码不正确，或当前实例尚未初始化 Owner 登录。请重试。</p></div>` : ""}
+<p>管理员账号或密码不正确，或当前实例尚未初始化管理员登录。请重试。</p></div>` : ""}
 <div class="auth-actions" id="login"><a class="button" href="${escapeText(href)}">使用 Mira ID 继续 ${webIcon("arrow")}</a></div>
 <details class="owner-login">
-<summary>实例 Owner 登录</summary>
-<p class="hint">仅适用于当前部署实例的本地 Owner，与 Mira ID 账号相互独立。首次登录后必须先修改初始密码。</p>
+<summary>管理员登录</summary>
+<p class="hint">用于管理当前狐邮实例。首次登录后需要先修改初始密码。</p>
 <form method="post" action="${escapeText(ownerAction)}">
 <input type="hidden" name="username" value="${OWNER_LOGIN_NAME}">
-<p><label for="owner-password">Owner 密码</label><br>
+<p><label for="owner-password">管理员密码</label><br>
 <input id="owner-password" type="password" name="password" autocomplete="current-password" required maxlength="${OWNER_PASSWORD_MAX_LENGTH}"></p>
-<button class="button secondary" type="submit">使用本地 Owner 登录</button>
+<button class="button secondary" type="submit">管理员登录</button>
 </form>
 </details>
 <p class="footnote">连接 Mira ID 后，你可以管理自己的邮箱，并授权 Mira 客户端使用狐邮提供的邮件能力。登录不会自动授予邮箱访问权限。</p>
@@ -390,12 +392,65 @@ ${publicIntroduction}
 ${miraIntroduction}`;
 }
 
+function renderPasswordDialog(
+  mustChangePassword: boolean,
+  passwordError: boolean,
+): string {
+  return `<div class="account-actions">
+<button class="button secondary" type="button" popovertarget="password-popover">修改密码</button>
+</div>
+<div id="password-popover" class="admin-popover" popover>
+<div class="popover-head"><div><p class="eyebrow">管理员账号</p><h2>修改密码</h2></div>
+<button class="popover-close" type="button" popovertarget="password-popover" popovertargetaction="hide" aria-label="关闭">×</button></div>
+${passwordError ? `<div class="notice error" role="alert"><strong>密码没有修改</strong>
+<p>当前密码不正确，或新密码不符合要求。新密码至少 12 个字符，且不能与当前密码相同。</p></div>` : ""}
+${mustChangePassword ? `<div class="notice auth-required" role="status"><strong>首次登录请先修改密码</strong>
+<p>修改完成后才能进入邮箱和应用管理。</p></div>` : ""}
+<form class="owner-password-form" method="post" action="${APPLICATIONS_PASSWORD_PATH}">
+<p><label for="owner-current-password">当前密码</label><br>
+<input id="owner-current-password" type="password" name="currentPassword" autocomplete="current-password" required maxlength="${OWNER_PASSWORD_MAX_LENGTH}"></p>
+<p><label for="owner-new-password">新密码</label><br>
+<input id="owner-new-password" type="password" name="newPassword" autocomplete="new-password" required minlength="12" maxlength="${OWNER_PASSWORD_MAX_LENGTH}"></p>
+<p><label for="owner-confirm-password">再次输入新密码</label><br>
+<input id="owner-confirm-password" type="password" name="confirmPassword" autocomplete="new-password" required minlength="12" maxlength="${OWNER_PASSWORD_MAX_LENGTH}"></p>
+<div class="popover-actions">
+<button class="button secondary" type="button" popovertarget="password-popover" popovertargetaction="hide">取消</button>
+<button class="button" type="submit">确认修改</button>
+</div>
+</form>
+</div>`;
+}
+
+function renderOwnerAccountPage(
+  mustChangePassword: boolean,
+  notice: "owner_password_changed" | null,
+  passwordError = false,
+): string {
+  const banner = notice === "owner_password_changed"
+    ? `<div class="notice ok" role="status"><p>管理员密码已更新，旧密码与旧会话已经失效。</p></div>`
+    : mustChangePassword
+      ? `<div class="notice auth-required" role="status"><strong>首次登录请先修改密码</strong>
+<p>完成修改后即可继续使用狐邮。</p></div>`
+      : "";
+  return `<h1>账户</h1>
+${banner}
+<div class="settings compact-settings">
+<div class="setting-row"><div><strong>管理员账号</strong><p class="account-value">${OWNER_LOGIN_NAME}</p></div>
+${renderPasswordDialog(mustChangePassword, passwordError)}</div>
+</div>
+<div class="setting-actions"><form method="post" action="/auth/logout"><button class="button secondary" type="submit">退出登录</button></form></div>`;
+}
+
 function renderAccountPage(
   principal: MiraPrincipal | OwnerPrincipal,
   instance: NonNullable<ReturnType<typeof resolveApplicationInstance>>,
   base: string,
   outcome: MailboxListOutcome,
+  notice: "owner_password_changed" | null = null,
 ): string {
+  if (principal.kind === "owner") {
+    return renderOwnerAccountPage(principal.mustChangePassword, notice);
+  }
   const manifest = applicationManifest(instance);
   const service = manifest.services[0]!;
   const appsUrl = escapeText(new URL("/account/applications", base).href);
@@ -403,38 +458,19 @@ function renderAccountPage(
   const mailboxStatus = outcome.ok
     ? outcome.mailboxes.length === 0 ? "尚未连接" : `已登记 ${outcome.mailboxes.length} 个邮箱`
     : "暂时无法获取邮箱状态";
-  const owner = principal.kind === "owner";
-  const identityRow = owner
-    ? `<div class="setting-row"><div class="account-identity"><img class="account-avatar" src="/brand/logo/dark/symbol.webp" alt="" width="48" height="48"><div><strong>本地 Owner</strong>
-<p class="hint">当前账号 · 仅属于本部署实例</p><p><code>${escapeText(principal.accountId)}</code></p></div></div><span class="pill ok">已登录</span></div>
-<div class="setting-row"><div><strong>狐邮应用访问</strong>
-<p class="hint">本地 Owner 直接使用本部署实例，不需要 Mira ID 应用授权，也不会因此获得任何 Mira ID 账号的数据。</p></div><span class="pill muted">本地实例</span></div>
-<div class="setting-row"><div><strong>授权能力 · ${escapeText(service.name)}</strong>
-<p class="hint">MCP 服务能力由狐邮实例自行声明；本地 Owner 登录不是 Mira ID 服务授权。</p></div><span class="pill muted">实例声明</span></div>`
-    : `<div class="setting-row"><div class="account-identity"><img class="account-avatar" src="/brand/mira-id/mira-id-app.svg" alt="" width="48" height="48"><div><strong>Mira ID</strong>
+  return `<h1>账户</h1>
+<p class="lead">使用 Mira ID 进入狐邮。你的身份、应用授权与邮箱连接分别管理。</p>
+<div class="settings">
+<div class="setting-row"><div class="account-identity"><img class="account-avatar" src="/brand/mira-id/mira-id-app.svg" alt="" width="48" height="48"><div><strong>Mira ID</strong>
 <p class="hint">当前账号</p><p><code>${escapeText(principal.accountId)}</code></p></div></div><span class="pill ok">已连接</span></div>
 <div class="setting-row"><div><strong>狐邮应用访问</strong>
 <p class="hint">你已授权狐邮使用你的 Mira ID 身份。此状态不代表邮件服务权限或邮箱授权。</p></div><span class="pill ok">已授权</span></div>
 <div class="setting-row"><div><strong>授权能力 · ${escapeText(service.name)}</strong>
-<p class="hint">在 Mira ID 查看和管理智能体的实际服务授权。</p></div><a href="${grantsUrl}">查看授权 ${webIcon("arrow")}</a></div>`;
-  const applicationsRow = owner
-    ? `<div class="setting-row"><div><strong>应用管理</strong>
-<p class="hint">修改本地 Owner 密码并查看本实例公开摘要；APP Secret 不在本页管理。</p></div><a href="${APPLICATIONS_PATH}">进入应用管理 ${webIcon("arrow")}</a></div>`
-    : "";
-  const footnote = owner
-    ? "退出狐邮不会解绑你的邮箱。本地 Owner 密码与邮箱服务商授权是不同凭据。"
-    : "退出狐邮不会解绑你的邮箱，也不会撤销 Mira ID 中的服务授权。";
-  return `<h1>账户</h1>
-<p class="lead">${owner
-    ? "当前使用本部署实例的本地 Owner 账号。账户、邮箱与业务能力与 Mira ID 用户共用同一套狐邮页面。"
-    : "使用 Mira ID 进入狐邮。你的身份、应用授权与邮箱连接分别管理。"}</p>
-<div class="settings">
-${identityRow}
-${applicationsRow}
+<p class="hint">在 Mira ID 查看和管理智能体的实际服务授权。</p></div><a href="${grantsUrl}">查看授权 ${webIcon("arrow")}</a></div>
 <div class="setting-row"><div><strong>邮箱</strong><p class="hint">${mailboxStatus}</p></div><a href="/account/mailboxes">管理邮箱 ${webIcon("arrow")}</a></div>
 </div>
 <div class="setting-actions"><form method="post" action="/auth/logout"><button class="button secondary" type="submit">退出狐邮</button></form></div>
-<p class="footnote">${footnote}</p>
+<p class="footnote">退出狐邮不会解绑你的邮箱，也不会撤销 Mira ID 中的服务授权。</p>
 <details class="instance-details">
 <summary>应用实例</summary>
 <div class="instance-content">
@@ -453,118 +489,80 @@ ${applicationsRow}
 
 type ApplicationSecretPanel = {
   state: AppSecretStatus | null;
-  error: "password" | "conflict" | "rotated" | "unavailable" | null;
+  error: "conflict" | "rotated" | "unavailable" | null;
   revealed: { value: string; state: AppSecretStatus } | null;
 };
 
-function renderApplicationsPage(
+function renderApplicationsListPage(
   instance: NonNullable<ReturnType<typeof resolveApplicationInstance>>,
-  credential: OwnerCredential,
-  notice: "owner_password_changed" | null,
-  passwordError: boolean,
+): string {
+  const manifest = applicationManifest(instance);
+  return `<h1>应用管理</h1>
+<div class="settings compact-settings">
+<a class="setting-row instance-row" href="${APPLICATION_INSTANCE_PATH}">
+<div><strong>${escapeText(manifest.name)}</strong><p class="hint">${escapeText(instance.origin)}</p></div>
+<span>管理 ${webIcon("arrow")}</span>
+</a>
+</div>`;
+}
+
+function renderApplicationInstancePage(
+  instance: NonNullable<ReturnType<typeof resolveApplicationInstance>>,
   secrets: ApplicationSecretPanel,
 ): string {
   const manifest = applicationManifest(instance);
-  const service = manifest.services[0]!;
-  const banner = passwordError
-    ? `<div class="notice error" role="alert"><strong>密码没有修改</strong>
-<p>当前密码不正确，或新密码不符合要求。新密码至少 12 个字符，且不能与当前密码相同。</p></div>`
-    : credential.mustChangePassword
-      ? `<div class="notice auth-required" role="status"><strong>首次登录需要修改初始密码</strong>
-<p>完成修改前，账户与邮箱业务页面不可用。这是本部署实例唯一的本地 Owner 账号。</p></div>`
-      : notice === "owner_password_changed"
-        ? `<div class="notice ok" role="status"><p>Owner 密码已更新。旧密码和此前签发的 Owner 会话已失效。</p></div>`
-        : "";
-  const secretError = secrets.error === "password"
+  const secretError = secrets.error === "conflict"
     ? `<div class="notice error" role="alert"><strong>操作没有完成</strong>
-<p>当前 Owner 密码不正确。请重新输入后重试。</p></div>`
-    : secrets.error === "conflict"
-      ? `<div class="notice error" role="alert"><strong>操作没有完成</strong>
 <p>AppSecret 状态已经变化，本次请求未生效。请刷新页面后重试。</p></div>`
-      : secrets.error === "rotated"
-        ? `<div class="notice" role="status"><strong>初始 AppSecret 已不可查看</strong>
-<p>本实例已经完成过轮换，部署初始 Secret 不再显示。如果当前轮换 Secret 已遗失，请直接再次轮换。</p></div>`
-        : secrets.error === "unavailable"
-          ? `<div class="notice error" role="alert"><strong>AppSecret 操作暂不可用</strong>
-<p>无法读取本实例的 AppSecret 状态，因此没有执行查看或轮换。请稍后重试。</p></div>`
-          : "";
-  const secretStatus = secrets.state === null
-    ? `<div class="setting-row"><div><strong>当前状态</strong>
-<p class="hint">暂时无法读取本实例的 AppSecret 状态，因此不提供查看或轮换操作。请稍后重试。</p></div><span class="pill bad">不可用</span></div>`
-    : secrets.state.kind === "bootstrap"
-      ? `<div class="setting-row"><div><strong>当前状态</strong>
-<p class="hint">当前有效的是部署环境提供的初始 Secret，本实例内尚未轮换。</p></div><span class="pill warn">部署初始 Secret</span></div>`
-      : `<div class="setting-row"><div><strong>当前状态</strong>
-<p class="hint">已由本实例 Owner 轮换。部署初始 Secret 和此前所有轮换 Secret 都已失效。</p>
-<p class="hint">当前版本 <code>${secrets.state.version}</code> · 轮换时间 <code>${escapeText(new Date(secrets.state.rotatedAt).toISOString())}</code></p></div><span class="pill ok">已轮换</span></div>`;
+    : secrets.error === "rotated"
+      ? `<div class="notice" role="status"><strong>当前 AppSecret 不可再次查看</strong>
+<p>轮换后的 Secret 只在生成时完整显示一次；如果已经遗失，请再次轮换。</p></div>`
+      : secrets.error === "unavailable"
+        ? `<div class="notice error" role="alert"><strong>AppSecret 暂不可用</strong>
+<p>无法读取当前状态，因此没有执行查看或轮换。请稍后重试。</p></div>`
+        : "";
   const revealed = secrets.revealed
     ? `<div class="notice ok" role="status">
-<strong>${secrets.revealed.state.kind === "bootstrap" ? "部署初始 AppSecret" : "新的 AppSecret（仅显示一次）"}</strong>
-<p>${secrets.revealed.state.kind === "bootstrap"
-    ? "该 Secret 来自部署环境，仅用于本实例现在的 Mira ID 登记验证。首次轮换后它会立即失效，并且不再可查看。"
-    : "请立即复制并安全保存。离开本页后不会再次完整显示；遗失后只能由 Owner 再次轮换。"}</p>
+<strong>${secrets.revealed.state.kind === "bootstrap" ? "当前 AppSecret" : "新的 AppSecret（仅显示一次）"}</strong>
 <pre class="secret-value" aria-label="当前 AppSecret">${escapeText(secrets.revealed.value)}</pre>
-<p class="hint">不要把 Secret 写入 URL、聊天记录、工单、日志或公开仓库。</p>
+<p class="hint">${secrets.revealed.state.kind === "bootstrap"
+    ? "首次轮换后，这个 Secret 会立即失效。"
+    : "请现在复制并保存；离开本页后不会再次完整显示。"}</p>
 </div>`
     : "";
-  const secretActions = credential.mustChangePassword || secrets.state === null
+  const status = secrets.state === null
+    ? `<span class="pill bad">不可用</span>`
+    : secrets.state.kind === "bootstrap"
+      ? `<span class="pill ok">当前有效</span>`
+      : `<span class="pill ok">已轮换</span>`;
+  const secretAction = secrets.state === null
     ? ""
-    : `${secrets.state.kind === "bootstrap"
-      ? `<form class="owner-password-form" method="post" action="${APPLICATIONS_SECRET_VIEW_PATH}">
-<p><label for="owner-view-secret-password">当前 Owner 密码</label><br>
-<input id="owner-view-secret-password" type="password" name="currentPassword" autocomplete="current-password" required maxlength="${OWNER_PASSWORD_MAX_LENGTH}"></p>
-<button class="button secondary" type="submit">查看部署初始 AppSecret</button>
+    : secrets.state.kind === "bootstrap"
+      ? `<form method="post" action="${APPLICATIONS_SECRET_VIEW_PATH}">
+<button class="button secondary" type="submit">显示 AppSecret</button>
 </form>`
-      : `<p class="hint">部署初始 Secret 在首次轮换后不可再查看。如果当前轮换 Secret 已遗失，请直接再次轮换。</p>`}
-<form class="owner-password-form" method="post" action="${APPLICATIONS_SECRET_ROTATE_PATH}">
-<p><label for="owner-rotate-secret-password">当前 Owner 密码</label><br>
-<input id="owner-rotate-secret-password" type="password" name="currentPassword" autocomplete="current-password" required maxlength="${OWNER_PASSWORD_MAX_LENGTH}"></p>
-<button class="button" type="submit">轮换 AppSecret</button>
-</form>
-<p class="footnote">轮换只改变未来登记验证使用的凭据；不会撤销 Mira ID ownership、普通用户登录、邮箱连接、服务授权或 MCP 凭据。</p>`;
-  return `<h1>应用管理</h1>
-<p class="lead">仅本部署实例的本地 Owner 可见。这里管理 Owner 登录凭据、实例登记信息与 AppSecret 生命周期。</p>
-${banner}
-<section aria-labelledby="owner-password">
-<h2 id="owner-password">Owner 登录</h2>
-<div class="settings">
-<div class="setting-row"><div><strong>登录名</strong><p class="hint">固定为 <code>${OWNER_LOGIN_NAME}</code>，仅属于本部署实例。</p></div><span class="pill ok">本地账号</span></div>
-<div class="setting-row"><div><strong>账号 ID</strong><p><code>${escapeText(credential.accountId)}</code></p></div><span class="pill muted">独立于 Mira ID</span></div>
-<div class="setting-row"><div><strong>密码状态</strong><p class="hint">${credential.mustChangePassword
-    ? "仍在使用部署提供的初始密码；必须先修改。"
-    : "已使用本地设置的密码；修改后旧会话和旧密码会立即失效。"}</p></div><span class="pill ${credential.mustChangePassword ? "warn" : "ok"}">${credential.mustChangePassword ? "需要修改" : "已设置"}</span></div>
-</div>
-<form class="owner-password-form" method="post" action="${APPLICATIONS_PASSWORD_PATH}">
-<p><label for="owner-current-password">当前密码</label><br>
-<input id="owner-current-password" type="password" name="currentPassword" autocomplete="current-password" required maxlength="${OWNER_PASSWORD_MAX_LENGTH}"></p>
-<p><label for="owner-new-password">新密码</label><br>
-<input id="owner-new-password" type="password" name="newPassword" autocomplete="new-password" required minlength="12" maxlength="${OWNER_PASSWORD_MAX_LENGTH}"></p>
-<p><label for="owner-confirm-password">再次输入新密码</label><br>
-<input id="owner-confirm-password" type="password" name="confirmPassword" autocomplete="new-password" required minlength="12" maxlength="${OWNER_PASSWORD_MAX_LENGTH}"></p>
-<button class="button" type="submit">修改 Owner 密码</button>
-</form>
-<p class="footnote">密码只以加盐的不可逆摘要保存；页面、日志和响应都不会回显密码。</p>
-</section>
-<section aria-labelledby="instance-summary">
-<h2 id="instance-summary">实例摘要</h2>
-<dl class="instance-fields">
-<div><dt>应用 ID</dt><dd><code>${escapeText(manifest.appId)}</code></dd></div>
-<div><dt>应用地址</dt><dd><code>${escapeText(instance.origin)}</code></dd></div>
-<div><dt>MCP</dt><dd><code>${escapeText(service.protocol.endpoint)}</code></dd></div>
-<div><dt>实例声明权限（非当前用户授权）</dt><dd><code>${escapeText(service.scopes.join(", "))}</code></dd></div>
-</dl>
-</section>
-<section aria-labelledby="app-secret">
-<h2 id="app-secret">APP Secret</h2>
-<p class="hint">APP_ID 稳定不变。AppSecret 只用于在 Mira ID 登记本实例的管理权，不是 OAuth client_secret、MCP 凭据或用户密码。</p>
+      : `<p class="hint">轮换后的 Secret 不保存可恢复明文；遗失时请重新轮换。</p>`;
+  return `<div class="page-back"><a href="${APPLICATIONS_PATH}">← 应用管理</a></div>
+<h1>${escapeText(manifest.name)}</h1>
 ${secretError}
 ${revealed}
 <div class="settings">
-${secretStatus}
+<div class="setting-row"><div><strong>APP ID</strong><p><code>${escapeText(manifest.appId)}</code></p></div></div>
+<div class="setting-row"><div><strong>AppSecret</strong><p class="hint">用于向 Mira ID 证明当前实例的管理权。</p></div>${status}</div>
 </div>
-${secretActions}
-</section>
-<div class="setting-actions"><form method="post" action="/auth/logout"><button class="button secondary" type="submit">退出狐邮</button></form></div>`;
+<div class="instance-secret-actions">
+${secretAction}
+<button class="button" type="button" popovertarget="rotate-secret-popover">轮换 AppSecret</button>
+</div>
+<div id="rotate-secret-popover" class="admin-popover" popover>
+<div class="popover-head"><div><p class="eyebrow">AppSecret</p><h2>确认轮换</h2></div>
+<button class="popover-close" type="button" popovertarget="rotate-secret-popover" popovertargetaction="hide" aria-label="关闭">×</button></div>
+<p>轮换后，旧 AppSecret 将立即失效。</p>
+<div class="popover-actions">
+<button class="button secondary" type="button" popovertarget="rotate-secret-popover" popovertargetaction="hide">取消</button>
+<form method="post" action="${APPLICATIONS_SECRET_ROTATE_PATH}"><button class="button" type="submit">确认轮换</button></form>
+</div>
+</div>`;
 }
 
 function ownerNotice(value: string | null): "owner_password_changed" | null {
@@ -1364,8 +1362,7 @@ async function handleWebRequestInternal(request: Request, env: WhoYouEnv): Promi
     if (request.method !== "GET") return respondError(405, "method_not_allowed");
     const current = await resolveWebPrincipal(request, key, env, instance);
     if (current && await verifyPrincipal(env, current)) {
-      return redirect(current.kind === "owner" && current.mustChangePassword
-        ? APPLICATIONS_PATH : "/account");
+      return redirect("/account");
     }
     const returnTo = returnToFrom(u.searchParams.get("returnTo"));
     const blocked = u.searchParams.get("reason") === "sign_in_required";
@@ -1462,12 +1459,12 @@ async function handleWebRequestInternal(request: Request, env: WhoYouEnv): Promi
     if (validReturnTo(path)) return redirect(guardLocation(path));
     return respondError(401, "sign_in_required");
   }
-  // A first-login Owner may only reach the application-management password
-  // form until the initial password has been replaced.
+  // A first-login administrator may only reach the account page and password
+  // mutation until the initial password has been replaced.
   if (principal.kind === "owner" && principal.mustChangePassword
-      && path !== APPLICATIONS_PATH && path !== APPLICATIONS_PASSWORD_PATH) {
+      && path !== "/account" && path !== APPLICATIONS_PASSWORD_PATH) {
     if (path.startsWith("/api/")) return respondError(403, "password_change_required");
-    return redirect(APPLICATIONS_PATH);
+    return redirect("/account");
   }
 
   if (path === "/account/mailboxes/gmail/link") {
@@ -1541,22 +1538,20 @@ async function handleWebRequestInternal(request: Request, env: WhoYouEnv): Promi
 
   if (path === APPLICATIONS_PATH) {
     if (principal.kind !== "owner") return respondError(404, "not_found");
-    const credential = await loadOwnerCredential(env);
-    if (!credential || credential.credentialVersion !== principal.credentialVersion) {
-      return respondError(401, "sign_in_required");
-    }
-    return page(renderApplicationsPage(instance, credential,
-      ownerNotice(u.searchParams.get("notice")), false, {
-        state: await loadAppSecretState(env), error: null, revealed: null,
-      }), headers(), 200,
-      { shell: "app", active: "applications", isOwner: true, sessionVerified: true,
-        ownerPendingPasswordChange: credential.mustChangePassword });
+    return page(renderApplicationsListPage(instance), headers(), 200,
+      { shell: "app", active: "applications", isOwner: true, sessionVerified: true });
+  }
+
+  if (path === APPLICATION_INSTANCE_PATH) {
+    if (principal.kind !== "owner") return respondError(404, "not_found");
+    return page(renderApplicationInstancePage(instance, {
+      state: await loadAppSecretState(env), error: null, revealed: null,
+    }), headers(), 200,
+    { shell: "app", active: "applications", isOwner: true, sessionVerified: true });
   }
 
   if (path === APPLICATIONS_SECRET_VIEW_PATH) {
     if (principal.kind !== "owner") return respondError(404, "not_found");
-    const form = await readForm(request, ["currentPassword"], 4096);
-    if (!form) return respondError(400, "invalid_request");
     const credential = await loadOwnerCredential(env);
     if (!credential || credential.credentialVersion !== principal.credentialVersion) {
       return respondError(401, "sign_in_required");
@@ -1564,13 +1559,8 @@ async function handleWebRequestInternal(request: Request, env: WhoYouEnv): Promi
     const state = await loadAppSecretState(env);
     const render = (error: ApplicationSecretPanel["error"], revealed:
       ApplicationSecretPanel["revealed"], status: number): Response =>
-      page(renderApplicationsPage(instance, credential, null, false, {
-        state, error, revealed,
-      }), headers(), status,
+      page(renderApplicationInstancePage(instance, { state, error, revealed }), headers(), status,
       { shell: "app", active: "applications", isOwner: true, sessionVerified: true });
-    if (!await verifyOwnerPassword(form.get("currentPassword") ?? "", credential)) {
-      return render("password", null, 403);
-    }
     if (state === null) return render("unavailable", null, 503);
     if (state.kind === "rotated") return render("rotated", null, 409);
     if (!env.WHOYOU_APP_SECRET) return respondError(503, "application_not_configured");
@@ -1579,21 +1569,14 @@ async function handleWebRequestInternal(request: Request, env: WhoYouEnv): Promi
 
   if (path === APPLICATIONS_SECRET_ROTATE_PATH) {
     if (principal.kind !== "owner") return respondError(404, "not_found");
-    const form = await readForm(request, ["currentPassword"], 4096);
-    if (!form) return respondError(400, "invalid_request");
     const credential = await loadOwnerCredential(env);
     if (!credential || credential.credentialVersion !== principal.credentialVersion) {
       return respondError(401, "sign_in_required");
     }
     const state = await loadAppSecretState(env);
     const render = (error: ApplicationSecretPanel["error"], status: number): Response =>
-      page(renderApplicationsPage(instance, credential, null, false, {
-        state, error, revealed: null,
-      }), headers(), status,
+      page(renderApplicationInstancePage(instance, { state, error, revealed: null }), headers(), status,
       { shell: "app", active: "applications", isOwner: true, sessionVerified: true });
-    if (!await verifyOwnerPassword(form.get("currentPassword") ?? "", credential)) {
-      return render("password", 403);
-    }
     if (state === null) return render("unavailable", 503);
     const repository = applicationSecretRepository(env);
     if (!repository) return render("unavailable", 503);
@@ -1610,7 +1593,7 @@ async function handleWebRequestInternal(request: Request, env: WhoYouEnv): Promi
     }
     if (nextVersion === null) return render("conflict", 409);
     const rotated: AppSecretStatus = { kind: "rotated", version: nextVersion, rotatedAt: now };
-    return page(renderApplicationsPage(instance, credential, null, false, {
+    return page(renderApplicationInstancePage(instance, {
       state: rotated, error: null, revealed: { value: secret, state: rotated },
     }), headers(), 200,
     { shell: "app", active: "applications", isOwner: true, sessionVerified: true });
@@ -1631,10 +1614,9 @@ async function handleWebRequestInternal(request: Request, env: WhoYouEnv): Promi
     const currentValid = await verifyOwnerPassword(currentPassword, credential);
     if (!currentValid || !validateOwnerPassword(newPassword)
         || newPassword !== confirmPassword || newPassword === currentPassword) {
-      return page(renderApplicationsPage(instance, credential, null, true, {
-        state: await loadAppSecretState(env), error: null, revealed: null,
-      }), headers(), 400,
-        { shell: "app", active: "applications", isOwner: true, sessionVerified: true,
+      return page(renderOwnerAccountPage(credential.mustChangePassword, null, true),
+        headers(), 400,
+        { shell: "app", active: "account", isOwner: true, sessionVerified: true,
           ownerPendingPasswordChange: credential.mustChangePassword });
     }
     const repository = ownerRepository(env);
@@ -1653,7 +1635,7 @@ async function handleWebRequestInternal(request: Request, env: WhoYouEnv): Promi
         mustChangePassword: false,
       }), OWNER_SESSION_AAD),
       OWNER_SESSION_SECONDS);
-    return redirect(`${APPLICATIONS_PATH}?notice=owner_password_changed`, h);
+    return redirect("/account?notice=owner_password_changed", h);
   }
 
   // An existing session may predate managed enrollment or its grant may
@@ -1679,7 +1661,8 @@ async function handleWebRequestInternal(request: Request, env: WhoYouEnv): Promi
   catch { mailboxOutcome = { ok: false, error: "mailboxes_unavailable" }; }
   const accountView: MiraPrincipal | OwnerPrincipal = principal.kind === "owner"
     ? principal : { kind: "mira", accountId: verified.accountId, session: principal.session };
-  return page(renderAccountPage(accountView, instance, base, mailboxOutcome), headers(), 200,
+  return page(renderAccountPage(accountView, instance, base, mailboxOutcome,
+    ownerNotice(u.searchParams.get("notice"))), headers(), 200,
     { shell: "app", active: "account", isOwner: principal.kind === "owner", sessionVerified: true });
 }
 
