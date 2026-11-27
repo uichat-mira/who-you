@@ -171,3 +171,28 @@ export {
 } from "../src/mail/job-scope";
 export { resolveScheduledSyncProviders } from "../src/mail/scheduled-sync";
 export { projectOAuthSyncMetric, scheduledSyncBatchWindow } from "../src/mail/oauth-http";
+export {
+	OWNER_DEFAULT_INITIAL_PASSWORD,
+	OWNER_INITIAL_PASSWORD_MIN_LENGTH,
+	OWNER_LOGIN_NAME,
+	OWNER_PASSWORD_MAX_LENGTH,
+	OWNER_PASSWORD_MIN_LENGTH,
+	OWNER_PBKDF2_ITERATIONS,
+	OWNER_SESSION_SECONDS,
+	digestOwnerPassword,
+	isOwnerSession,
+	ownerAccountId,
+	validateInitialOwnerPassword,
+	validateOwnerPassword,
+	verifyOwnerPassword,
+} from "../src/web/owner-auth";
+export {
+	APP_SECRET_ENTROPY_BYTES,
+	APP_SECRET_MAX_LENGTH,
+	APP_SECRET_MIN_LENGTH,
+	ApplicationSecretRepository,
+	digestAppSecret,
+	generateAppSecret,
+	isValidAppSecret,
+	verifyAppSecret,
+} from "../src/application/app-secret";

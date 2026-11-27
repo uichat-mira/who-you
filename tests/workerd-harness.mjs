@@ -41,6 +41,8 @@ export const MIGRATIONS = [
 	...migrationStatements("migrations/0010_mail_jobs.sql"),
 	...migrationStatements("migrations/0011_mail_job_audit.sql"),
 	...migrationStatements("migrations/0012_manual_sync_lease.sql"),
+	...migrationStatements("migrations/0013_owner_account.sql"),
+	...migrationStatements("migrations/0014_application_app_secret.sql"),
 ];
 
 export const BASE_BINDINGS = {

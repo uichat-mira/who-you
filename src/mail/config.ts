@@ -42,6 +42,12 @@ export type WhoYouEnv = ApplicationEnv & McpEnv &
 		MAIL_DOMAIN?: string;
 		/** Base64url-encoded 32-byte AES-GCM key for the browser-only Cloud Auth session. */
 		WHOYOU_WEB_SESSION_KEY?: string;
+		/**
+		 * Optional deployment override for the instance-local Owner bootstrap
+		 * password. When absent, first login uses the one-time default `123456`;
+		 * the stored row keeps only a PBKDF2 digest and forces a password change.
+		 */
+		WHOYOU_OWNER_INITIAL_PASSWORD?: string;
 		/** Cloudflare Email Service binding; send is closed when it is absent. */
 		MAIL_EMAIL_SEND?: SendEmail;
 		/**
