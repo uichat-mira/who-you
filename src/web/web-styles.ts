@@ -108,5 +108,11 @@ code{overflow-wrap:anywhere;font-family:var(--font-mono);font-size:var(--text-sm
 .instance-fields{margin:var(--space-4) 0;display:grid;gap:var(--space-3)}
 .instance-fields div{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,2fr);gap:var(--space-3)}
 .instance-fields dt{color:var(--foreground-secondary)}.instance-fields dd{margin:0;overflow-wrap:anywhere;user-select:text}
+.owner-login{margin-top:var(--space-5);color:var(--foreground-secondary)}
+.owner-login summary{cursor:pointer;font-weight:var(--weight-semibold);color:var(--foreground)}
+.owner-login form{margin-top:var(--space-3)}
+.owner-login input{width:min(100%,320px)}
+.owner-password-form{margin:var(--space-5) 0;max-width:420px}
+.owner-password-form input{width:100%}
 @media(max-width:520px){.instance-fields div{grid-template-columns:1fr;gap:var(--space-1)}.setting-row{flex-wrap:wrap}}
 `;
