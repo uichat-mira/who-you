@@ -436,6 +436,61 @@ test("Owner and Mira ID principals see one shell but never each other's mailboxe
 	});
 });
 
+test("Owner Web POSTs accept a same-origin Referer fallback when Origin is omitted", async () => {
+	await withWorker(async ({ mf }) => {
+		const missingEvidence = await mf.dispatchFetch(ORIGIN + "/auth/owner/login", {
+			method: "POST",
+			redirect: "manual",
+			headers: { "content-type": "application/x-www-form-urlencoded" },
+			body: new URLSearchParams({ username: "admin", password: INITIAL_PASSWORD }).toString(),
+		});
+		assert.equal(missingEvidence.status, 403);
+
+		const crossSiteReferer = await mf.dispatchFetch(ORIGIN + "/auth/owner/login", {
+			method: "POST",
+			redirect: "manual",
+			headers: {
+				referer: "https://evil.invalid/",
+				"content-type": "application/x-www-form-urlencoded",
+			},
+			body: new URLSearchParams({ username: "admin", password: INITIAL_PASSWORD }).toString(),
+		});
+		assert.equal(crossSiteReferer.status, 403);
+
+		const login = await mf.dispatchFetch(ORIGIN + "/auth/owner/login", {
+			method: "POST",
+			redirect: "manual",
+			headers: {
+				referer: ORIGIN + "/",
+				"content-type": "application/x-www-form-urlencoded",
+			},
+			body: new URLSearchParams({ username: "admin", password: INITIAL_PASSWORD }).toString(),
+		});
+		assert.equal(login.status, 303, await login.text());
+		assert.equal(login.headers.get("location"), "/account/applications");
+		const pending = cookieValue(login, "__Host-who_you_owner_session");
+		assert.ok(pending);
+
+		const changed = await mf.dispatchFetch(ORIGIN + "/account/applications/password", {
+			method: "POST",
+			redirect: "manual",
+			headers: {
+				referer: ORIGIN + "/account/applications",
+				"content-type": "application/x-www-form-urlencoded",
+				cookie: pending,
+			},
+			body: new URLSearchParams({
+				currentPassword: INITIAL_PASSWORD,
+				newPassword: NEW_PASSWORD,
+				confirmPassword: NEW_PASSWORD,
+			}).toString(),
+		});
+		assert.equal(changed.status, 303, await changed.text());
+		assert.equal(changed.headers.get("location"),
+			"/account/applications?notice=owner_password_changed");
+	});
+});
+
 test("Owner login rejects bad input, cross-origin requests and throttled attempts while supporting default bootstrap", async () => {
 	await withWorker(async ({ mf, db }) => {
 		const crossOrigin = await mf.dispatchFetch(ORIGIN + "/auth/owner/login", {
