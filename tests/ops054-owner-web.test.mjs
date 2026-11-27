@@ -239,7 +239,7 @@ test("Owner first login is password-change gated and rotates credentials and ses
 		assert.equal(mismatch.status, 400);
 		const unchanged = await loginOwner(mf, INITIAL_PASSWORD);
 		assert.equal(unchanged.status, 303);
-		assert.equal(unchanged.headers.get("location"), "/account/applications");
+		assert.equal(unchanged.headers.get("location"), "/account");
 
 		const changed = await changeOwnerPassword(mf, pending, INITIAL_PASSWORD, NEW_PASSWORD);
 		assert.equal(changed.status, 303, await changed.text());
@@ -454,7 +454,7 @@ test("Owner login page emits same-origin referrer policy and accepts Fetch Metad
 			body: new URLSearchParams({ username: "admin", password: INITIAL_PASSWORD }).toString(),
 		});
 		assert.equal(login.status, 303, await login.text());
-		assert.equal(login.headers.get("location"), "/account/applications");
+		assert.equal(login.headers.get("location"), "/account");
 
 		const crossSite = await mf.dispatchFetch(ORIGIN + "/auth/owner/login", {
 			method: "POST",
@@ -500,7 +500,7 @@ test("Owner Web POSTs accept a same-origin Referer fallback when Origin is omitt
 			body: new URLSearchParams({ username: "admin", password: INITIAL_PASSWORD }).toString(),
 		});
 		assert.equal(login.status, 303, await login.text());
-		assert.equal(login.headers.get("location"), "/account/applications");
+		assert.equal(login.headers.get("location"), "/account");
 		const pending = cookieValue(login, "__Host-who_you_owner_session");
 		assert.ok(pending);
 
@@ -587,7 +587,7 @@ test("Owner login rejects bad input, cross-origin requests and throttled attempt
 	await withWorker(async ({ mf, db }) => {
 		const bootstrap = await loginOwner(mf, "123456");
 		assert.equal(bootstrap.status, 303, await bootstrap.text());
-		assert.equal(bootstrap.headers.get("location"), "/account/applications");
+		assert.equal(bootstrap.headers.get("location"), "/account");
 		assert.ok(cookieValue(bootstrap, "__Host-who_you_owner_session"));
 		const credential = await db.prepare(
 			`SELECT login_name, must_change_password, password_hash FROM owner_credentials WHERE id = 'owner'`,
