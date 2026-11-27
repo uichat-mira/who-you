@@ -523,7 +523,7 @@ test("Owner Web POSTs accept a same-origin Referer fallback when Origin is omitt
 		});
 		assert.equal(changed.status, 303, await changed.text());
 		assert.equal(changed.headers.get("location"),
-			"/account/applications?notice=owner_password_changed");
+			"/account?notice=owner_password_changed");
 	});
 });
 
