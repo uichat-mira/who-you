@@ -57,6 +57,8 @@ try {
       return new Response([204,304].includes(res.statusCode)?null:res.body,{status:res.statusCode,headers:res.headers});
     },
   });
+  const db=await mf.getD1Database("DB");
+  await db.batch(MIGRATIONS.map(s=>db.prepare(s)));
   const transport={
     get:async url=>{const r=await mf.dispatchFetch(url);return {status:r.status,body:await r.json()};},
     post:async(url,body)=>{const r=await mf.dispatchFetch(url,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(body)});return {status:r.status,body:await r.json()};},
@@ -70,8 +72,6 @@ try {
   assert.equal(registered.statusCode,200,registered.body);
   assert.equal(registered.json().application.manifest.oauth.redirectUris[0],origin+"/auth/callback");
   assert.equal((await rpc("GET","/v1/account/applications/"+appId,alice.sessionToken)).statusCode,404);
-  const db=await mf.getD1Database("DB");
-  await db.batch(MIGRATIONS.map(s=>db.prepare(s)));
   await seedMailbox(db,{id:"mbx_alice",accountId:alice.account.id,address:"alice@fixture.example",localPart:"alice"});
   await seedMailbox(db,{id:"mbx_bob",accountId:bob.account.id,address:"bob@fixture.example",localPart:"bob"});
   await seedMessage(db,{id:"message_a",mailboxId:"mbx_alice",accountId:alice.account.id,subject:"Synthetic owner message"});

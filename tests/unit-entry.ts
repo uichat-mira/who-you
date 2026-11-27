@@ -183,3 +183,13 @@ export {
 	validateOwnerPassword,
 	verifyOwnerPassword,
 } from "../src/web/owner-auth";
+export {
+	APP_SECRET_ENTROPY_BYTES,
+	APP_SECRET_MAX_LENGTH,
+	APP_SECRET_MIN_LENGTH,
+	ApplicationSecretRepository,
+	digestAppSecret,
+	generateAppSecret,
+	isValidAppSecret,
+	verifyAppSecret,
+} from "../src/application/app-secret";

@@ -4,7 +4,7 @@ OPS-048 实现合同；部署验收另行记录。每个部署独立配置稳定
 
 ## 部署绑定
 - WHOYOU_APP_ID：部署时生成的稳定随机标识（例如 UUID），不能随 Worker 重启生成。迁移已有实例时保持不变。
-- WHOYOU_APP_SECRET：部署时用安全随机数生成至少 32 字节并通过秘密管理系统存放；仅用于登记验证，不是 OAuth client_secret。不要输出到日志、源码或公开页面。
+- WHOYOU_APP_SECRET：部署时用安全随机数生成至少 32 字节并通过秘密管理系统存放；仅用于登记验证，不是 OAuth client_secret。它同时是尚未发生实例内轮换时的 bootstrap Secret；不要输出到日志、源码或公开页面。
 - WHOYOU_MANIFEST_REVISION：正整数，声明变更时递增；变更后用户需重新授权。
 - MCP_RESOURCE_URL：部署自身精确 HTTPS /mcp URI。网页、回调、OAuth clientId、manifest 和 resource 均从同一 origin 派生。
 - CLOUD_AUTH_ISSUER / CLOUD_AUTH_JWKS_URL：可信 Mira ID HTTPS 授权服务器及公钥。
@@ -12,7 +12,17 @@ OPS-048 实现合同；部署验收另行记录。每个部署独立配置稳定
 - 原有 D1/R2、提供商凭据、同步配置不变。
 
 ## 登记与登录
-在 Mira ID 我的应用中输入 HTTPS Origin、APP_ID、AppSecret。公开 GET /.well-known/mira-application 自动声明回调和只读 mail 服务；POST /mira/verify-registration 只接受精确 appId/appSecret，并仅返回 ok/appId。部署验证使用 Cloud Auth 当前合同，不能把 AppSecret 传给 OAuth。
+在 Mira ID 我的应用中输入 HTTPS Origin、APP_ID、AppSecret。公开 GET /.well-known/mira-application 自动声明回调和只读 mail 服务；POST /mira/verify-registration 只接受精确 appId 与当前有效 AppSecret，并仅返回 ok/appId。部署验证使用 Cloud Auth 当前合同，不能把 AppSecret 传给 OAuth。
+
+## 实例 Owner 查看与轮换 AppSecret（OPS-055）
+- APP_ID 稳定不变。AppSecret 是实例管理登记凭据，不是 OAuth client_secret、MCP bearer、用户登录密码或 Owner session key。
+- 只有本地 Owner 会话可访问受保护的查看/轮换操作，并且必须再次验证当前 Owner 密码、同源 POST 和 no-store 响应。普通 Mira ID 用户与匿名请求不可见、不可调用。
+- 尚未发生实例内轮换时，Owner 可显式查看部署环境提供的初始 `WHOYOU_APP_SECRET`；GET 应用管理页不显示 Secret，响应不进入 URL、cookie、日志或前端持久化。不创建第二份初始明文副本。
+- 轮换由服务端生成新的 256 位随机 Secret（43 字符 base64url，符合 V1 16–512 长度约束）。新 Secret 只在轮换成功的本次响应中完整显示一次；页面刷新或之后 GET 不再回显。
+- D1 `application_app_secret` 只保存当前版本的加盐单向摘要、版本和轮换时间，不保存明文、可逆副本或旧版本历史。首次轮换后仅该行对应的 Secret 可通过 `POST /mira/verify-registration`；旧部署 Secret 与此前所有轮换 Secret 立即失效。无法读取该状态时验证 fail closed，绝不回退接受 bootstrap Secret。
+- 遗失已轮换 Secret 的恢复方式是再次由 Owner 轮换；不提供“找回 Secret”、明文保险箱、多 Secret 并行有效期或双钥 overlap。
+- 发布该能力前必须先应用 D1 迁移 `0014_application_app_secret.sql`。若状态表不可读，`/mira/verify-registration` 会 fail closed，不会回退接受 bootstrap Secret。
+- 轮换不调用 Cloud Auth 删除、重建或修改 ownership，也不使现有 Mira ID application session、普通用户登录、邮箱连接、服务 grant 或 MCP 凭据失效；它只影响未来再次提交的登记验证。`WHOYOU_APP_SECRET` 继续作为部署 bootstrap binding 保留，生产发布不得移除。
 
 网页采用授权码 + PKCE S256，校验 state、appId、issuer、subject、clientId、expiry；凭据封装于 HttpOnly/Secure/SameSite=Lax 加密 cookie，所有受保护业务操作查询 /v1/oauth/application-session 复核。退出使用 application-session/logout。账号会话不等于 Agent MCP grant；Web 不请求设备短票。 狐邮账户页只确认应用会话身份与应用访问；服务授权可独立撤销，其实际状态由 Mira ID「关联服务」管理。公开实例字段从同一 manifest/instance 派生，「我的应用」管理登记与 ownership；不向浏览器传递登记凭据或新增一键登记协议。
 

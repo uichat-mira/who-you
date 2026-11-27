@@ -1,5 +1,6 @@
 import { SERVICE_CAPABILITIES_MANIFEST } from "../mcp/service-capabilities";
 import { WHOYOU_REQUIRED_SCOPE, WHOYOU_INSTANCE_SERVICE_ID } from "../mcp/config";
+import { ApplicationSecretRepository, isValidAppSecret, verifyAppSecret } from "./app-secret";
 
 export const APPLICATION_MANIFEST_PATH = "/.well-known/mira-application";
 export const APPLICATION_VERIFY_PATH = "/mira/verify-registration";
@@ -10,6 +11,7 @@ export type ApplicationEnv = {
   WHOYOU_APP_SECRET?: string;
   WHOYOU_MANIFEST_REVISION?: string;
   MCP_RESOURCE_URL?: string;
+  DB?: D1Database;
 };
 
 const appIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,159}$/;
@@ -27,8 +29,8 @@ export function resolveApplicationInstance(env: ApplicationEnv) {
   const appId = env.WHOYOU_APP_ID;
   const revision = Number(env.WHOYOU_MANIFEST_REVISION);
   const secret = env.WHOYOU_APP_SECRET;
-  if (!appId || !appIdPattern.test(appId) || !secret || secret.length < 16 ||
-      secret.length > 512 || !Number.isSafeInteger(revision) || revision < 1) return null;
+  if (!appId || !appIdPattern.test(appId) || !secret || !isValidAppSecret(secret) ||
+      !Number.isSafeInteger(revision) || revision < 1) return null;
   const resource = resolveInstanceResource(env);
   if (!resource) return null;
   const origin = resource.origin;
@@ -95,6 +97,23 @@ async function equalSecret(actual: string, expected: string) {
   return difference === 0;
 }
 
+/**
+ * Registry authority is D1 once rotated. A missing DB binding, a failed read or
+ * a malformed row rejects the proof: there is deliberately no fallback to the
+ * deployment bootstrap secret after an instance has rotated.
+ */
+async function verifyCurrentAppSecret(env: ApplicationEnv, presented: string): Promise<boolean> {
+  if (!env.DB) return false;
+  try {
+    const current = await new ApplicationSecretRepository(env.DB).current();
+    return current.kind === "rotated"
+      ? await verifyAppSecret(presented, current)
+      : await equalSecret(presented, env.WHOYOU_APP_SECRET!);
+  } catch {
+    return false;
+  }
+}
+
 /** Public declaration and same-origin, server-to-server registration proof.
  * No browser session, management token, or secret is returned or logged.
  */
@@ -115,7 +134,7 @@ export async function handleApplicationRequest(request: Request, env: Applicatio
   if (!input || typeof input !== "object" || Array.isArray(input)) return denied();
   const fields = input as Record<string, unknown>;
   if (Object.keys(fields).length !== 2 || fields.appId !== instance.appId ||
-      typeof fields.appSecret !== "string" || fields.appSecret.length < 16 ||
-      fields.appSecret.length > 512 || !await equalSecret(fields.appSecret, env.WHOYOU_APP_SECRET!)) return denied();
+      !isValidAppSecret(fields.appSecret) ||
+      !await verifyCurrentAppSecret(env, fields.appSecret)) return denied();
   return json({ ok: true, appId: instance.appId });
 }
