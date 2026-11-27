@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+	OWNER_DEFAULT_INITIAL_PASSWORD,
+	OWNER_INITIAL_PASSWORD_MIN_LENGTH,
 	OWNER_LOGIN_NAME,
 	OWNER_PASSWORD_MAX_LENGTH,
 	OWNER_PASSWORD_MIN_LENGTH,
@@ -9,6 +11,7 @@ import {
 	digestOwnerPassword,
 	isOwnerSession,
 	ownerAccountId,
+	validateInitialOwnerPassword,
 	validateOwnerPassword,
 	verifyOwnerPassword,
 } from "../dist/unit.mjs";
@@ -38,13 +41,18 @@ test("Owner passwords are stored as salted PBKDF2 digests and verified without p
 	assert.equal(await verifyOwnerPassword(password, { ...digest, iterations: 1 }), false);
 });
 
-test("Owner password policy enforces a bounded length for initial and replacement secrets", () => {
+test("Owner bootstrap may use admin / 123456 while replacement passwords remain stronger", () => {
 	assert.equal(OWNER_LOGIN_NAME, "admin");
+	assert.equal(OWNER_DEFAULT_INITIAL_PASSWORD, "123456");
+	assert.equal(OWNER_INITIAL_PASSWORD_MIN_LENGTH, 6);
+	assert.equal(validateInitialOwnerPassword("12345"), false);
+	assert.equal(validateInitialOwnerPassword("123456"), true);
+	assert.equal(validateInitialOwnerPassword("x".repeat(OWNER_PASSWORD_MAX_LENGTH)), true);
+	assert.equal(validateOwnerPassword("123456"), false);
 	assert.equal(validateOwnerPassword("x".repeat(OWNER_PASSWORD_MIN_LENGTH - 1)), false);
 	assert.equal(validateOwnerPassword("x".repeat(OWNER_PASSWORD_MIN_LENGTH)), true);
 	assert.equal(validateOwnerPassword("x".repeat(OWNER_PASSWORD_MAX_LENGTH)), true);
 	assert.equal(validateOwnerPassword("x".repeat(OWNER_PASSWORD_MAX_LENGTH + 1)), false);
-	assert.equal(validateOwnerPassword(""), false);
 });
 
 test("Owner account ids are stable per instance and cannot collide across deployments", () => {
