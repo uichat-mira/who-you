@@ -115,5 +115,17 @@ code{overflow-wrap:anywhere;font-family:var(--font-mono);font-size:var(--text-sm
 .owner-login input{width:min(100%,320px)}
 .owner-password-form{margin:var(--space-5) 0;max-width:420px}
 .owner-password-form input{width:100%}
-@media(max-width:520px){.instance-fields div{grid-template-columns:1fr;gap:var(--space-1)}.setting-row{flex-wrap:wrap}}
+.compact-settings{max-width:720px}
+.account-value{font-size:var(--text-lead);color:var(--foreground);margin-top:var(--space-2)}
+.account-actions{display:flex;align-items:center}
+.instance-row{color:inherit;text-decoration:none;align-items:center}.instance-row:hover strong{text-decoration:underline;text-underline-offset:4px}
+.page-back{margin-bottom:var(--space-4)}.page-back a{color:var(--foreground-secondary);text-decoration:none;font-weight:var(--weight-semibold)}
+.page-back a:hover{text-decoration:underline;text-underline-offset:4px}
+.instance-secret-actions{display:flex;gap:var(--space-3);flex-wrap:wrap;align-items:center;margin-top:var(--space-5)}.instance-secret-actions form{margin:0}
+.admin-popover{width:min(92vw,520px);max-height:min(82vh,680px);overflow:auto;border:1px solid var(--border-strong);border-radius:var(--radius-xl);background:var(--surface);color:var(--foreground);padding:var(--space-6);box-shadow:0 22px 70px rgb(0 0 0 / 22%)}
+.admin-popover::backdrop{background:rgb(16 20 28 / 42%)}
+.popover-head{display:flex;justify-content:space-between;align-items:flex-start;gap:var(--space-4)}.popover-head h2{margin:0}.popover-head .eyebrow{margin-bottom:var(--space-1)}
+.popover-close{min-width:38px;min-height:38px;padding:0;border:0;box-shadow:none;background:transparent;color:var(--foreground);font-size:1.7rem;line-height:1}.popover-close:hover{transform:none;box-shadow:none;background:var(--surface-subtle)}
+.popover-actions{display:flex;justify-content:flex-end;gap:var(--space-3);flex-wrap:wrap;margin-top:var(--space-5)}.popover-actions form{margin:0}
+@media(max-width:520px){.instance-fields div{grid-template-columns:1fr;gap:var(--space-1)}.setting-row{flex-wrap:wrap}.admin-popover{padding:var(--space-5)}}
 `;
