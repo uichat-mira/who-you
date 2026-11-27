@@ -11,13 +11,22 @@
 
 这是维护者本轮确认的职责分工。未在此裁决的提供商细节、存储与保留规则、确认凭证、迁移方式仍交由既有 Issue/任务合同或后续显式裁决决定。
 
+### 1.1 本地 Owner 与 Mira ID 用户身份（OPS-054）
+
+- 每个狐邮部署实例最多拥有一个本地 Owner 账号：登录名固定为 `admin`，账号主体固定为 `local-owner:<应用 ID>`。它只属于该实例，不是 Mira ID 账号，也不与任何 Mira ID `subject` 建立 alias、合并或 impersonation；`local-owner:` 是 Owner 的保留账号前缀，Mira ID 用户主体保持自己的 subject。
+- 初始密码只由部署环境显式提供（`WHOYOU_OWNER_INITIAL_PASSWORD`），不进入源码、日志、页面或长期测试 fixture。首次成功登录后必须先修改初始密码；完成前只能访问「应用管理」中的改密入口，账户与邮箱业务页面不可用。
+- 密码仅以加盐的 PBKDF2 摘要持久化。修改密码会提升该 Owner 的凭据版本，使此前签发的所有 Owner 会话立即失效。Owner 会话使用独立的 `__Host-who_you_owner_session` HttpOnly/Secure/SameSite cookie。
+- Owner 与 Mira ID 用户复用同一套狐邮账户页、邮箱页和现有业务服务，但各自只能访问自己 `account_id` 下的邮箱、凭据和同步状态。Owner 唯一额外的 UI 入口是「应用管理」；本卡在该页只提供 Owner 密码修改和实例只读摘要。
+- APP Secret 的展示、读取、生成、迁移与轮换明确不属于本卡；「应用管理」中的 APP Secret 区域只是后续工作项的占位说明，不读取环境中的 Secret。
+- 现有 Mira ID 登录、登出、Gmail 连接/解绑/同步和 MCP 认证合同保持不变。本卡新增的本地 Owner 能力不代表已部署到生产，也不代表已经轮换任何真实凭据。
+
 ## 2. UI 入口归属（已裁决的位置；不能当作已实现）
 
 | 位置 | 所有者 | 期望入口及职责 | 当前状态 |
 | --- | --- | --- | --- |
 | `https://cloud-auth.tomzlab.cn/account/services` | Cloud Auth | 「关联服务」按实际授权动态投影关联应用服务；狐邮不是编译期静态特例 | 当前 dev 已有实例服务目录及撤销入口；上线状态另行验证 |
 | `https://cloud-auth.tomzlab.cn/account/applications` | Cloud Auth | 「我的应用」管理登记、实例所有权；与普通用户服务授权分离 | 当前 dev 已有真实入口；V1 登记合同见 [应用实例 V1](engineering/mira-application-v1.md) |
-| `https://who-you.tomz.io/account` | Who You | 通过 Mira ID 进入狐邮；显示已复核身份、应用访问、邮箱状态及二级公开实例信息 | V1 app-scoped session；不将 manifest 声明权限当作当前服务授权，不管理平台凭据 |
+| `https://who-you.tomz.io/account` | Who You | 通过 Mira ID 或本部署实例的本地 Owner 进入狐邮；显示已复核身份、应用访问、邮箱状态及二级公开实例信息 | V1 app-scoped session + OPS-054 本地 Owner 会话；不将 manifest 声明权限当作当前服务授权，不管理平台凭据 |
 | `https://who-you.tomz.io/account/mailboxes` | Who You | 邮箱配置页：列出当前账号邮箱，承载第三方邮箱连接、重授权与解绑；具体操作必须由已实现的邮箱合同和真实部署能力支撑 | **已实现账号隔离的邮箱列表与状态页；OPS-041 接入 Gmail 连接 / 重授权 / 解绑源码链路。真实 Gmail 可用性仍取决于生产 provider bindings、KEK 与单账号 T4；Microsoft / IMAP-SMTP Web 入口未开放** |
 | Mira 的 MCP 连接设置 | Mira 各客户端 | Mobile 按 Mira ID 实例授权目录动态呈现插件，使用通用实例级受限凭据；必要时跳至狐邮管理邮箱 | V1 纵切验收由 OPS-053 负责，不将目录模型等同于上线验收 |
 
