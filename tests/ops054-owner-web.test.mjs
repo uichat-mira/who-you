@@ -436,6 +436,37 @@ test("Owner and Mira ID principals see one shell but never each other's mailboxe
 	});
 });
 
+test("Owner login page emits same-origin referrer policy and accepts Fetch Metadata fallback", async () => {
+	await withWorker(async ({ mf }) => {
+		const home = await mf.dispatchFetch(ORIGIN + "/");
+		assert.equal(home.status, 200);
+		assert.equal(home.headers.get("referrer-policy"), "same-origin");
+
+		const login = await mf.dispatchFetch(ORIGIN + "/auth/owner/login", {
+			method: "POST",
+			redirect: "manual",
+			headers: {
+				"sec-fetch-site": "same-origin",
+				"content-type": "application/x-www-form-urlencoded",
+			},
+			body: new URLSearchParams({ username: "admin", password: INITIAL_PASSWORD }).toString(),
+		});
+		assert.equal(login.status, 303, await login.text());
+		assert.equal(login.headers.get("location"), "/account/applications");
+
+		const crossSite = await mf.dispatchFetch(ORIGIN + "/auth/owner/login", {
+			method: "POST",
+			redirect: "manual",
+			headers: {
+				"sec-fetch-site": "cross-site",
+				"content-type": "application/x-www-form-urlencoded",
+			},
+			body: new URLSearchParams({ username: "admin", password: INITIAL_PASSWORD }).toString(),
+		});
+		assert.equal(crossSite.status, 403);
+	});
+});
+
 test("Owner Web POSTs accept a same-origin Referer fallback when Origin is omitted", async () => {
 	await withWorker(async ({ mf }) => {
 		const missingEvidence = await mf.dispatchFetch(ORIGIN + "/auth/owner/login", {
