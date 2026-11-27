@@ -156,7 +156,7 @@ async function loginMira(mf) {
 async function bootstrapOwner(mf) {
 	const login = await loginOwner(mf, INITIAL_PASSWORD);
 	assert.equal(login.status, 303, await login.text());
-	assert.equal(login.headers.get("location"), "/account/applications");
+	assert.equal(login.headers.get("location"), "/account");
 	const pending = cookieValue(login, "__Host-who_you_owner_session");
 	assert.ok(pending);
 	const changed = await changeOwnerPassword(mf, pending, INITIAL_PASSWORD, NEW_PASSWORD);
