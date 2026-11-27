@@ -14,10 +14,10 @@
 ### 1.1 本地 Owner 与 Mira ID 用户身份（OPS-054）
 
 - 每个狐邮部署实例最多拥有一个本地 Owner 账号：登录名固定为 `admin`，账号主体固定为 `local-owner:<应用 ID>`。它只属于该实例，不是 Mira ID 账号，也不与任何 Mira ID `subject` 建立 alias、合并或 impersonation；`local-owner:` 是 Owner 的保留账号前缀，Mira ID 用户主体保持自己的 subject。
-- 本地 Owner 的初始登录固定为 `admin / 123456`；部署可用 `WHOYOU_OWNER_INITIAL_PASSWORD` 覆盖默认初始密码。初始密码只用于首次 bootstrap，首次成功登录后必须立即修改为至少 12 位的新密码；完成前只能访问「应用管理」中的改密入口，账户与邮箱业务页面不可用。数据库只保存摘要，不保存默认值或覆盖值的明文。
+- 本地 Owner 的初始登录固定为 `admin / 123456`；部署可用 `WHOYOU_OWNER_INITIAL_PASSWORD` 覆盖默认初始密码。初始密码只用于首次 bootstrap，首次成功登录后必须立即修改为至少 12 位的新密码；完成前只允许进入「账户」页完成改密，邮箱与应用管理不可用。数据库只保存摘要，不保存默认值或覆盖值的明文。
 - 密码仅以加盐的 PBKDF2 摘要持久化。修改密码会提升该 Owner 的凭据版本，使此前签发的所有 Owner 会话立即失效。Owner 会话使用独立的 `__Host-who_you_owner_session` HttpOnly/Secure/SameSite cookie。
-- Owner 与 Mira ID 用户复用同一套狐邮账户页、邮箱页和现有业务服务，但各自只能访问自己 `account_id` 下的邮箱、凭据和同步状态。Owner 唯一额外的 UI 入口是「应用管理」；该页提供 Owner 密码修改、实例只读摘要和 AppSecret 生命周期管理。
-- APP_ID 在实例生命周期内稳定不变。AppSecret 只用于证明本实例的管理权，以便在 Mira ID 登记或再次验证 ownership；它不是 OAuth `client_secret`、MCP bearer、用户登录密码或 Owner 会话密钥。尚未轮换时，Owner 可再次输入当前 Owner 密码后查看部署初始 Secret；轮换后的新 Secret 只在成功响应中完整显示一次，D1 只保存加盐单向摘要、版本与轮换时间。遗失已轮换 Secret 只能再次轮换，不提供找回或明文保险箱。
+- Owner 与 Mira ID 用户复用同一套狐邮账户页、邮箱页和现有业务服务，但各自只能访问自己 `account_id` 下的邮箱、凭据和同步状态。实现层继续使用 Owner / `local-owner:` 作为身份模型；**面向人的界面统一称「管理员」**，不暴露内部 subject。管理员账户页只回显固定账号 `admin`、提供弹窗修改密码和退出登录；「应用管理」列表只展示当前狐邮实例，进入实例后再管理 APP ID / AppSecret。
+- APP_ID 在实例生命周期内稳定不变。AppSecret 只用于证明本实例的管理权，以便在 Mira ID 登记或再次验证 ownership；它不是 OAuth `client_secret`、MCP bearer、用户登录密码或 Owner 会话密钥。管理员已经通过有效会话认证后，查看 bootstrap AppSecret 或轮换 AppSecret **不再次要求输入管理员密码**；这些操作仍要求有效管理员会话和同源 POST。轮换前只在显式查看响应中显示部署 bootstrap Secret；轮换后的新 Secret 只在轮换成功响应中完整显示一次，D1 只保存加盐单向摘要、版本与轮换时间。轮换只做后果确认：「旧 AppSecret 将立即失效」。遗失已轮换 Secret 只能再次轮换，不提供找回或明文保险箱。
 - AppSecret 轮换与 Mira ID ownership、普通用户登录、邮箱连接及 MCP 服务授权解耦：轮换不会调用 Cloud Auth 删除/重建 ownership，也不会使既有用户会话或服务 grant 失效；它只影响未来再次提交的登记验证。`WHOYOU_APP_SECRET` 继续作为从未轮换实例的部署 bootstrap Secret 保留。
 - 现有 Mira ID 登录、登出、Gmail 连接/解绑/同步和 MCP 认证合同保持不变。本卡新增的本地 Owner 能力不代表已部署到生产，也不代表已经轮换任何真实凭据。
 
