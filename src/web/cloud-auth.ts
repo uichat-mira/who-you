@@ -1224,7 +1224,7 @@ async function handleWebRequestInternal(request: Request, env: WhoYouEnv): Promi
     "/", "/privacy", "/terms", "/auth/start", "/auth/callback", "/auth/logout",
     "/auth/owner/login", "/account",
     "/account/mailboxes", "/account/mailboxes/gmail/link", "/account/mailboxes/unlink",
-    "/account/mailboxes/sync", APPLICATIONS_PATH, APPLICATIONS_PASSWORD_PATH,
+    "/account/mailboxes/sync", APPLICATIONS_PATH, APPLICATION_INSTANCE_PATH, APPLICATIONS_PASSWORD_PATH,
     APPLICATIONS_SECRET_VIEW_PATH, APPLICATIONS_SECRET_ROTATE_PATH,
     "/api/whoami", "/api/mailboxes",
   ];
@@ -1285,7 +1285,7 @@ async function handleWebRequestInternal(request: Request, env: WhoYouEnv): Promi
       OWNER_SESSION_SECONDS);
     // One browser acts as one principal; local caches of the other identity go away.
     addCookie(h, SESSION_COOKIE, "", 0);
-    return redirect(login.credential.mustChangePassword ? APPLICATIONS_PATH : returnTo, h);
+    return redirect(login.credential.mustChangePassword ? "/account" : returnTo, h);
   }
 
   if (path === GMAIL_CALLBACK_PATH) {
@@ -1663,7 +1663,8 @@ async function handleWebRequestInternal(request: Request, env: WhoYouEnv): Promi
     ? principal : { kind: "mira", accountId: verified.accountId, session: principal.session };
   return page(renderAccountPage(accountView, instance, base, mailboxOutcome,
     ownerNotice(u.searchParams.get("notice"))), headers(), 200,
-    { shell: "app", active: "account", isOwner: principal.kind === "owner", sessionVerified: true });
+    { shell: "app", active: "account", isOwner: principal.kind === "owner", sessionVerified: true,
+      ownerPendingPasswordChange: principal.kind === "owner" && principal.mustChangePassword });
 }
 
 /** Preserve fail-closed behavior; only a document gets a branded unexpected-error response. */
