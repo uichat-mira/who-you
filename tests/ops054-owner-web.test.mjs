@@ -497,12 +497,16 @@ test("Owner login fails closed for missing initialization, bad input, cross-orig
 	});
 
 	await withWorker(async ({ mf, db }) => {
-		const missing = await loginOwner(mf, "some-long-password-without-initial");
-		assert.equal(missing.status, 401);
-		assert.equal(cookieValue(missing, "__Host-who_you_owner_session"), null);
-		const credentialCount = await db.prepare(
-			`SELECT COUNT(*) AS count FROM owner_credentials`,
+		const bootstrap = await loginOwner(mf, "123456");
+		assert.equal(bootstrap.status, 303, await bootstrap.text());
+		assert.equal(bootstrap.headers.get("location"), "/account/applications");
+		assert.ok(cookieValue(bootstrap, "__Host-who_you_owner_session"));
+		const credential = await db.prepare(
+			`SELECT login_name, must_change_password, password_hash FROM owner_credentials WHERE id = 'owner'`,
 		).first();
-		assert.equal(credentialCount.count, 0);
+		assert.equal(credential.login_name, "admin");
+		assert.equal(credential.must_change_password, 1);
+		assert.ok(credential.password_hash);
+		assert.ok(!credential.password_hash.includes("123456"));
 	}, { WHOYOU_OWNER_INITIAL_PASSWORD: "" });
 });
