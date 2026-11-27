@@ -19,6 +19,7 @@ export default defineConfig({
       WHOYOU_APP_SECRET: bindings.secret(),
       WHOYOU_MANIFEST_REVISION: bindings.text("1"),
       WHOYOU_WEB_SESSION_KEY: bindings.secret(),
+      WHOYOU_OWNER_INITIAL_PASSWORD: bindings.secret(),
 
       GMAIL_OAUTH_CLIENT_ID: bindings.text("1045297918167-a0c8jjpbji34lhnf6i1chnbo17rvv9ab.apps.googleusercontent.com"),
       GMAIL_OAUTH_CLIENT_SECRET: bindings.secret(),
