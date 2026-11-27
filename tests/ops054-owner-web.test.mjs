@@ -156,7 +156,7 @@ async function loginMira(mf) {
 async function bootstrapOwner(mf) {
 	const login = await loginOwner(mf, INITIAL_PASSWORD);
 	assert.equal(login.status, 303, await login.text());
-	assert.equal(login.headers.get("location"), "/account/applications");
+	assert.equal(login.headers.get("location"), "/account");
 	const pending = cookieValue(login, "__Host-who_you_owner_session");
 	assert.ok(pending);
 	const changed = await changeOwnerPassword(mf, pending, INITIAL_PASSWORD, NEW_PASSWORD);
@@ -189,7 +189,8 @@ test("Owner first login is password-change gated and rotates credentials and ses
 		const home = await mf.dispatchFetch(ORIGIN + "/");
 		assert.equal(home.status, 200);
 		const homeBody = await home.text();
-		assert.match(homeBody, /实例 Owner 登录/);
+		assert.match(homeBody, /管理员登录/);
+		assert.doesNotMatch(homeBody, /实例 Owner 登录|本地 Owner/);
 		assert.match(homeBody, /name="username" value="admin"/);
 		assert.ok(!homeBody.includes(INITIAL_PASSWORD));
 		assert.doesNotMatch(homeBody, /name="appSecret"|APP Secret/);
@@ -197,7 +198,7 @@ test("Owner first login is password-change gated and rotates credentials and ses
 		const initial = await loginOwner(mf, INITIAL_PASSWORD,
 			{ returnTo: "/account/mailboxes" });
 		assert.equal(initial.status, 303, await initial.text());
-		assert.equal(initial.headers.get("location"), "/account/applications");
+		assert.equal(initial.headers.get("location"), "/account");
 		const pending = cookieValue(initial, "__Host-who_you_owner_session");
 		assert.ok(pending);
 		assert.match(pending, /__Host-who_you_owner_session=/);
@@ -208,32 +209,32 @@ test("Owner first login is password-change gated and rotates credentials and ses
 		assert.match(ownerCookieHeader, /Secure/);
 		assert.match(ownerCookieHeader, /SameSite=Lax/);
 
-		for (const path of ["/account", "/account/mailboxes"]) {
+		const pendingAccount = await mf.dispatchFetch(ORIGIN + "/account",
+			{ redirect: "manual", headers: { cookie: pending } });
+		assert.equal(pendingAccount.status, 200);
+		const pendingAccountBody = await pendingAccount.text();
+		assert.match(pendingAccountBody, /首次登录请先修改密码/);
+		assert.match(pendingAccountBody, /管理员账号/);
+		assert.match(pendingAccountBody, />admin</);
+		assert.match(pendingAccountBody, /popovertarget="password-popover"/);
+		assert.match(pendingAccountBody, /action="\/account\/applications\/password"/);
+		assert.doesNotMatch(pendingAccountBody, /local-owner:|APP Secret|实例声明|授权能力/);
+		for (const path of ["/account/mailboxes", "/account/applications"]) {
 			const gated = await mf.dispatchFetch(ORIGIN + path,
 				{ redirect: "manual", headers: { cookie: pending } });
 			assert.equal(gated.status, 303);
-			assert.equal(gated.headers.get("location"), "/account/applications");
+			assert.equal(gated.headers.get("location"), "/account");
 		}
 		const api = await mf.dispatchFetch(ORIGIN + "/api/whoami", { headers: { cookie: pending } });
 		assert.equal(api.status, 403);
 		assert.deepEqual(await api.json(), { error: "password_change_required" });
 
-		const applications = await mf.dispatchFetch(ORIGIN + "/account/applications",
-			{ headers: { cookie: pending } });
-		assert.equal(applications.status, 200);
-		const applicationsBody = await applications.text();
-		assert.match(applicationsBody, /首次登录需要修改初始密码/);
-		assert.match(applicationsBody, /固定为 <code>admin<\/code>/);
-		assert.ok(applicationsBody.includes(OWNER_ACCOUNT));
-		assert.match(applicationsBody, /action="\/account\/applications\/password"/);
-		assert.match(applicationsBody, /APP Secret/);
-		assert.ok(!applicationsBody.includes(APP_SECRET));
-		assert.ok(!applicationsBody.includes(INITIAL_PASSWORD));
-		assert.doesNotMatch(applicationsBody, /name="appSecret"|rotateSecret|WHOYOU_APP_SECRET/);
-
 		const wrongCurrent = await changeOwnerPassword(mf, pending, "wrong-current-password", NEW_PASSWORD);
 		assert.equal(wrongCurrent.status, 400);
-		assert.ok(!await wrongCurrent.text().then((body) => body.includes(NEW_PASSWORD)));
+		const wrongCurrentBody = await wrongCurrent.text();
+		assert.match(wrongCurrentBody, /密码没有修改/);
+		assert.match(wrongCurrentBody, /管理员账号/);
+		assert.ok(!wrongCurrentBody.includes(NEW_PASSWORD));
 
 		const weak = await changeOwnerPassword(mf, pending, INITIAL_PASSWORD, "short");
 		assert.equal(weak.status, 400);
@@ -241,12 +242,12 @@ test("Owner first login is password-change gated and rotates credentials and ses
 		assert.equal(mismatch.status, 400);
 		const unchanged = await loginOwner(mf, INITIAL_PASSWORD);
 		assert.equal(unchanged.status, 303);
-		assert.equal(unchanged.headers.get("location"), "/account/applications");
+		assert.equal(unchanged.headers.get("location"), "/account");
 
 		const changed = await changeOwnerPassword(mf, pending, INITIAL_PASSWORD, NEW_PASSWORD);
 		assert.equal(changed.status, 303, await changed.text());
 		assert.equal(changed.headers.get("location"),
-			"/account/applications?notice=owner_password_changed");
+			"/account?notice=owner_password_changed");
 		const active = cookieValue(changed, "__Host-who_you_owner_session");
 		assert.ok(active);
 		assert.notEqual(active, pending);
@@ -259,16 +260,20 @@ test("Owner first login is password-change gated and rotates credentials and ses
 		const account = await mf.dispatchFetch(ORIGIN + "/account", { headers: { cookie: active } });
 		assert.equal(account.status, 200);
 		const accountBody = await account.text();
-		assert.match(accountBody, /本地 Owner/);
-		assert.match(accountBody, /本地 Owner 已登录/);
+		assert.match(accountBody, /管理员账号/);
+		assert.match(accountBody, /管理员已登录/);
+		assert.match(accountBody, /修改密码/);
+		assert.match(accountBody, /退出登录/);
 		assert.match(accountBody, /href="\/account\/applications"/);
-		assert.doesNotMatch(accountBody, /Mira ID 已连接/);
-		assert.ok(accountBody.includes(OWNER_ACCOUNT));
+		assert.doesNotMatch(accountBody, /Mira ID 已连接|本地 Owner|local-owner:|实例声明|授权能力/);
 
 		const applicationsAfter = await mf.dispatchFetch(ORIGIN + "/account/applications",
 			{ headers: { cookie: active } });
 		assert.equal(applicationsAfter.status, 200);
-		assert.doesNotMatch(await applicationsAfter.text(), /首次登录需要修改初始密码/);
+		const applicationsAfterBody = await applicationsAfter.text();
+		assert.match(applicationsAfterBody, /<h1>应用管理<\/h1>/);
+		assert.match(applicationsAfterBody, /href="\/account\/applications\/current"/);
+		assert.doesNotMatch(applicationsAfterBody, /APP ID|AppSecret|修改密码|local-owner:/);
 
 		const oldPassword = await loginOwner(mf, INITIAL_PASSWORD);
 		assert.equal(oldPassword.status, 401);
@@ -357,7 +362,7 @@ test("Owner and Mira ID principals see one shell but never each other's mailboxe
 		assert.match(ownerPageBody, /owner@tomlab\.cn/);
 		assert.doesNotMatch(ownerPageBody, /alpha@tomlab\.cn/);
 		assert.match(ownerPageBody, /应用管理/);
-		assert.match(ownerPageBody, /本地 Owner 已登录/);
+		assert.match(ownerPageBody, /管理员已登录/);
 
 		const ownerApplications = await mf.dispatchFetch(ORIGIN + "/account/applications",
 			{ headers: { cookie: active } });
@@ -383,7 +388,7 @@ test("Owner and Mira ID principals see one shell but never each other's mailboxe
 		const miraAccountBody = await miraAccount.text();
 		assert.match(miraAccountBody, /Mira ID 已连接/);
 		assert.match(miraAccountBody, /account-e2e/);
-		assert.doesNotMatch(miraAccountBody, /本地 Owner 已登录/);
+		assert.doesNotMatch(miraAccountBody, /管理员已登录/);
 		assert.doesNotMatch(miraAccountBody, /local-owner:/);
 		assert.doesNotMatch(miraAccountBody, /<a href="\/account\/applications"/);
 		assert.match(miraAccountBody, /<a href="\/account\/mailboxes"/);
@@ -452,7 +457,7 @@ test("Owner login page emits same-origin referrer policy and accepts Fetch Metad
 			body: new URLSearchParams({ username: "admin", password: INITIAL_PASSWORD }).toString(),
 		});
 		assert.equal(login.status, 303, await login.text());
-		assert.equal(login.headers.get("location"), "/account/applications");
+		assert.equal(login.headers.get("location"), "/account");
 
 		const crossSite = await mf.dispatchFetch(ORIGIN + "/auth/owner/login", {
 			method: "POST",
@@ -498,7 +503,7 @@ test("Owner Web POSTs accept a same-origin Referer fallback when Origin is omitt
 			body: new URLSearchParams({ username: "admin", password: INITIAL_PASSWORD }).toString(),
 		});
 		assert.equal(login.status, 303, await login.text());
-		assert.equal(login.headers.get("location"), "/account/applications");
+		assert.equal(login.headers.get("location"), "/account");
 		const pending = cookieValue(login, "__Host-who_you_owner_session");
 		assert.ok(pending);
 
@@ -518,7 +523,7 @@ test("Owner Web POSTs accept a same-origin Referer fallback when Origin is omitt
 		});
 		assert.equal(changed.status, 303, await changed.text());
 		assert.equal(changed.headers.get("location"),
-			"/account/applications?notice=owner_password_changed");
+			"/account?notice=owner_password_changed");
 	});
 });
 
@@ -585,7 +590,7 @@ test("Owner login rejects bad input, cross-origin requests and throttled attempt
 	await withWorker(async ({ mf, db }) => {
 		const bootstrap = await loginOwner(mf, "123456");
 		assert.equal(bootstrap.status, 303, await bootstrap.text());
-		assert.equal(bootstrap.headers.get("location"), "/account/applications");
+		assert.equal(bootstrap.headers.get("location"), "/account");
 		assert.ok(cookieValue(bootstrap, "__Host-who_you_owner_session"));
 		const credential = await db.prepare(
 			`SELECT login_name, must_change_password, password_hash FROM owner_credentials WHERE id = 'owner'`,
