@@ -172,6 +172,8 @@ export {
 export { resolveScheduledSyncProviders } from "../src/mail/scheduled-sync";
 export { projectOAuthSyncMetric, scheduledSyncBatchWindow } from "../src/mail/oauth-http";
 export {
+	OWNER_DEFAULT_INITIAL_PASSWORD,
+	OWNER_INITIAL_PASSWORD_MIN_LENGTH,
 	OWNER_LOGIN_NAME,
 	OWNER_PASSWORD_MAX_LENGTH,
 	OWNER_PASSWORD_MIN_LENGTH,
@@ -180,6 +182,7 @@ export {
 	digestOwnerPassword,
 	isOwnerSession,
 	ownerAccountId,
+	validateInitialOwnerPassword,
 	validateOwnerPassword,
 	verifyOwnerPassword,
 } from "../src/web/owner-auth";
