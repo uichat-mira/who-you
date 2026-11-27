@@ -11,6 +11,8 @@
  */
 
 export const OWNER_LOGIN_NAME = "admin";
+export const OWNER_DEFAULT_INITIAL_PASSWORD = "123456";
+export const OWNER_INITIAL_PASSWORD_MIN_LENGTH = 6;
 export const OWNER_PASSWORD_MIN_LENGTH = 12;
 export const OWNER_PASSWORD_MAX_LENGTH = 200;
 /** PBKDF2-HMAC-SHA-256 work factor kept inside the Worker CPU budget. */
@@ -121,7 +123,12 @@ export async function verifyOwnerPassword(
 	}
 }
 
-/** Password policy for both the initial deployment credential and later changes. */
+/** Bootstrap credentials may be short-lived; replacement passwords remain stronger. */
+export function validateInitialOwnerPassword(password: string): boolean {
+	return password.length >= OWNER_INITIAL_PASSWORD_MIN_LENGTH
+		&& password.length <= OWNER_PASSWORD_MAX_LENGTH;
+}
+
 export function validateOwnerPassword(password: string): boolean {
 	return password.length >= OWNER_PASSWORD_MIN_LENGTH
 		&& password.length <= OWNER_PASSWORD_MAX_LENGTH;
@@ -308,10 +315,10 @@ export type OwnerLoginOutcome =
 	| { ok: false; code: "invalid_credentials" | "temporarily_locked" };
 
 /**
- * Verifies an Owner login, lazily bootstrapping the single row from the
- * deployment-provided initial password on first use. A wrong password, a
- * missing/short initial credential and a throttled instance all fail closed
- * with the same non-sensitive error surface.
+ * Verifies an Owner login, lazily bootstrapping the single row on first use.
+ * A deployment may override the bootstrap password; otherwise the conventional
+ * one-time default admin / 123456 is used and must be changed before business
+ * pages are reachable. Wrong credentials and throttling share one error surface.
  */
 export async function authenticateOwner(input: {
 	repository: OwnerRepository;
@@ -336,8 +343,10 @@ export async function authenticateOwner(input: {
 
 	let credential = await input.repository.get();
 	if (!credential) {
-		const configured = input.initialPassword ?? "";
-		if (!validateOwnerPassword(configured)
+		const configured = input.initialPassword?.length
+			? input.initialPassword
+			: OWNER_DEFAULT_INITIAL_PASSWORD;
+		if (!validateInitialOwnerPassword(configured)
 			|| !await constantTimeEqualText(input.password, configured)) {
 			return invalid();
 		}
