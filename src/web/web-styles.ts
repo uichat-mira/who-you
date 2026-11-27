@@ -26,6 +26,7 @@ input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]),select,tex
 .settings{border-top:1px solid var(--border);margin-top:22px}.setting-row{display:flex;justify-content:space-between;align-items:flex-start;gap:18px;padding:18px 0;border-bottom:1px solid var(--border)}
 .setting-row strong{font-size:var(--text-base)}.setting-row p{margin:4px 0 0}.setting-actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:var(--space-5)}.setting-actions form{margin:0}
 code{overflow-wrap:anywhere;font-family:var(--font-mono);font-size:var(--text-sm);background:var(--surface-subtle);padding:2px 5px;border-radius:var(--radius-sm)}
+.secret-value{margin:var(--space-3) 0;padding:var(--space-3);overflow-wrap:anywhere;white-space:pre-wrap;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-md);font-family:var(--font-mono);font-size:var(--text-sm);user-select:all}
 .mailboxes,.providers{list-style:none;margin:0;padding:0}.mailbox,.providers li{border:1px solid var(--border);border-radius:var(--radius-md);padding:14px;margin:0 0 10px}
 .address{overflow-wrap:anywhere;margin:0 0 6px}.meta{margin:0 0 6px;color:var(--foreground-secondary)}.hint{color:var(--foreground-muted);font-size:var(--text-sm);margin:4px 0 0}
 .pill{display:inline-block;border:1px solid currentColor;border-radius:var(--radius-pill);padding:1px 9px;font-size:var(--text-xs);line-height:1.55;white-space:nowrap}.pill.ok{color:var(--success)}.pill.warn{color:var(--warning)}.pill.bad{color:var(--danger)}.pill.muted{color:var(--foreground-muted)}
@@ -108,5 +109,11 @@ code{overflow-wrap:anywhere;font-family:var(--font-mono);font-size:var(--text-sm
 .instance-fields{margin:var(--space-4) 0;display:grid;gap:var(--space-3)}
 .instance-fields div{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,2fr);gap:var(--space-3)}
 .instance-fields dt{color:var(--foreground-secondary)}.instance-fields dd{margin:0;overflow-wrap:anywhere;user-select:text}
+.owner-login{margin-top:var(--space-5);color:var(--foreground-secondary)}
+.owner-login summary{cursor:pointer;font-weight:var(--weight-semibold);color:var(--foreground)}
+.owner-login form{margin-top:var(--space-3)}
+.owner-login input{width:min(100%,320px)}
+.owner-password-form{margin:var(--space-5) 0;max-width:420px}
+.owner-password-form input{width:100%}
 @media(max-width:520px){.instance-fields div{grid-template-columns:1fr;gap:var(--space-1)}.setting-row{flex-wrap:wrap}}
 `;

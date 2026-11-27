@@ -3,6 +3,12 @@ import { webIcon } from "./icons";
 import { webStylesCss } from "./web-styles";
 import { createMailServices, resolveCredentialKeys, type WhoYouEnv } from "../mail/config";
 import { applicationManifest, resolveApplicationInstance, resolveInstanceResource } from "../application/instance";
+import {
+  ApplicationSecretRepository,
+  generateAppSecret,
+  type AppSecretState,
+  type AppSecretStatus,
+} from "../application/app-secret";
 import { listIdentities, unlinkMailbox } from "../mail/identity";
 import { startGmailLink } from "../mail/gmail-link";
 import { syncGmailMailbox } from "../mail/gmail-sync";
@@ -12,15 +18,48 @@ import { GMAIL_SYNC_MAX_MESSAGES_PER_RUN } from "../mail/gmail-sync";
 import { GMAIL_CALLBACK_PATH, resolveGmailOAuthConfig } from "../mail/gmail-link";
 import { GOOGLE_AUTHORIZATION_ENDPOINT } from "../mail/oauth-client";
 import { resolveMicrosoftOAuthConfig } from "../mail/microsoft-link";
+import {
+  authenticateOwner,
+  isOwnerSession,
+  ownerAccountId,
+  validateOwnerPassword,
+  verifyOwnerPassword,
+  OwnerRepository,
+  OWNER_LOGIN_NAME,
+  OWNER_PASSWORD_MAX_LENGTH,
+  OWNER_SESSION_SECONDS,
+  type OwnerCredential,
+  type OwnerSession,
+} from "./owner-auth";
 import { publicIntroduction, miraIntroduction, privacyPolicy, serviceTerms, publicFooter } from "./public-pages";
 
 const STATE_COOKIE = "__Host-who_you_oauth";
 const SESSION_COOKIE = "__Host-who_you_session";
+const OWNER_SESSION_COOKIE = "__Host-who_you_owner_session";
 const MAIL_OAUTH_COOKIE = "__Host-who_you_mail_oauth";
 const MAIL_OAUTH_RESULT_COOKIE = "__Host-who_you_mail_oauth_result";
-type ProtectedPage = "/account" | "/account/mailboxes";
+const SESSION_AAD = "who-you-application-session-v1";
+const OWNER_SESSION_AAD = "who-you-owner-session-v1";
+const APPLICATIONS_PATH = "/account/applications";
+const APPLICATIONS_PASSWORD_PATH = "/account/applications/password";
+const APPLICATIONS_SECRET_VIEW_PATH = "/account/applications/secret/view";
+const APPLICATIONS_SECRET_ROTATE_PATH = "/account/applications/secret/rotate";
+type ProtectedPage = "/account" | "/account/mailboxes" | typeof APPLICATIONS_PATH;
 type Flow = { state: string; verifier: string; appId: string; at: number; returnTo?: ProtectedPage };
 type Session = { accessToken: string; expiresAt: string; subject: string; audience: string; appId: string; issuer: "mira:cloud-auth" };
+type OwnerPrincipal = {
+  kind: "owner";
+  accountId: string;
+  session: OwnerSession;
+  credentialVersion: number;
+  mustChangePassword: boolean;
+};
+type MiraPrincipal = {
+  kind: "mira";
+  accountId: string;
+  session: Session;
+};
+type WebPrincipal = MiraPrincipal | OwnerPrincipal;
 type GmailCallbackNotice = "gmail_connected" | "gmail_relinked" | "gmail_denied" | "gmail_link_failed";
 type MailOAuthFlow = {
   provider: "gmail";
@@ -96,10 +135,14 @@ async function importSessionKey(raw: string | undefined): Promise<CryptoKey | nu
     return crypto.subtle.importKey("raw", bytes, "AES-GCM", false, ["encrypt", "decrypt"]);
   } catch { return null; }
 }
-async function seal(key: CryptoKey, data: Flow | Session | MailOAuthFlow | MailOAuthResult): Promise<string> {
+async function seal(
+  key: CryptoKey,
+  data: Flow | Session | OwnerSession | MailOAuthFlow | MailOAuthResult,
+  aad = SESSION_AAD,
+): Promise<string> {
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const encrypted = new Uint8Array(await crypto.subtle.encrypt(
-    { name: "AES-GCM", iv, additionalData: new TextEncoder().encode("who-you-application-session-v1") },
+    { name: "AES-GCM", iv, additionalData: new TextEncoder().encode(aad) },
     key, new TextEncoder().encode(JSON.stringify(data)),
   ));
   const bytes = new Uint8Array(iv.length + encrypted.length);
@@ -120,20 +163,20 @@ async function rememberMailOAuthResult(
   }), 60);
 }
 
-async function unseal(key: CryptoKey, raw: string | null): Promise<unknown> {
+async function unseal(key: CryptoKey, raw: string | null, aad = SESSION_AAD): Promise<unknown> {
   if (!raw || raw.length > 6000) return null;
   try {
     const bytes = decode(raw);
     if (bytes.length < 29) return null;
     const clear = await crypto.subtle.decrypt({
       name: "AES-GCM", iv: bytes.slice(0, 12),
-      additionalData: new TextEncoder().encode("who-you-application-session-v1"),
+      additionalData: new TextEncoder().encode(aad),
     }, key, bytes.slice(12));
     return JSON.parse(new TextDecoder().decode(clear)) as unknown;
   } catch { return null; }
 }
 function validReturnTo(v: unknown): v is ProtectedPage {
-  return v === "/account" || v === "/account/mailboxes";
+  return v === "/account" || v === "/account/mailboxes" || v === APPLICATIONS_PATH;
 }
 function returnToFrom(value: string | null): ProtectedPage {
   return validReturnTo(value) ? value : "/account";
@@ -177,10 +220,13 @@ function isMailOAuthResult(v: unknown): v is MailOAuthResult {
     && typeof x.expiresAt === "number" && Number.isFinite(x.expiresAt)
     && x.expiresAt > Date.now() && x.expiresAt <= Date.now() + 60_000;
 }
-async function sessionBinding(session: Session): Promise<string> {
+async function sessionBinding(principal: WebPrincipal): Promise<string> {
+  const secret = principal.kind === "mira"
+    ? principal.session.accessToken
+    : `owner\n${principal.session.appId}\n${principal.session.sessionId}`;
   const digest = await crypto.subtle.digest(
     "SHA-256",
-    new TextEncoder().encode(session.accessToken),
+    new TextEncoder().encode(secret),
   );
   return encode(new Uint8Array(digest));
 }
@@ -199,8 +245,12 @@ function escapeText(s: string): string {
 }
 type PageOptions = {
   shell?: "auth" | "app" | "home";
-  active?: "account" | "mailboxes";
+  active?: "account" | "mailboxes" | "applications";
   sessionVerified?: boolean;
+  /** Only the instance-local Owner gains the extra 应用管理 entry. */
+  isOwner?: boolean;
+  /** While true, only 应用管理 is reachable; business nav stays hidden. */
+  ownerPendingPasswordChange?: boolean;
 };
 
 function page(content: string, outgoing = headers(), status = 200,
@@ -218,10 +268,21 @@ function page(content: string, outgoing = headers(), status = 200,
   // Native same-origin POST forms need a non-null Origin. Keep OAuth redirects,
   // callback error pages and JSON responses on the default no-referrer policy.
   if (app) h.set("referrer-policy", "same-origin");
+  const navItems = options.ownerPendingPasswordChange
+    ? [{ href: APPLICATIONS_PATH, label: "应用管理", key: "applications" }]
+    : [
+      { href: "/account", label: "账户", key: "account" },
+      { href: "/account/mailboxes", label: "邮箱", key: "mailboxes" },
+      ...(options.isOwner ? [{ href: APPLICATIONS_PATH, label: "应用管理", key: "applications" }] : []),
+    ];
   const nav = app ? `<nav class="appnav" aria-label="狐邮配置">
-<a href="/account"${options.active === "account" ? ' aria-current="page"' : ""}>账户</a>
-<a href="/account/mailboxes"${options.active === "mailboxes" ? ' aria-current="page"' : ""}>邮箱</a>
+${navItems.map((item) => `<a href="${item.href}"${options.active === item.key ? ' aria-current="page"' : ""}>${item.label}</a>`).join("\n")}
 </nav>` : "";
+  const sessionMark = options.sessionVerified
+    ? (options.isOwner
+      ? '<span class="session-mark">本地 Owner 已登录</span>'
+      : '<span class="session-mark">Mira ID 已连接</span>')
+    : "";
   return new Response(`<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>狐邮 · Who-You</title>
 <link rel="icon" href="/brand/favicon/favicon.ico" sizes="any">
@@ -230,7 +291,7 @@ function page(content: string, outgoing = headers(), status = 200,
 <style>
 ${webStylesCss}
 </style></head><body class="page-${home ? "home" : app ? "app" : "auth"}"><main>
-<header class="brandbar"><a class="brand" href="/"><img src="/brand/logo/light/horizontal-bilingual.webp" alt="狐邮 Who-You" width="1536" height="472"></a>${app ? (options.sessionVerified ? '<span class="session-mark">Mira ID 已连接</span>' : '') : home ? '<nav class="site-nav" aria-label="网站导航"><a class="button secondary" href="#login">使用 Mira ID 继续</a></nav>' : ""}</header>
+<header class="brandbar"><a class="brand" href="/"><img src="/brand/logo/light/horizontal-bilingual.webp" alt="狐邮 Who-You" width="1536" height="472"></a>${app ? sessionMark : home ? '<nav class="site-nav" aria-label="网站导航"><a class="button secondary" href="#login">使用 Mira ID 继续</a></nav>' : ""}</header>
 ${nav}<div class="content${app ? "" : " auth"}">${content}</div>${publicFooter}</main></body></html>`, { status, headers: h });
 }
 
@@ -279,15 +340,28 @@ export function webNotFound(request: Request, env: WhoYouEnv): Response | null {
   return errorPage(404, "not_found");
 }
 
-function renderLoginPage(returnTo: ProtectedPage, blocked: boolean): string {
+function renderLoginPage(returnTo: ProtectedPage, blocked: boolean, ownerError = false): string {
   const href = "/auth/start?" + new URLSearchParams({ returnTo }).toString();
+  const ownerAction = "/auth/owner/login?" + new URLSearchParams({ returnTo }).toString();
   return `<section class="hero" aria-labelledby="hero-title">
 <div class="hero-copy">
 <h1 id="hero-title"><ruby class="brand-ruby">狐<rt lang="en">Who</rt>邮<rt lang="en">You</rt></ruby>，<br>不止于忽悠。</h1>
 <p class="lead">连接你的邮箱与智能体，让查找邮件、整理信息和日常通信变得更加自然。</p>
 ${blocked ? `<div class="notice auth-required" role="status"><strong>这个页面需要先登录</strong>
 <p>登录完成后会回到你刚才要访问的位置。</p></div>` : ""}
+${ownerError ? `<div class="notice error" role="alert"><strong>登录没有完成</strong>
+<p>登录名或密码不正确，或当前实例尚未初始化 Owner 登录。请重试。</p></div>` : ""}
 <div class="auth-actions" id="login"><a class="button" href="${escapeText(href)}">使用 Mira ID 继续 ${webIcon("arrow")}</a></div>
+<details class="owner-login">
+<summary>实例 Owner 登录</summary>
+<p class="hint">仅适用于当前部署实例的本地 Owner，与 Mira ID 账号相互独立。首次登录后必须先修改初始密码。</p>
+<form method="post" action="${escapeText(ownerAction)}">
+<input type="hidden" name="username" value="${OWNER_LOGIN_NAME}">
+<p><label for="owner-password">Owner 密码</label><br>
+<input id="owner-password" type="password" name="password" autocomplete="current-password" required maxlength="${OWNER_PASSWORD_MAX_LENGTH}"></p>
+<button class="button secondary" type="submit">使用本地 Owner 登录</button>
+</form>
+</details>
 <p class="footnote">连接 Mira ID 后，你可以管理自己的邮箱，并授权 Mira 客户端使用狐邮提供的邮件能力。登录不会自动授予邮箱访问权限。</p>
 </div>
 <div class="hero-poster" aria-hidden="true">
@@ -307,7 +381,7 @@ ${miraIntroduction}`;
 }
 
 function renderAccountPage(
-  id: { accountId: string },
+  principal: MiraPrincipal | OwnerPrincipal,
   instance: NonNullable<ReturnType<typeof resolveApplicationInstance>>,
   base: string,
   outcome: MailboxListOutcome,
@@ -319,19 +393,38 @@ function renderAccountPage(
   const mailboxStatus = outcome.ok
     ? outcome.mailboxes.length === 0 ? "尚未连接" : `已登记 ${outcome.mailboxes.length} 个邮箱`
     : "暂时无法获取邮箱状态";
-  return `<h1>账户</h1>
-<p class="lead">使用 Mira ID 进入狐邮。你的身份、应用授权与邮箱连接分别管理。</p>
-<div class="settings">
-<div class="setting-row"><div class="account-identity"><img class="account-avatar" src="/brand/mira-id/mira-id-app.svg" alt="" width="48" height="48"><div><strong>Mira ID</strong>
-<p class="hint">当前账号</p><p><code>${escapeText(id.accountId)}</code></p></div></div><span class="pill ok">已连接</span></div>
+  const owner = principal.kind === "owner";
+  const identityRow = owner
+    ? `<div class="setting-row"><div class="account-identity"><img class="account-avatar" src="/brand/logo/dark/symbol.webp" alt="" width="48" height="48"><div><strong>本地 Owner</strong>
+<p class="hint">当前账号 · 仅属于本部署实例</p><p><code>${escapeText(principal.accountId)}</code></p></div></div><span class="pill ok">已登录</span></div>
+<div class="setting-row"><div><strong>狐邮应用访问</strong>
+<p class="hint">本地 Owner 直接使用本部署实例，不需要 Mira ID 应用授权，也不会因此获得任何 Mira ID 账号的数据。</p></div><span class="pill muted">本地实例</span></div>
+<div class="setting-row"><div><strong>授权能力 · ${escapeText(service.name)}</strong>
+<p class="hint">MCP 服务能力由狐邮实例自行声明；本地 Owner 登录不是 Mira ID 服务授权。</p></div><span class="pill muted">实例声明</span></div>`
+    : `<div class="setting-row"><div class="account-identity"><img class="account-avatar" src="/brand/mira-id/mira-id-app.svg" alt="" width="48" height="48"><div><strong>Mira ID</strong>
+<p class="hint">当前账号</p><p><code>${escapeText(principal.accountId)}</code></p></div></div><span class="pill ok">已连接</span></div>
 <div class="setting-row"><div><strong>狐邮应用访问</strong>
 <p class="hint">你已授权狐邮使用你的 Mira ID 身份。此状态不代表邮件服务权限或邮箱授权。</p></div><span class="pill ok">已授权</span></div>
 <div class="setting-row"><div><strong>授权能力 · ${escapeText(service.name)}</strong>
-<p class="hint">在 Mira ID 查看和管理智能体的实际服务授权。</p></div><a href="${grantsUrl}">查看授权 ${webIcon("arrow")}</a></div>
+<p class="hint">在 Mira ID 查看和管理智能体的实际服务授权。</p></div><a href="${grantsUrl}">查看授权 ${webIcon("arrow")}</a></div>`;
+  const applicationsRow = owner
+    ? `<div class="setting-row"><div><strong>应用管理</strong>
+<p class="hint">修改本地 Owner 密码并查看本实例公开摘要；APP Secret 不在本页管理。</p></div><a href="${APPLICATIONS_PATH}">进入应用管理 ${webIcon("arrow")}</a></div>`
+    : "";
+  const footnote = owner
+    ? "退出狐邮不会解绑你的邮箱。本地 Owner 密码与邮箱服务商授权是不同凭据。"
+    : "退出狐邮不会解绑你的邮箱，也不会撤销 Mira ID 中的服务授权。";
+  return `<h1>账户</h1>
+<p class="lead">${owner
+    ? "当前使用本部署实例的本地 Owner 账号。账户、邮箱与业务能力与 Mira ID 用户共用同一套狐邮页面。"
+    : "使用 Mira ID 进入狐邮。你的身份、应用授权与邮箱连接分别管理。"}</p>
+<div class="settings">
+${identityRow}
+${applicationsRow}
 <div class="setting-row"><div><strong>邮箱</strong><p class="hint">${mailboxStatus}</p></div><a href="/account/mailboxes">管理邮箱 ${webIcon("arrow")}</a></div>
 </div>
 <div class="setting-actions"><form method="post" action="/auth/logout"><button class="button secondary" type="submit">退出狐邮</button></form></div>
-<p class="footnote">退出狐邮不会解绑你的邮箱，也不会撤销 Mira ID 中的服务授权。</p>
+<p class="footnote">${footnote}</p>
 <details class="instance-details">
 <summary>应用实例</summary>
 <div class="instance-content">
@@ -346,6 +439,126 @@ function renderAccountPage(
 <p class="hint">登记凭据由部署环境安全保管。应用登记与所有权管理在 Mira ID 的「我的应用」完成。</p>
 <a class="button secondary" href="${appsUrl}">在 Mira ID 中管理 ${webIcon("arrow")}</a>
 </div></details>`;
+}
+
+type ApplicationSecretPanel = {
+  state: AppSecretStatus | null;
+  error: "password" | "conflict" | "rotated" | "unavailable" | null;
+  revealed: { value: string; state: AppSecretStatus } | null;
+};
+
+function renderApplicationsPage(
+  instance: NonNullable<ReturnType<typeof resolveApplicationInstance>>,
+  credential: OwnerCredential,
+  notice: "owner_password_changed" | null,
+  passwordError: boolean,
+  secrets: ApplicationSecretPanel,
+): string {
+  const manifest = applicationManifest(instance);
+  const service = manifest.services[0]!;
+  const banner = passwordError
+    ? `<div class="notice error" role="alert"><strong>密码没有修改</strong>
+<p>当前密码不正确，或新密码不符合要求。新密码至少 12 个字符，且不能与当前密码相同。</p></div>`
+    : credential.mustChangePassword
+      ? `<div class="notice auth-required" role="status"><strong>首次登录需要修改初始密码</strong>
+<p>完成修改前，账户与邮箱业务页面不可用。这是本部署实例唯一的本地 Owner 账号。</p></div>`
+      : notice === "owner_password_changed"
+        ? `<div class="notice ok" role="status"><p>Owner 密码已更新。旧密码和此前签发的 Owner 会话已失效。</p></div>`
+        : "";
+  const secretError = secrets.error === "password"
+    ? `<div class="notice error" role="alert"><strong>操作没有完成</strong>
+<p>当前 Owner 密码不正确。请重新输入后重试。</p></div>`
+    : secrets.error === "conflict"
+      ? `<div class="notice error" role="alert"><strong>操作没有完成</strong>
+<p>AppSecret 状态已经变化，本次请求未生效。请刷新页面后重试。</p></div>`
+      : secrets.error === "rotated"
+        ? `<div class="notice" role="status"><strong>初始 AppSecret 已不可查看</strong>
+<p>本实例已经完成过轮换，部署初始 Secret 不再显示。如果当前轮换 Secret 已遗失，请直接再次轮换。</p></div>`
+        : secrets.error === "unavailable"
+          ? `<div class="notice error" role="alert"><strong>AppSecret 操作暂不可用</strong>
+<p>无法读取本实例的 AppSecret 状态，因此没有执行查看或轮换。请稍后重试。</p></div>`
+          : "";
+  const secretStatus = secrets.state === null
+    ? `<div class="setting-row"><div><strong>当前状态</strong>
+<p class="hint">暂时无法读取本实例的 AppSecret 状态，因此不提供查看或轮换操作。请稍后重试。</p></div><span class="pill bad">不可用</span></div>`
+    : secrets.state.kind === "bootstrap"
+      ? `<div class="setting-row"><div><strong>当前状态</strong>
+<p class="hint">当前有效的是部署环境提供的初始 Secret，本实例内尚未轮换。</p></div><span class="pill warn">部署初始 Secret</span></div>`
+      : `<div class="setting-row"><div><strong>当前状态</strong>
+<p class="hint">已由本实例 Owner 轮换。部署初始 Secret 和此前所有轮换 Secret 都已失效。</p>
+<p class="hint">当前版本 <code>${secrets.state.version}</code> · 轮换时间 <code>${escapeText(new Date(secrets.state.rotatedAt).toISOString())}</code></p></div><span class="pill ok">已轮换</span></div>`;
+  const revealed = secrets.revealed
+    ? `<div class="notice ok" role="status">
+<strong>${secrets.revealed.state.kind === "bootstrap" ? "部署初始 AppSecret" : "新的 AppSecret（仅显示一次）"}</strong>
+<p>${secrets.revealed.state.kind === "bootstrap"
+    ? "该 Secret 来自部署环境，仅用于本实例现在的 Mira ID 登记验证。首次轮换后它会立即失效，并且不再可查看。"
+    : "请立即复制并安全保存。离开本页后不会再次完整显示；遗失后只能由 Owner 再次轮换。"}</p>
+<pre class="secret-value" aria-label="当前 AppSecret">${escapeText(secrets.revealed.value)}</pre>
+<p class="hint">不要把 Secret 写入 URL、聊天记录、工单、日志或公开仓库。</p>
+</div>`
+    : "";
+  const secretActions = credential.mustChangePassword || secrets.state === null
+    ? ""
+    : `${secrets.state.kind === "bootstrap"
+      ? `<form class="owner-password-form" method="post" action="${APPLICATIONS_SECRET_VIEW_PATH}">
+<p><label for="owner-view-secret-password">当前 Owner 密码</label><br>
+<input id="owner-view-secret-password" type="password" name="currentPassword" autocomplete="current-password" required maxlength="${OWNER_PASSWORD_MAX_LENGTH}"></p>
+<button class="button secondary" type="submit">查看部署初始 AppSecret</button>
+</form>`
+      : `<p class="hint">部署初始 Secret 在首次轮换后不可再查看。如果当前轮换 Secret 已遗失，请直接再次轮换。</p>`}
+<form class="owner-password-form" method="post" action="${APPLICATIONS_SECRET_ROTATE_PATH}">
+<p><label for="owner-rotate-secret-password">当前 Owner 密码</label><br>
+<input id="owner-rotate-secret-password" type="password" name="currentPassword" autocomplete="current-password" required maxlength="${OWNER_PASSWORD_MAX_LENGTH}"></p>
+<button class="button" type="submit">轮换 AppSecret</button>
+</form>
+<p class="footnote">轮换只改变未来登记验证使用的凭据；不会撤销 Mira ID ownership、普通用户登录、邮箱连接、服务授权或 MCP 凭据。</p>`;
+  return `<h1>应用管理</h1>
+<p class="lead">仅本部署实例的本地 Owner 可见。这里管理 Owner 登录凭据、实例登记信息与 AppSecret 生命周期。</p>
+${banner}
+<section aria-labelledby="owner-password">
+<h2 id="owner-password">Owner 登录</h2>
+<div class="settings">
+<div class="setting-row"><div><strong>登录名</strong><p class="hint">固定为 <code>${OWNER_LOGIN_NAME}</code>，仅属于本部署实例。</p></div><span class="pill ok">本地账号</span></div>
+<div class="setting-row"><div><strong>账号 ID</strong><p><code>${escapeText(credential.accountId)}</code></p></div><span class="pill muted">独立于 Mira ID</span></div>
+<div class="setting-row"><div><strong>密码状态</strong><p class="hint">${credential.mustChangePassword
+    ? "仍在使用部署提供的初始密码；必须先修改。"
+    : "已使用本地设置的密码；修改后旧会话和旧密码会立即失效。"}</p></div><span class="pill ${credential.mustChangePassword ? "warn" : "ok"}">${credential.mustChangePassword ? "需要修改" : "已设置"}</span></div>
+</div>
+<form class="owner-password-form" method="post" action="${APPLICATIONS_PASSWORD_PATH}">
+<p><label for="owner-current-password">当前密码</label><br>
+<input id="owner-current-password" type="password" name="currentPassword" autocomplete="current-password" required maxlength="${OWNER_PASSWORD_MAX_LENGTH}"></p>
+<p><label for="owner-new-password">新密码</label><br>
+<input id="owner-new-password" type="password" name="newPassword" autocomplete="new-password" required minlength="12" maxlength="${OWNER_PASSWORD_MAX_LENGTH}"></p>
+<p><label for="owner-confirm-password">再次输入新密码</label><br>
+<input id="owner-confirm-password" type="password" name="confirmPassword" autocomplete="new-password" required minlength="12" maxlength="${OWNER_PASSWORD_MAX_LENGTH}"></p>
+<button class="button" type="submit">修改 Owner 密码</button>
+</form>
+<p class="footnote">密码只以加盐的不可逆摘要保存；页面、日志和响应都不会回显密码。</p>
+</section>
+<section aria-labelledby="instance-summary">
+<h2 id="instance-summary">实例摘要</h2>
+<dl class="instance-fields">
+<div><dt>应用 ID</dt><dd><code>${escapeText(manifest.appId)}</code></dd></div>
+<div><dt>应用地址</dt><dd><code>${escapeText(instance.origin)}</code></dd></div>
+<div><dt>MCP</dt><dd><code>${escapeText(service.protocol.endpoint)}</code></dd></div>
+<div><dt>实例声明权限（非当前用户授权）</dt><dd><code>${escapeText(service.scopes.join(", "))}</code></dd></div>
+</dl>
+</section>
+<section aria-labelledby="app-secret">
+<h2 id="app-secret">APP Secret</h2>
+<p class="hint">APP_ID 稳定不变。AppSecret 只用于在 Mira ID 登记本实例的管理权，不是 OAuth client_secret、MCP 凭据或用户密码。</p>
+${secretError}
+${revealed}
+<div class="settings">
+${secretStatus}
+</div>
+${secretActions}
+</section>
+<div class="setting-actions"><form method="post" action="/auth/logout"><button class="button secondary" type="submit">退出狐邮</button></form></div>`;
+}
+
+function ownerNotice(value: string | null): "owner_password_changed" | null {
+  return value === "owner_password_changed" ? value : null;
 }
 
 function baseUrl(env: WhoYouEnv): string | null {
@@ -376,9 +589,103 @@ async function validateSession(env: WhoYouEnv, session: Session): Promise<boolea
   } catch { return false; }
 }
 
-async function readIdentity(env: WhoYouEnv, session: Session): Promise<unknown | null> {
-  if (!await validateSession(env, session)) return null;
-  return { accountId: session.subject, consumerId: session.subject, scopes: [] };
+function ownerRepository(env: WhoYouEnv): OwnerRepository | null {
+  return env.DB ? new OwnerRepository(env.DB) : null;
+}
+
+function applicationSecretRepository(env: WhoYouEnv): ApplicationSecretRepository | null {
+  return env.DB ? new ApplicationSecretRepository(env.DB) : null;
+}
+
+/** A failed read is `null`, never a synthesized bootstrap state. */
+async function loadAppSecretState(env: WhoYouEnv): Promise<AppSecretState | null> {
+  const repository = applicationSecretRepository(env);
+  if (!repository) return null;
+  try { return await repository.current(); } catch { return null; }
+}
+
+async function loadOwnerCredential(env: WhoYouEnv): Promise<OwnerCredential | null> {
+  const repository = ownerRepository(env);
+  if (!repository) return null;
+  try { return await repository.get(); } catch { return null; }
+}
+
+/**
+ * Resolves exactly one authenticated browser principal. The two identity kinds
+ * never mix: a present Owner cookie makes Owner the only candidate, and a
+ * failed Owner resolution does not fall back to a co-existing Mira ID cookie.
+ * The Mira branch is re-verified at the issuer by `verifyPrincipal` before any
+ * protected business path; the Owner version is rechecked against D1.
+ */
+async function resolveWebPrincipal(
+  request: Request,
+  key: CryptoKey,
+  env: WhoYouEnv,
+  instance: NonNullable<ReturnType<typeof resolveApplicationInstance>>,
+): Promise<WebPrincipal | null> {
+  const rawOwner = getCookie(request, OWNER_SESSION_COOKIE);
+  if (rawOwner !== null && rawOwner !== "") {
+    const accountId = ownerAccountId(instance.appId);
+    const session = await unseal(key, rawOwner, OWNER_SESSION_AAD);
+    if (!isOwnerSession(session, { appId: instance.appId, accountId })) return null;
+    const credential = await loadOwnerCredential(env);
+    if (!credential || credential.accountId !== accountId
+        || credential.credentialVersion !== session.credentialVersion) return null;
+    return {
+      kind: "owner",
+      accountId,
+      session,
+      credentialVersion: credential.credentialVersion,
+      mustChangePassword: credential.mustChangePassword,
+    };
+  }
+  const session = await unseal(key, getCookie(request, SESSION_COOKIE));
+  if (!isSession(session) || session.appId !== instance.appId
+      || session.audience !== instance.clientId) return null;
+  return { kind: "mira", accountId: session.subject, session };
+}
+
+/** Rechecks the resolved principal at its authority after any awaited work. */
+async function verifyPrincipal(
+  env: WhoYouEnv,
+  principal: WebPrincipal,
+): Promise<{ accountId: string } | null> {
+  if (principal.kind === "mira") {
+    return await validateSession(env, principal.session)
+      ? { accountId: principal.session.subject } : null;
+  }
+  const credential = await loadOwnerCredential(env);
+  return credential && credential.accountId === principal.accountId
+    && credential.credentialVersion === principal.session.credentialVersion
+    ? { accountId: credential.accountId } : null;
+}
+
+function createOwnerSession(
+  instance: NonNullable<ReturnType<typeof resolveApplicationInstance>>,
+  credential: OwnerCredential,
+): OwnerSession {
+  return {
+    kind: "owner",
+    appId: instance.appId,
+    accountId: credential.accountId,
+    credentialVersion: credential.credentialVersion,
+    sessionId: random(),
+    expiresAt: new Date(Date.now() + OWNER_SESSION_SECONDS * 1000).toISOString(),
+  };
+}
+
+async function readForm(
+  request: Request,
+  allowed: string[],
+  maxBytes: number,
+): Promise<URLSearchParams | null> {
+  const contentType = request.headers.get("content-type") ?? "";
+  if (!contentType.toLowerCase().startsWith("application/x-www-form-urlencoded")) return null;
+  const raw = await request.text();
+  if (raw.length > maxBytes) return null;
+  const form = new URLSearchParams(raw);
+  if ([...form.keys()].some((name) => !allowed.includes(name))) return null;
+  return form;
 }
 
 /**
@@ -475,9 +782,10 @@ type MailboxListOutcome =
     reason?: string;
   };
 
-async function fetchMailboxList(env: WhoYouEnv, session: Session): Promise<MailboxListOutcome> {
-  if (!await validateSession(env, session)) return { ok: false, error: "authentication_link_unavailable" };
-  return listVerifiedAccountMailboxes(env, session.subject);
+async function fetchMailboxList(env: WhoYouEnv, principal: WebPrincipal): Promise<MailboxListOutcome> {
+  const verified = await verifyPrincipal(env, principal);
+  if (!verified) return { ok: false, error: "authentication_link_unavailable" };
+  return listVerifiedAccountMailboxes(env, verified.accountId);
 }
 
 // Caller has already verified the application session for this exact account.
@@ -506,12 +814,12 @@ async function listVerifiedAccountMailboxes(env: WhoYouEnv, accountId: string): 
 async function handleMailboxList(
   request: Request,
   env: WhoYouEnv,
-  session: Session,
+  principal: WebPrincipal,
   url: URL,
 ): Promise<Response> {
   if ([...url.searchParams.keys()].length > 0) return jsonError(400, "unexpected_parameter");
   if (request.headers.has("authorization")) return jsonError(400, "unexpected_authorization");
-  const outcome = await fetchMailboxList(env, session);
+  const outcome = await fetchMailboxList(env, principal);
   if (!outcome.ok) {
     return outcome.error === "mailboxes_unavailable"
       ? jsonError(503, "mailboxes_unavailable", headers(), { reason: outcome.reason ?? "" })
@@ -551,8 +859,9 @@ function parseGmailLinkStart(value: unknown): GmailLinkStart | null {
   return { authorizationUrl: x.authorizationUrl, state: x.state, expiresAt: x.expiresAt };
 }
 
-async function startWebGmailLink(env: WhoYouEnv, session: Session): Promise<GmailWebAction> {
-  if (!await validateSession(env, session)) return { ok: false, code: "authentication_link_unavailable" };
+async function startWebGmailLink(env: WhoYouEnv, principal: WebPrincipal): Promise<GmailWebAction> {
+  const verified = await verifyPrincipal(env, principal);
+  if (!verified) return { ok: false, code: "authentication_link_unavailable" };
   if (!gmailWebReady(env)) return { ok: false, code: "provider_not_configured" };
   const resolved = createMailServices(env);
   if (!resolved.ok) return { ok: false, code: resolved.reason };
@@ -561,7 +870,7 @@ async function startWebGmailLink(env: WhoYouEnv, session: Session): Promise<Gmai
   // Human-only same-origin POST; the existing provider state is single-use
   // and account-bound. It cannot be invoked via the MCP bearer surface.
   const started = await startGmailLink({ states: services.oauthStates, oauth: services.oauth,
-    redirectUri: services.gmailRedirectUri }, { accountId: session.subject, now: Date.now() });
+    redirectUri: services.gmailRedirectUri }, { accountId: verified.accountId, now: Date.now() });
   const start = parseGmailLinkStart({ provider: "gmail", ...started });
   return start ? { ok: true, start } : { ok: false, code: "invalid_link_response" };
 }
@@ -569,10 +878,10 @@ async function startWebGmailLink(env: WhoYouEnv, session: Session): Promise<Gmai
 type GmailUnlinkOutcome = { ok: true } | { ok: false; code: string };
 async function unlinkWebGmail(
   env: WhoYouEnv,
-  session: Session,
+  principal: WebPrincipal,
   mailboxId: string,
 ): Promise<GmailUnlinkOutcome> {
-  const listed = await fetchMailboxList(env, session);
+  const listed = await fetchMailboxList(env, principal);
   if (!listed.ok) return { ok: false, code: listed.error };
   const mailbox = listed.mailboxes.find((entry) => entry.mailboxId === mailboxId);
   if (!mailbox) return { ok: true };
@@ -583,12 +892,13 @@ async function unlinkWebGmail(
   const resolved = createMailServices(env);
   if (!resolved.ok) return { ok: false, code: resolved.reason };
   const services = resolved.services;
-  if (!await validateSession(env, session)) return { ok: false, code: "authentication_link_unavailable" };
+  const verified = await verifyPrincipal(env, principal);
+  if (!verified) return { ok: false, code: "authentication_link_unavailable" };
   // Ownership is resolved again under the existing unlink lease. Same-origin
   // human POST is separate from the agent's identity-confirmation credential.
   const result = await unlinkMailbox({ repository: services.repository, credentials: services.credentials,
     keys: services.credentialKeys, oauth: services.oauth, remoteTargets: services.remoteTargets,
-    syncStates: services.syncStates }, { accountId: session.subject, mailboxId: mailbox.mailboxId, now: Date.now() });
+    syncStates: services.syncStates }, { accountId: verified.accountId, mailboxId: mailbox.mailboxId, now: Date.now() });
   return result.ok ? { ok: true } : { ok: false, code: result.code };
 }
 
@@ -602,10 +912,10 @@ type WebGmailSync =
  */
 async function syncWebGmail(
   env: WhoYouEnv,
-  session: Session,
+  principal: WebPrincipal,
   mailboxId: string,
 ): Promise<WebGmailSync> {
-  const listed = await fetchMailboxList(env, session);
+  const listed = await fetchMailboxList(env, principal);
   if (!listed.ok) return { ok: false, code: listed.error };
   const mailbox = listed.mailboxes.find((entry) => entry.mailboxId === mailboxId);
   if (!mailbox) return { ok: false, code: "mailbox_not_found" };
@@ -619,10 +929,11 @@ async function syncWebGmail(
   const services = resolved.services;
   const { credentialKeys, oauth, gmail } = services;
   if (!credentialKeys || !oauth || !gmail) return { ok: false, code: "provider_not_configured" };
-  const owned = await services.repository.findMailboxById(session.subject, mailboxId);
+  const verified = await verifyPrincipal(env, principal);
+  if (!verified) return { ok: false, code: "authentication_link_unavailable" };
+  const owned = await services.repository.findMailboxById(verified.accountId, mailboxId);
   if (!owned || owned.kind !== "third_party" || owned.provider !== "gmail") return { ok: false, code: "mailbox_not_found" };
   if (owned.status !== "active") return { ok: false, code: "mailbox_disabled" };
-  if (!await validateSession(env, session)) return { ok: false, code: "authentication_link_unavailable" };
   const outcome = await syncGmailMailbox({ repository: services.repository, limits: services.limits,
     credentials: services.credentials, keys: credentialKeys, oauth, gmail,
     syncStates: services.syncStates, now: Date.now() }, owned);
@@ -855,6 +1166,7 @@ function renderMailboxesPage(
   env: WhoYouEnv,
   notice: MailboxNotice | null,
   counts: SyncCounts | null,
+  loginHref: string,
 ): string {
   const noticeContent = notice ? MAILBOX_NOTICE_MESSAGES[notice] : null;
   const syncDetail = notice === "gmail_sync_completed" && counts
@@ -872,7 +1184,7 @@ function renderMailboxesPage(
 <strong class="notice-heading">${webIcon("control")} 暂时无法获取邮箱</strong>
 <p>${escapeText(mailboxFailureMessage(outcome.error))}</p>
 <div class="inline-actions"><a href="/account/mailboxes">重试</a>
-<a href="/auth/start?returnTo=%2Faccount%2Fmailboxes">重新登录</a></div></div>`;
+<a href="${escapeText(loginHref)}">重新登录</a></div></div>`;
   const gmailReady = gmailWebReady(env);
   return `<h1>邮箱</h1>
 <p class="lead">查看当前账号在狐邮登记的邮箱与连接状态。</p>
@@ -901,9 +1213,12 @@ ${gmailReady ? '<form method="post" action="/account/mailboxes/gmail/link"><butt
 async function handleWebRequestInternal(request: Request, env: WhoYouEnv): Promise<Response | null> {
   const u = new URL(request.url), path = u.pathname;
   const webPaths = [
-    "/", "/privacy", "/terms", "/auth/start", "/auth/callback", "/auth/logout", "/account",
+    "/", "/privacy", "/terms", "/auth/start", "/auth/callback", "/auth/logout",
+    "/auth/owner/login", "/account",
     "/account/mailboxes", "/account/mailboxes/gmail/link", "/account/mailboxes/unlink",
-    "/account/mailboxes/sync", "/api/whoami", "/api/mailboxes",
+    "/account/mailboxes/sync", APPLICATIONS_PATH, APPLICATIONS_PASSWORD_PATH,
+    APPLICATIONS_SECRET_VIEW_PATH, APPLICATIONS_SECRET_ROTATE_PATH,
+    "/api/whoami", "/api/mailboxes",
   ];
   if (!webPaths.includes(path) && path !== GMAIL_CALLBACK_PATH) return null;
   const browser = !path.startsWith("/api/") && acceptsHtml(request);
@@ -927,6 +1242,44 @@ async function handleWebRequestInternal(request: Request, env: WhoYouEnv): Promi
   const key = await importSessionKey(env.WHOYOU_WEB_SESSION_KEY), base = baseUrl(env);
   if (!key || !base) return respondError(503, "web_login_not_configured");
 
+  if (path === "/auth/owner/login") {
+    if (request.method !== "POST") return respondError(405, "method_not_allowed");
+    if (request.headers.get("origin") !== ORIGIN) return respondError(403, "origin_not_allowed");
+    if (request.headers.has("authorization")) return respondError(400, "unexpected_authorization");
+    if ([...u.searchParams.keys()].some((name) => name !== "returnTo")) {
+      return respondError(400, "unexpected_parameter");
+    }
+    const form = await readForm(request, ["username", "password"], 4096);
+    if (!form) return respondError(400, "invalid_request");
+    const repository = ownerRepository(env);
+    if (!repository) return respondError(503, "owner_login_not_configured");
+    let login: Awaited<ReturnType<typeof authenticateOwner>>;
+    try {
+      login = await authenticateOwner({
+        repository,
+        accountId: ownerAccountId(instance.appId),
+        initialPassword: env.WHOYOU_OWNER_INITIAL_PASSWORD,
+        loginName: form.get("username") ?? "",
+        password: form.get("password") ?? "",
+        now: Date.now(),
+      });
+    } catch {
+      return respondError(503, "owner_login_not_configured");
+    }
+    const returnTo = returnToFrom(u.searchParams.get("returnTo"));
+    if (!login.ok) {
+      return page(renderLoginPage(returnTo, false, true), headers(),
+        login.code === "temporarily_locked" ? 429 : 401, { shell: "home" });
+    }
+    const h = headers();
+    addCookie(h, OWNER_SESSION_COOKIE,
+      await seal(key, createOwnerSession(instance, login.credential), OWNER_SESSION_AAD),
+      OWNER_SESSION_SECONDS);
+    // One browser acts as one principal; local caches of the other identity go away.
+    addCookie(h, SESSION_COOKIE, "", 0);
+    return redirect(login.credential.mustChangePassword ? APPLICATIONS_PATH : returnTo, h);
+  }
+
   if (path === GMAIL_CALLBACK_PATH) {
     if (request.method !== "GET") return respondError(405, "method_not_allowed");
     const state = u.searchParams.get("state");
@@ -944,7 +1297,6 @@ async function handleWebRequestInternal(request: Request, env: WhoYouEnv): Promi
       u.searchParams.has("error") ? "provider_reauth_required" : "invalid_state");
 
     const flow = await unseal(key, rawFlowCookie);
-    const currentSession = await unseal(key, getCookie(request, SESSION_COOKIE));
     if (!isMailOAuthFlow(flow)) {
       // Never treat an unreadable sealed flow as valid provider authorization.
       return redirect("/account/mailboxes?notice=gmail_link_failed", h);
@@ -954,8 +1306,11 @@ async function handleWebRequestInternal(request: Request, env: WhoYouEnv): Promi
       // reached this browser.
       return redirect("/account/mailboxes?notice=gmail_link_failed", h);
     }
-    if (!isSession(currentSession) || !await validateSession(env, currentSession)
-        || flow.sessionBinding !== await sessionBinding(currentSession)) {
+    const current = await resolveWebPrincipal(request, key, env, instance);
+    const currentVerified = current && !(current.kind === "owner" && current.mustChangePassword)
+      ? await verifyPrincipal(env, current) : null;
+    if (!current || !currentVerified
+        || flow.sessionBinding !== await sessionBinding(current)) {
       if (await discardWebGmailState(env, flow.state)) {
         addCookie(h, MAIL_OAUTH_COOKIE, "", 0);
         await rememberMailOAuthResult(h, key, flow.state, "gmail_link_failed");
@@ -997,8 +1352,11 @@ async function handleWebRequestInternal(request: Request, env: WhoYouEnv): Promi
 
   if (path === "/") {
     if (request.method !== "GET") return respondError(405, "method_not_allowed");
-    const session = await unseal(key, getCookie(request, SESSION_COOKIE));
-    if (isSession(session) && await validateSession(env, session)) return redirect("/account");
+    const current = await resolveWebPrincipal(request, key, env, instance);
+    if (current && await verifyPrincipal(env, current)) {
+      return redirect(current.kind === "owner" && current.mustChangePassword
+        ? APPLICATIONS_PATH : "/account");
+    }
     const returnTo = returnToFrom(u.searchParams.get("returnTo"));
     const blocked = u.searchParams.get("reason") === "sign_in_required";
     return page(renderLoginPage(returnTo, blocked), headers(), 200, { shell: "home" });
@@ -1048,7 +1406,9 @@ async function handleWebRequestInternal(request: Request, env: WhoYouEnv): Promi
           !await validateSession(env, issued)) return respondError(502, "cloud_auth_invalid_session", h);
       const age = Math.min(3600, Math.floor((Date.parse(issued.expiresAt) - Date.now()) / 1000));
       addCookie(h, SESSION_COOKIE, await seal(key, issued), age);
-      return redirect(flow.returnTo ?? "/account", h);
+      // One browser acts as one principal; local caches of the other identity go away.
+      addCookie(h, OWNER_SESSION_COOKIE, "", 0);
+      return redirect(flow.returnTo === APPLICATIONS_PATH ? "/account" : flow.returnTo ?? "/account", h);
     } catch { return respondError(502, "cloud_auth_unavailable", h); }
   }
 
@@ -1056,7 +1416,9 @@ async function handleWebRequestInternal(request: Request, env: WhoYouEnv): Promi
     if (request.method !== "POST") return respondError(405, "method_not_allowed");
     if (request.headers.get("origin") !== ORIGIN) return respondError(403, "origin_not_allowed");
     const raw = await unseal(key, getCookie(request, SESSION_COOKIE));
-    const h = headers(); addCookie(h, SESSION_COOKIE, "", 0);
+    const h = headers();
+    addCookie(h, SESSION_COOKIE, "", 0);
+    addCookie(h, OWNER_SESSION_COOKIE, "", 0);
     if (isSession(raw) && raw.appId === instance.appId && raw.audience === instance.clientId) {
       try {
         const r = await fetch(new URL("/v1/oauth/application-session/logout", base), {
@@ -1068,24 +1430,38 @@ async function handleWebRequestInternal(request: Request, env: WhoYouEnv): Promi
     return redirect("/", h);
   }
 
+  const applicationsMutation = path === APPLICATIONS_PASSWORD_PATH
+    || path === APPLICATIONS_SECRET_VIEW_PATH
+    || path === APPLICATIONS_SECRET_ROTATE_PATH;
   const mutation = path === "/account/mailboxes/gmail/link"
     || path === "/account/mailboxes/unlink"
-    || path === "/account/mailboxes/sync";
+    || path === "/account/mailboxes/sync"
+    || applicationsMutation;
   if (mutation) {
     if (request.method !== "POST") return respondError(405, "method_not_allowed");
     if (request.headers.get("origin") !== ORIGIN) return respondError(403, "origin_not_allowed");
     if (request.headers.has("authorization")) return respondError(400, "unexpected_authorization");
     if ([...u.searchParams.keys()].length > 0) return respondError(400, "unexpected_parameter");
   } else if (request.method !== "GET") return respondError(405, "method_not_allowed");
-  const session = await unseal(key, getCookie(request, SESSION_COOKIE));
-  if (!isSession(session)) {
-    if (mutation) return redirect(guardLocation("/account/mailboxes"));
+  const principal = await resolveWebPrincipal(request, key, env, instance);
+  if (!principal) {
+    if (mutation) {
+      return redirect(guardLocation(applicationsMutation
+        ? APPLICATIONS_PATH : "/account/mailboxes"));
+    }
     if (validReturnTo(path)) return redirect(guardLocation(path));
     return respondError(401, "sign_in_required");
   }
+  // A first-login Owner may only reach the application-management password
+  // form until the initial password has been replaced.
+  if (principal.kind === "owner" && principal.mustChangePassword
+      && path !== APPLICATIONS_PATH && path !== APPLICATIONS_PASSWORD_PATH) {
+    if (path.startsWith("/api/")) return respondError(403, "password_change_required");
+    return redirect(APPLICATIONS_PATH);
+  }
 
   if (path === "/account/mailboxes/gmail/link") {
-    const started = await startWebGmailLink(env, session);
+    const started = await startWebGmailLink(env, principal);
     if (!started.ok) {
       const notice = started.code === "provider_not_configured"
         || started.code === "credential_vault_unavailable"
@@ -1097,7 +1473,7 @@ async function handleWebRequestInternal(request: Request, env: WhoYouEnv): Promi
       provider: "gmail",
       state: started.start.state,
       expiresAt: started.start.expiresAt,
-      sessionBinding: await sessionBinding(session),
+      sessionBinding: await sessionBinding(principal),
     }), 600);
     return redirect(started.start.authorizationUrl, h);
   }
@@ -1117,7 +1493,7 @@ async function handleWebRequestInternal(request: Request, env: WhoYouEnv): Promi
     if (!/^[A-Za-z0-9._:-]{1,80}$/.test(mailboxId)) {
       return respondError(400, "invalid_mailbox_id");
     }
-    const unlinked = await unlinkWebGmail(env, session, mailboxId);
+    const unlinked = await unlinkWebGmail(env, principal, mailboxId);
     return redirect(`/account/mailboxes?notice=${unlinked.ok ? "gmail_unlinked" : unlinked.code === "sync_in_progress" ? "gmail_unlink_busy" : "gmail_unlink_failed"}`);
   }
 
@@ -1136,41 +1512,165 @@ async function handleWebRequestInternal(request: Request, env: WhoYouEnv): Promi
     if (!/^[A-Za-z0-9._:-]{1,80}$/.test(mailboxId)) {
       return respondError(400, "invalid_mailbox_id");
     }
-    const synced = await syncWebGmail(env, session, mailboxId);
+    const synced = await syncWebGmail(env, principal, mailboxId);
     return redirect(syncRedirectLocation(synced));
   }
 
   if (path === "/account/mailboxes") {
-    const outcome = await fetchMailboxList(env, session);
+    const outcome = await fetchMailboxList(env, principal);
     const notice = mailboxNotice(u.searchParams.get("notice"));
     const counts = notice === "gmail_sync_completed" ? syncCountsFromQuery(u) : null;
-    return page(renderMailboxesPage(outcome, env, notice, counts), headers(),
+    const loginHref = principal.kind === "owner"
+      ? "/" : "/auth/start?returnTo=%2Faccount%2Fmailboxes";
+    return page(renderMailboxesPage(outcome, env, notice, counts, loginHref), headers(),
       outcome.ok ? 200 : outcome.error === "mailboxes_unavailable" ? 503 : 502,
-      { shell: "app", active: "mailboxes", sessionVerified: outcome.ok || outcome.error !== "authentication_link_unavailable" });
+      { shell: "app", active: "mailboxes", isOwner: principal.kind === "owner",
+        sessionVerified: outcome.ok || outcome.error !== "authentication_link_unavailable" });
   }
-  if (path === "/api/mailboxes") return handleMailboxList(request, env, session, u);
+  if (path === "/api/mailboxes") return handleMailboxList(request, env, principal, u);
+
+  if (path === APPLICATIONS_PATH) {
+    if (principal.kind !== "owner") return respondError(404, "not_found");
+    const credential = await loadOwnerCredential(env);
+    if (!credential || credential.credentialVersion !== principal.credentialVersion) {
+      return respondError(401, "sign_in_required");
+    }
+    return page(renderApplicationsPage(instance, credential,
+      ownerNotice(u.searchParams.get("notice")), false, {
+        state: await loadAppSecretState(env), error: null, revealed: null,
+      }), headers(), 200,
+      { shell: "app", active: "applications", isOwner: true, sessionVerified: true,
+        ownerPendingPasswordChange: credential.mustChangePassword });
+  }
+
+  if (path === APPLICATIONS_SECRET_VIEW_PATH) {
+    if (principal.kind !== "owner") return respondError(404, "not_found");
+    const form = await readForm(request, ["currentPassword"], 4096);
+    if (!form) return respondError(400, "invalid_request");
+    const credential = await loadOwnerCredential(env);
+    if (!credential || credential.credentialVersion !== principal.credentialVersion) {
+      return respondError(401, "sign_in_required");
+    }
+    const state = await loadAppSecretState(env);
+    const render = (error: ApplicationSecretPanel["error"], revealed:
+      ApplicationSecretPanel["revealed"], status: number): Response =>
+      page(renderApplicationsPage(instance, credential, null, false, {
+        state, error, revealed,
+      }), headers(), status,
+      { shell: "app", active: "applications", isOwner: true, sessionVerified: true });
+    if (!await verifyOwnerPassword(form.get("currentPassword") ?? "", credential)) {
+      return render("password", null, 403);
+    }
+    if (state === null) return render("unavailable", null, 503);
+    if (state.kind === "rotated") return render("rotated", null, 409);
+    if (!env.WHOYOU_APP_SECRET) return respondError(503, "application_not_configured");
+    return render(null, { value: env.WHOYOU_APP_SECRET, state }, 200);
+  }
+
+  if (path === APPLICATIONS_SECRET_ROTATE_PATH) {
+    if (principal.kind !== "owner") return respondError(404, "not_found");
+    const form = await readForm(request, ["currentPassword"], 4096);
+    if (!form) return respondError(400, "invalid_request");
+    const credential = await loadOwnerCredential(env);
+    if (!credential || credential.credentialVersion !== principal.credentialVersion) {
+      return respondError(401, "sign_in_required");
+    }
+    const state = await loadAppSecretState(env);
+    const render = (error: ApplicationSecretPanel["error"], status: number): Response =>
+      page(renderApplicationsPage(instance, credential, null, false, {
+        state, error, revealed: null,
+      }), headers(), status,
+      { shell: "app", active: "applications", isOwner: true, sessionVerified: true });
+    if (!await verifyOwnerPassword(form.get("currentPassword") ?? "", credential)) {
+      return render("password", 403);
+    }
+    if (state === null) return render("unavailable", 503);
+    const repository = applicationSecretRepository(env);
+    if (!repository) return render("unavailable", 503);
+    const secret = generateAppSecret(), now = Date.now();
+    let nextVersion: number | null;
+    try {
+      nextVersion = await repository.rotate({
+        expectedVersion: state.kind === "rotated" ? state.version : 0,
+        secret,
+        now,
+      });
+    } catch {
+      return render("unavailable", 503);
+    }
+    if (nextVersion === null) return render("conflict", 409);
+    const rotated: AppSecretStatus = { kind: "rotated", version: nextVersion, rotatedAt: now };
+    return page(renderApplicationsPage(instance, credential, null, false, {
+      state: rotated, error: null, revealed: { value: secret, state: rotated },
+    }), headers(), 200,
+    { shell: "app", active: "applications", isOwner: true, sessionVerified: true });
+  }
+
+  if (path === APPLICATIONS_PASSWORD_PATH) {
+    if (principal.kind !== "owner") return respondError(404, "not_found");
+    const form = await readForm(request,
+      ["currentPassword", "newPassword", "confirmPassword"], 8192);
+    if (!form) return respondError(400, "invalid_request");
+    const credential = await loadOwnerCredential(env);
+    if (!credential || credential.credentialVersion !== principal.credentialVersion) {
+      return respondError(401, "sign_in_required");
+    }
+    const currentPassword = form.get("currentPassword") ?? "";
+    const newPassword = form.get("newPassword") ?? "";
+    const confirmPassword = form.get("confirmPassword") ?? "";
+    const currentValid = await verifyOwnerPassword(currentPassword, credential);
+    if (!currentValid || !validateOwnerPassword(newPassword)
+        || newPassword !== confirmPassword || newPassword === currentPassword) {
+      return page(renderApplicationsPage(instance, credential, null, true, {
+        state: await loadAppSecretState(env), error: null, revealed: null,
+      }), headers(), 400,
+        { shell: "app", active: "applications", isOwner: true, sessionVerified: true,
+          ownerPendingPasswordChange: credential.mustChangePassword });
+    }
+    const repository = ownerRepository(env);
+    if (!repository) return respondError(503, "owner_auth_unavailable");
+    const nextVersion = await repository.updatePassword({
+      expectedVersion: credential.credentialVersion,
+      password: newPassword,
+      now: Date.now(),
+    });
+    if (nextVersion === null) return respondError(409, "password_change_conflict");
+    const h = headers();
+    addCookie(h, OWNER_SESSION_COOKIE,
+      await seal(key, createOwnerSession(instance, {
+        ...credential,
+        credentialVersion: nextVersion,
+        mustChangePassword: false,
+      }), OWNER_SESSION_AAD),
+      OWNER_SESSION_SECONDS);
+    return redirect(`${APPLICATIONS_PATH}?notice=owner_password_changed`, h);
+  }
 
   // An existing session may predate managed enrollment or its grant may
   // have been explicitly revoked. Never regrant on page load; offer the
   // same active OAuth login flow that the user already uses.
-  let identity: unknown;
-  try { identity = await readIdentity(env, session); }
-  catch { identity = null; }
-  if (!identity) {
+  let verified: { accountId: string } | null;
+  try { verified = await verifyPrincipal(env, principal); }
+  catch { verified = null; }
+  if (!verified) {
     if (path === "/api/whoami") return respondError(502, "authentication_link_unavailable");
     return errorPage(502, "authentication_link_unavailable");
   }
   if (path === "/api/whoami") {
     const h = headers(); h.set("content-type", "application/json; charset=utf-8");
+    const identity = principal.kind === "owner"
+      ? { accountId: verified.accountId, principal: "local_owner" }
+      : { accountId: verified.accountId, consumerId: verified.accountId, scopes: [] };
     return new Response(JSON.stringify(identity), { headers: h });
   }
-  const id = identity as { accountId: string; consumerId: string; scopes: string[] };
   // An unavailable mailbox list is not an empty list or a failed identity.
   let mailboxOutcome: MailboxListOutcome;
-  try { mailboxOutcome = await listVerifiedAccountMailboxes(env, id.accountId); }
+  try { mailboxOutcome = await listVerifiedAccountMailboxes(env, verified.accountId); }
   catch { mailboxOutcome = { ok: false, error: "mailboxes_unavailable" }; }
-  return page(renderAccountPage(id, instance, base, mailboxOutcome), headers(), 200,
-    { shell: "app", active: "account", sessionVerified: true });
+  const accountView: MiraPrincipal | OwnerPrincipal = principal.kind === "owner"
+    ? principal : { kind: "mira", accountId: verified.accountId, session: principal.session };
+  return page(renderAccountPage(accountView, instance, base, mailboxOutcome), headers(), 200,
+    { shell: "app", active: "account", isOwner: principal.kind === "owner", sessionVerified: true });
 }
 
 /** Preserve fail-closed behavior; only a document gets a branded unexpected-error response. */

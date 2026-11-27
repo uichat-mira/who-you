@@ -12,6 +12,13 @@ not a production target. Existing Worker secrets are inherited, never exported
 or re-uploaded. No resource provisioning, D1 migration, or credential rotation
 is part of this workflow; those need separate authorization and evidence.
 
+A production release containing OPS-055 AppSecret rotation support requires
+`migrations/0014_application_app_secret.sql` to have been applied to the live
+D1 before the Worker is published. The deployment workflow does not apply or
+repair this migration. If the table is absent or unreadable,
+`/mira/verify-registration` intentionally fails closed instead of falling back
+to the deployment bootstrap AppSecret.
+
 Before publication the workflow records the active version as a rollback point,
 checks storage, required secrets and Cron configuration, and builds the locked
 source. After publication it verifies binding/schedule parity, the active
