@@ -110,6 +110,14 @@ const headers = () => new Headers({
   "cache-control": "no-store", "pragma": "no-cache", "referrer-policy": "no-referrer",
   "x-content-type-options": "nosniff", "x-frame-options": "DENY",
 });
+function sameOriginPost(request: Request, expectedOrigin: string): boolean {
+  const origin = request.headers.get("origin");
+  if (origin !== null) return origin === expectedOrigin;
+  const referer = request.headers.get("referer");
+  if (!referer) return false;
+  try { return new URL(referer).origin === expectedOrigin; }
+  catch { return false; }
+}
 function getCookie(req: Request, name: string): string | null {
   const items = (req.headers.get("cookie") ?? "").split(";")
     .map((x) => x.trim()).filter((x) => x.startsWith(name + "="));
@@ -1244,7 +1252,7 @@ async function handleWebRequestInternal(request: Request, env: WhoYouEnv): Promi
 
   if (path === "/auth/owner/login") {
     if (request.method !== "POST") return respondError(405, "method_not_allowed");
-    if (request.headers.get("origin") !== ORIGIN) return respondError(403, "origin_not_allowed");
+    if (!sameOriginPost(request, ORIGIN)) return respondError(403, "origin_not_allowed");
     if (request.headers.has("authorization")) return respondError(400, "unexpected_authorization");
     if ([...u.searchParams.keys()].some((name) => name !== "returnTo")) {
       return respondError(400, "unexpected_parameter");
@@ -1414,7 +1422,7 @@ async function handleWebRequestInternal(request: Request, env: WhoYouEnv): Promi
 
   if (path === "/auth/logout") {
     if (request.method !== "POST") return respondError(405, "method_not_allowed");
-    if (request.headers.get("origin") !== ORIGIN) return respondError(403, "origin_not_allowed");
+    if (!sameOriginPost(request, ORIGIN)) return respondError(403, "origin_not_allowed");
     const raw = await unseal(key, getCookie(request, SESSION_COOKIE));
     const h = headers();
     addCookie(h, SESSION_COOKIE, "", 0);
@@ -1439,7 +1447,7 @@ async function handleWebRequestInternal(request: Request, env: WhoYouEnv): Promi
     || applicationsMutation;
   if (mutation) {
     if (request.method !== "POST") return respondError(405, "method_not_allowed");
-    if (request.headers.get("origin") !== ORIGIN) return respondError(403, "origin_not_allowed");
+    if (!sameOriginPost(request, ORIGIN)) return respondError(403, "origin_not_allowed");
     if (request.headers.has("authorization")) return respondError(400, "unexpected_authorization");
     if ([...u.searchParams.keys()].length > 0) return respondError(400, "unexpected_parameter");
   } else if (request.method !== "GET") return respondError(405, "method_not_allowed");
