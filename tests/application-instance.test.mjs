@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { Miniflare } from "miniflare";
+import { migrationStatements } from "./workerd-harness.mjs";
 
 const origin = "https://mail-instance.example";
 const appId = "app-fixture-instance";
@@ -13,8 +14,11 @@ const bindings = {
 
 test("real Worker publishes the instance declaration and verifies only the configured proof", async () => {
   const mf = new Miniflare({ modules: true, scriptPath: "dist/worker.mjs",
-    compatibilityDate: "2026-08-06", cf: false, bindings });
+    compatibilityDate: "2026-08-06", cf: false, bindings, d1Databases: ["DB"] });
   try {
+    const db = await mf.getD1Database("DB");
+    await db.batch(migrationStatements("migrations/0014_application_app_secret.sql")
+      .map((statement) => db.prepare(statement)));
     const r = await mf.dispatchFetch(origin + "/.well-known/mira-application");
     assert.equal(r.status, 200);
     assert.equal(r.headers.get("cache-control"), "no-store");

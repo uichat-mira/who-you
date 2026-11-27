@@ -3,6 +3,12 @@ import { webIcon } from "./icons";
 import { webStylesCss } from "./web-styles";
 import { createMailServices, resolveCredentialKeys, type WhoYouEnv } from "../mail/config";
 import { applicationManifest, resolveApplicationInstance, resolveInstanceResource } from "../application/instance";
+import {
+  ApplicationSecretRepository,
+  generateAppSecret,
+  type AppSecretState,
+  type AppSecretStatus,
+} from "../application/app-secret";
 import { listIdentities, unlinkMailbox } from "../mail/identity";
 import { startGmailLink } from "../mail/gmail-link";
 import { syncGmailMailbox } from "../mail/gmail-sync";
@@ -36,6 +42,8 @@ const SESSION_AAD = "who-you-application-session-v1";
 const OWNER_SESSION_AAD = "who-you-owner-session-v1";
 const APPLICATIONS_PATH = "/account/applications";
 const APPLICATIONS_PASSWORD_PATH = "/account/applications/password";
+const APPLICATIONS_SECRET_VIEW_PATH = "/account/applications/secret/view";
+const APPLICATIONS_SECRET_ROTATE_PATH = "/account/applications/secret/rotate";
 type ProtectedPage = "/account" | "/account/mailboxes" | typeof APPLICATIONS_PATH;
 type Flow = { state: string; verifier: string; appId: string; at: number; returnTo?: ProtectedPage };
 type Session = { accessToken: string; expiresAt: string; subject: string; audience: string; appId: string; issuer: "mira:cloud-auth" };
@@ -433,15 +441,22 @@ ${applicationsRow}
 </div></details>`;
 }
 
+type ApplicationSecretPanel = {
+  state: AppSecretStatus | null;
+  error: "password" | "conflict" | "rotated" | "unavailable" | null;
+  revealed: { value: string; state: AppSecretStatus } | null;
+};
+
 function renderApplicationsPage(
   instance: NonNullable<ReturnType<typeof resolveApplicationInstance>>,
   credential: OwnerCredential,
   notice: "owner_password_changed" | null,
-  error: boolean,
+  passwordError: boolean,
+  secrets: ApplicationSecretPanel,
 ): string {
   const manifest = applicationManifest(instance);
   const service = manifest.services[0]!;
-  const banner = error
+  const banner = passwordError
     ? `<div class="notice error" role="alert"><strong>密码没有修改</strong>
 <p>当前密码不正确，或新密码不符合要求。新密码至少 12 个字符，且不能与当前密码相同。</p></div>`
     : credential.mustChangePassword
@@ -450,8 +465,55 @@ function renderApplicationsPage(
       : notice === "owner_password_changed"
         ? `<div class="notice ok" role="status"><p>Owner 密码已更新。旧密码和此前签发的 Owner 会话已失效。</p></div>`
         : "";
+  const secretError = secrets.error === "password"
+    ? `<div class="notice error" role="alert"><strong>操作没有完成</strong>
+<p>当前 Owner 密码不正确。请重新输入后重试。</p></div>`
+    : secrets.error === "conflict"
+      ? `<div class="notice error" role="alert"><strong>操作没有完成</strong>
+<p>AppSecret 状态已经变化，本次请求未生效。请刷新页面后重试。</p></div>`
+      : secrets.error === "rotated"
+        ? `<div class="notice" role="status"><strong>初始 AppSecret 已不可查看</strong>
+<p>本实例已经完成过轮换，部署初始 Secret 不再显示。如果当前轮换 Secret 已遗失，请直接再次轮换。</p></div>`
+        : secrets.error === "unavailable"
+          ? `<div class="notice error" role="alert"><strong>AppSecret 操作暂不可用</strong>
+<p>无法读取本实例的 AppSecret 状态，因此没有执行查看或轮换。请稍后重试。</p></div>`
+          : "";
+  const secretStatus = secrets.state === null
+    ? `<div class="setting-row"><div><strong>当前状态</strong>
+<p class="hint">暂时无法读取本实例的 AppSecret 状态，因此不提供查看或轮换操作。请稍后重试。</p></div><span class="pill bad">不可用</span></div>`
+    : secrets.state.kind === "bootstrap"
+      ? `<div class="setting-row"><div><strong>当前状态</strong>
+<p class="hint">当前有效的是部署环境提供的初始 Secret，本实例内尚未轮换。</p></div><span class="pill warn">部署初始 Secret</span></div>`
+      : `<div class="setting-row"><div><strong>当前状态</strong>
+<p class="hint">已由本实例 Owner 轮换。部署初始 Secret 和此前所有轮换 Secret 都已失效。</p>
+<p class="hint">当前版本 <code>${secrets.state.version}</code> · 轮换时间 <code>${escapeText(new Date(secrets.state.rotatedAt).toISOString())}</code></p></div><span class="pill ok">已轮换</span></div>`;
+  const revealed = secrets.revealed
+    ? `<div class="notice ok" role="status">
+<strong>${secrets.revealed.state.kind === "bootstrap" ? "部署初始 AppSecret" : "新的 AppSecret（仅显示一次）"}</strong>
+<p>${secrets.revealed.state.kind === "bootstrap"
+    ? "该 Secret 来自部署环境，仅用于本实例现在的 Mira ID 登记验证。首次轮换后它会立即失效，并且不再可查看。"
+    : "请立即复制并安全保存。离开本页后不会再次完整显示；遗失后只能由 Owner 再次轮换。"}</p>
+<pre class="secret-value" aria-label="当前 AppSecret">${escapeText(secrets.revealed.value)}</pre>
+<p class="hint">不要把 Secret 写入 URL、聊天记录、工单、日志或公开仓库。</p>
+</div>`
+    : "";
+  const secretActions = credential.mustChangePassword || secrets.state === null
+    ? ""
+    : `${secrets.state.kind === "bootstrap"
+      ? `<form class="owner-password-form" method="post" action="${APPLICATIONS_SECRET_VIEW_PATH}">
+<p><label for="owner-view-secret-password">当前 Owner 密码</label><br>
+<input id="owner-view-secret-password" type="password" name="currentPassword" autocomplete="current-password" required maxlength="${OWNER_PASSWORD_MAX_LENGTH}"></p>
+<button class="button secondary" type="submit">查看部署初始 AppSecret</button>
+</form>`
+      : `<p class="hint">部署初始 Secret 在首次轮换后不可再查看。如果当前轮换 Secret 已遗失，请直接再次轮换。</p>`}
+<form class="owner-password-form" method="post" action="${APPLICATIONS_SECRET_ROTATE_PATH}">
+<p><label for="owner-rotate-secret-password">当前 Owner 密码</label><br>
+<input id="owner-rotate-secret-password" type="password" name="currentPassword" autocomplete="current-password" required maxlength="${OWNER_PASSWORD_MAX_LENGTH}"></p>
+<button class="button" type="submit">轮换 AppSecret</button>
+</form>
+<p class="footnote">轮换只改变未来登记验证使用的凭据；不会撤销 Mira ID ownership、普通用户登录、邮箱连接、服务授权或 MCP 凭据。</p>`;
   return `<h1>应用管理</h1>
-<p class="lead">仅本部署实例的本地 Owner 可见。这里管理 Owner 登录凭据并查看实例公开摘要。</p>
+<p class="lead">仅本部署实例的本地 Owner 可见。这里管理 Owner 登录凭据、实例登记信息与 AppSecret 生命周期。</p>
 ${banner}
 <section aria-labelledby="owner-password">
 <h2 id="owner-password">Owner 登录</h2>
@@ -482,9 +544,15 @@ ${banner}
 <div><dt>实例声明权限（非当前用户授权）</dt><dd><code>${escapeText(service.scopes.join(", "))}</code></dd></div>
 </dl>
 </section>
-<section aria-labelledby="app-secret-placeholder">
-<h2 id="app-secret-placeholder">APP Secret</h2>
-<p class="hint">APP Secret 的展示与轮换属于后续独立工作项。本页面不读取、不显示、不生成，也不轮换任何 APP Secret。</p>
+<section aria-labelledby="app-secret">
+<h2 id="app-secret">APP Secret</h2>
+<p class="hint">APP_ID 稳定不变。AppSecret 只用于在 Mira ID 登记本实例的管理权，不是 OAuth client_secret、MCP 凭据或用户密码。</p>
+${secretError}
+${revealed}
+<div class="settings">
+${secretStatus}
+</div>
+${secretActions}
 </section>
 <div class="setting-actions"><form method="post" action="/auth/logout"><button class="button secondary" type="submit">退出狐邮</button></form></div>`;
 }
@@ -523,6 +591,17 @@ async function validateSession(env: WhoYouEnv, session: Session): Promise<boolea
 
 function ownerRepository(env: WhoYouEnv): OwnerRepository | null {
   return env.DB ? new OwnerRepository(env.DB) : null;
+}
+
+function applicationSecretRepository(env: WhoYouEnv): ApplicationSecretRepository | null {
+  return env.DB ? new ApplicationSecretRepository(env.DB) : null;
+}
+
+/** A failed read is `null`, never a synthesized bootstrap state. */
+async function loadAppSecretState(env: WhoYouEnv): Promise<AppSecretState | null> {
+  const repository = applicationSecretRepository(env);
+  if (!repository) return null;
+  try { return await repository.current(); } catch { return null; }
 }
 
 async function loadOwnerCredential(env: WhoYouEnv): Promise<OwnerCredential | null> {
@@ -1138,6 +1217,7 @@ async function handleWebRequestInternal(request: Request, env: WhoYouEnv): Promi
     "/auth/owner/login", "/account",
     "/account/mailboxes", "/account/mailboxes/gmail/link", "/account/mailboxes/unlink",
     "/account/mailboxes/sync", APPLICATIONS_PATH, APPLICATIONS_PASSWORD_PATH,
+    APPLICATIONS_SECRET_VIEW_PATH, APPLICATIONS_SECRET_ROTATE_PATH,
     "/api/whoami", "/api/mailboxes",
   ];
   if (!webPaths.includes(path) && path !== GMAIL_CALLBACK_PATH) return null;
@@ -1350,10 +1430,13 @@ async function handleWebRequestInternal(request: Request, env: WhoYouEnv): Promi
     return redirect("/", h);
   }
 
+  const applicationsMutation = path === APPLICATIONS_PASSWORD_PATH
+    || path === APPLICATIONS_SECRET_VIEW_PATH
+    || path === APPLICATIONS_SECRET_ROTATE_PATH;
   const mutation = path === "/account/mailboxes/gmail/link"
     || path === "/account/mailboxes/unlink"
     || path === "/account/mailboxes/sync"
-    || path === APPLICATIONS_PASSWORD_PATH;
+    || applicationsMutation;
   if (mutation) {
     if (request.method !== "POST") return respondError(405, "method_not_allowed");
     if (request.headers.get("origin") !== ORIGIN) return respondError(403, "origin_not_allowed");
@@ -1363,7 +1446,7 @@ async function handleWebRequestInternal(request: Request, env: WhoYouEnv): Promi
   const principal = await resolveWebPrincipal(request, key, env, instance);
   if (!principal) {
     if (mutation) {
-      return redirect(guardLocation(path === APPLICATIONS_PASSWORD_PATH
+      return redirect(guardLocation(applicationsMutation
         ? APPLICATIONS_PATH : "/account/mailboxes"));
     }
     if (validReturnTo(path)) return redirect(guardLocation(path));
@@ -1453,9 +1536,74 @@ async function handleWebRequestInternal(request: Request, env: WhoYouEnv): Promi
       return respondError(401, "sign_in_required");
     }
     return page(renderApplicationsPage(instance, credential,
-      ownerNotice(u.searchParams.get("notice")), false), headers(), 200,
+      ownerNotice(u.searchParams.get("notice")), false, {
+        state: await loadAppSecretState(env), error: null, revealed: null,
+      }), headers(), 200,
       { shell: "app", active: "applications", isOwner: true, sessionVerified: true,
         ownerPendingPasswordChange: credential.mustChangePassword });
+  }
+
+  if (path === APPLICATIONS_SECRET_VIEW_PATH) {
+    if (principal.kind !== "owner") return respondError(404, "not_found");
+    const form = await readForm(request, ["currentPassword"], 4096);
+    if (!form) return respondError(400, "invalid_request");
+    const credential = await loadOwnerCredential(env);
+    if (!credential || credential.credentialVersion !== principal.credentialVersion) {
+      return respondError(401, "sign_in_required");
+    }
+    const state = await loadAppSecretState(env);
+    const render = (error: ApplicationSecretPanel["error"], revealed:
+      ApplicationSecretPanel["revealed"], status: number): Response =>
+      page(renderApplicationsPage(instance, credential, null, false, {
+        state, error, revealed,
+      }), headers(), status,
+      { shell: "app", active: "applications", isOwner: true, sessionVerified: true });
+    if (!await verifyOwnerPassword(form.get("currentPassword") ?? "", credential)) {
+      return render("password", null, 403);
+    }
+    if (state === null) return render("unavailable", null, 503);
+    if (state.kind === "rotated") return render("rotated", null, 409);
+    if (!env.WHOYOU_APP_SECRET) return respondError(503, "application_not_configured");
+    return render(null, { value: env.WHOYOU_APP_SECRET, state }, 200);
+  }
+
+  if (path === APPLICATIONS_SECRET_ROTATE_PATH) {
+    if (principal.kind !== "owner") return respondError(404, "not_found");
+    const form = await readForm(request, ["currentPassword"], 4096);
+    if (!form) return respondError(400, "invalid_request");
+    const credential = await loadOwnerCredential(env);
+    if (!credential || credential.credentialVersion !== principal.credentialVersion) {
+      return respondError(401, "sign_in_required");
+    }
+    const state = await loadAppSecretState(env);
+    const render = (error: ApplicationSecretPanel["error"], status: number): Response =>
+      page(renderApplicationsPage(instance, credential, null, false, {
+        state, error, revealed: null,
+      }), headers(), status,
+      { shell: "app", active: "applications", isOwner: true, sessionVerified: true });
+    if (!await verifyOwnerPassword(form.get("currentPassword") ?? "", credential)) {
+      return render("password", 403);
+    }
+    if (state === null) return render("unavailable", 503);
+    const repository = applicationSecretRepository(env);
+    if (!repository) return render("unavailable", 503);
+    const secret = generateAppSecret(), now = Date.now();
+    let nextVersion: number | null;
+    try {
+      nextVersion = await repository.rotate({
+        expectedVersion: state.kind === "rotated" ? state.version : 0,
+        secret,
+        now,
+      });
+    } catch {
+      return render("unavailable", 503);
+    }
+    if (nextVersion === null) return render("conflict", 409);
+    const rotated: AppSecretStatus = { kind: "rotated", version: nextVersion, rotatedAt: now };
+    return page(renderApplicationsPage(instance, credential, null, false, {
+      state: rotated, error: null, revealed: { value: secret, state: rotated },
+    }), headers(), 200,
+    { shell: "app", active: "applications", isOwner: true, sessionVerified: true });
   }
 
   if (path === APPLICATIONS_PASSWORD_PATH) {
@@ -1473,7 +1621,9 @@ async function handleWebRequestInternal(request: Request, env: WhoYouEnv): Promi
     const currentValid = await verifyOwnerPassword(currentPassword, credential);
     if (!currentValid || !validateOwnerPassword(newPassword)
         || newPassword !== confirmPassword || newPassword === currentPassword) {
-      return page(renderApplicationsPage(instance, credential, null, true), headers(), 400,
+      return page(renderApplicationsPage(instance, credential, null, true, {
+        state: await loadAppSecretState(env), error: null, revealed: null,
+      }), headers(), 400,
         { shell: "app", active: "applications", isOwner: true, sessionVerified: true,
           ownerPendingPasswordChange: credential.mustChangePassword });
     }
