@@ -426,17 +426,20 @@ function renderOwnerAccountPage(
   notice: "owner_password_changed" | null,
   passwordError = false,
 ): string {
-  const banner = notice === "owner_password_changed"
-    ? `<div class="notice ok" role="status"><p>管理员密码已更新，旧密码与旧会话已经失效。</p></div>`
-    : mustChangePassword
-      ? `<div class="notice auth-required" role="status"><strong>首次登录请先修改密码</strong>
+  const banner = passwordError
+    ? `<div class="notice error" role="alert"><strong>密码没有修改</strong>
+<p>当前密码不正确，或新密码不符合要求。请重新打开“修改密码”后重试。</p></div>`
+    : notice === "owner_password_changed"
+      ? `<div class="notice ok" role="status"><p>管理员密码已更新，旧密码与旧会话已经失效。</p></div>`
+      : mustChangePassword
+        ? `<div class="notice auth-required" role="status"><strong>首次登录请先修改密码</strong>
 <p>完成修改后即可继续使用狐邮。</p></div>`
-      : "";
+        : "";
   return `<h1>账户</h1>
 ${banner}
 <div class="settings compact-settings">
 <div class="setting-row"><div><strong>管理员账号</strong><p class="account-value">${OWNER_LOGIN_NAME}</p></div>
-${renderPasswordDialog(mustChangePassword, passwordError)}</div>
+${renderPasswordDialog(mustChangePassword, false)}</div>
 </div>
 <div class="setting-actions"><form method="post" action="/auth/logout"><button class="button secondary" type="submit">退出登录</button></form></div>`;
 }
