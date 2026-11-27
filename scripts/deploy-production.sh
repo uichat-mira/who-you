@@ -19,7 +19,7 @@ jq -e '
   any(.[]; .name=="DB" and .type=="d1" and .id=="d1bea1ba-466c-414b-8988-99978678bd9f") and
   any(.[]; .name=="MAIL_BUCKET" and .type=="r2_bucket" and .bucket_name=="who-you-tomz-preview-attachments") and
   ([.[] | select(.type=="secret_text") | .name] | sort) ==
-  ["GMAIL_OAUTH_CLIENT_SECRET","MAIL_CREDENTIAL_KEK","WHOYOU_APP_SECRET","WHOYOU_OWNER_INITIAL_PASSWORD","WHOYOU_WEB_SESSION_KEY"]
+  ["GMAIL_OAUTH_CLIENT_SECRET","MAIL_CREDENTIAL_KEK","WHOYOU_APP_SECRET","WHOYOU_WEB_SESSION_KEY"]
 ' <<< "$before" >/dev/null
 before_cron=$(schedules)
 test "$before_cron" = '["*/5 * * * *","17 3 * * *"]'
