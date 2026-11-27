@@ -343,7 +343,7 @@ export async function authenticateOwner(input: {
 
 	let credential = await input.repository.get();
 	if (!credential) {
-			const configured = input.initialPassword?.length
+		const configured = input.initialPassword?.length
 			? input.initialPassword
 			: OWNER_DEFAULT_INITIAL_PASSWORD;
 		if (!validateInitialOwnerPassword(configured)
