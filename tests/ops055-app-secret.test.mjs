@@ -156,7 +156,7 @@ async function loginMira(mf) {
 	return cookie;
 }
 
-function secretAction(mf, path, cookie, password, origin = ORIGIN, extra = {}) {
+function secretAction(mf, path, cookie, origin = ORIGIN) {
 	return mf.dispatchFetch(ORIGIN + path, {
 		method: "POST",
 		redirect: "manual",
@@ -165,7 +165,7 @@ function secretAction(mf, path, cookie, password, origin = ORIGIN, extra = {}) {
 			"content-type": "application/x-www-form-urlencoded",
 			...(cookie ? { cookie } : {}),
 		},
-		body: new URLSearchParams({ currentPassword: password, ...extra }).toString(),
+		body: "",
 	});
 }
 
@@ -224,22 +224,24 @@ test("Owner views the bootstrap secret, rotates it, and only the current version
 			{ headers: { cookie: owner } });
 		assert.equal(applications.status, 200);
 		const applicationsBody = await applications.text();
-		assert.match(applicationsBody, /部署初始 Secret/);
-		assert.match(applicationsBody, /APP_ID 稳定不变/);
-		assert.ok(applicationsBody.includes(APP_ID));
+		assert.match(applicationsBody, /<h1>应用管理<\/h1>/);
 		assert.ok(applicationsBody.includes(ORIGIN));
+		assert.match(applicationsBody, /href="\/account\/applications\/current"/);
+		assert.doesNotMatch(applicationsBody, /APP ID|AppSecret/);
 		assert.ok(!applicationsBody.includes(APP_SECRET));
-		assert.doesNotMatch(applicationsBody, SECRET_PATTERN);
 
-		const wrongView = await secretAction(mf, "/account/applications/secret/view",
-			owner, "wrong-owner-password");
-		assert.equal(wrongView.status, 403);
-		const wrongViewBody = await wrongView.text();
-		assert.ok(!wrongViewBody.includes(APP_SECRET));
-		assert.doesNotMatch(wrongViewBody, SECRET_PATTERN);
+		const instancePage = await mf.dispatchFetch(ORIGIN + "/account/applications/current",
+			{ headers: { cookie: owner } });
+		assert.equal(instancePage.status, 200);
+		const instanceBody = await instancePage.text();
+		assert.ok(instanceBody.includes(APP_ID));
+		assert.match(instanceBody, /显示 AppSecret/);
+		assert.match(instanceBody, /确认轮换/);
+		assert.doesNotMatch(instanceBody, /当前 Owner 密码|currentPassword/);
+		assert.ok(!instanceBody.includes(APP_SECRET));
+		assert.doesNotMatch(instanceBody, SECRET_PATTERN);
 
-		const view = await secretAction(mf, "/account/applications/secret/view",
-			owner, OWNER_PASSWORD);
+		const view = await secretAction(mf, "/account/applications/secret/view", owner);
 		assert.equal(view.status, 200);
 		assert.equal(view.headers.get("cache-control"), "no-store");
 		assert.equal(view.headers.get("location"), null);
@@ -252,18 +254,13 @@ test("Owner views the bootstrap secret, rotates it, and only the current version
 		assert.equal(bootstrapProof.status, 200);
 		assert.deepEqual(await bootstrapProof.json(), { ok: true, appId: APP_ID });
 
-		const wrongRotate = await secretAction(mf, "/account/applications/secret/rotate",
-			owner, "wrong-owner-password");
-		assert.equal(wrongRotate.status, 403);
-		assert.doesNotMatch(await wrongRotate.text(), SECRET_PATTERN);
 		const stillBootstrap = await db.prepare(
 			`SELECT COUNT(*) AS count FROM application_app_secret`,
 		).first();
 		assert.equal(stillBootstrap.count, 0);
 		assert.equal((await verifyRegistration(mf, APP_SECRET)).status, 200);
 
-		const rotated = await secretAction(mf, "/account/applications/secret/rotate",
-			owner, OWNER_PASSWORD);
+		const rotated = await secretAction(mf, "/account/applications/secret/rotate", owner);
 		assert.equal(rotated.status, 200);
 		assert.equal(rotated.headers.get("cache-control"), "no-store");
 		assert.equal(rotated.headers.get("location"), null);
@@ -275,20 +272,19 @@ test("Owner views the bootstrap secret, rotates it, and only the current version
 		assert.equal(rotatedBody.split(firstRotated).length - 1, 1);
 		assert.match(rotatedBody, /新的 AppSecret（仅显示一次）/);
 
-		const refresh = await mf.dispatchFetch(ORIGIN + "/account/applications",
+		const refresh = await mf.dispatchFetch(ORIGIN + "/account/applications/current",
 			{ headers: { cookie: owner } });
 		assert.equal(refresh.status, 200);
 		const refreshBody = await refresh.text();
 		assert.match(refreshBody, /已轮换/);
-		assert.match(refreshBody, /部署初始 Secret 和此前所有轮换 Secret 都已失效/);
+		assert.match(refreshBody, /轮换后的 Secret 不保存可恢复明文/);
 		assert.ok(!refreshBody.includes(firstRotated));
 		assert.ok(!refreshBody.includes(APP_SECRET));
 		assert.doesNotMatch(refreshBody, SECRET_PATTERN);
-		const viewAfterRotation = await secretAction(mf, "/account/applications/secret/view",
-			owner, OWNER_PASSWORD);
+		const viewAfterRotation = await secretAction(mf, "/account/applications/secret/view", owner);
 		assert.equal(viewAfterRotation.status, 409);
 		const viewAfterBody = await viewAfterRotation.text();
-		assert.match(viewAfterBody, /初始 AppSecret 已不可查看/);
+		assert.match(viewAfterBody, /当前 AppSecret 不可再次查看/);
 		assert.ok(!viewAfterBody.includes(firstRotated));
 		assert.ok(!viewAfterBody.includes(APP_SECRET));
 
@@ -322,8 +318,7 @@ test("Owner views the bootstrap secret, rotates it, and only the current version
 		assert.deepEqual((await miraMailboxes.json()).mailboxes.map((mailbox) => mailbox.address),
 			["alpha@tomlab.cn"]);
 
-		const second = await secretAction(mf, "/account/applications/secret/rotate",
-			owner, OWNER_PASSWORD);
+		const second = await secretAction(mf, "/account/applications/secret/rotate", owner);
 		assert.equal(second.status, 200);
 		const secondSecret = revealedSecret(await second.text());
 		assert.match(secondSecret, /^[A-Za-z0-9_-]{43}$/);
@@ -339,7 +334,7 @@ test("Owner views the bootstrap secret, rotates it, and only the current version
 		assert.equal(versionTwo.secret_version, 2);
 
 		const crossOrigin = await secretAction(mf, "/account/applications/secret/rotate",
-			owner, OWNER_PASSWORD, "https://evil.invalid");
+			owner, "https://evil.invalid");
 		assert.equal(crossOrigin.status, 403);
 		assert.ok(!await crossOrigin.text().then((body) => body.includes(secondSecret)));
 		assert.equal((await verifyRegistration(mf, secondSecret)).status, 200);
@@ -351,32 +346,31 @@ test("Owner views the bootstrap secret, rotates it, and only the current version
 			assert.ok(!await get.text().then((body) => body.includes(secondSecret)));
 		}
 
-		const anonymous = await secretAction(mf, "/account/applications/secret/view",
-			null, OWNER_PASSWORD);
+		const anonymous = await secretAction(mf, "/account/applications/secret/view", null);
 		assert.equal(anonymous.status, 303);
 		assert.match(anonymous.headers.get("location"), /^\/\?reason=sign_in_required/);
 		assert.ok(!await anonymous.text().then((body) => body.includes(APP_SECRET)));
 
-		const miraView = await secretAction(mf, "/account/applications/secret/view",
-			mira, OWNER_PASSWORD);
+		const miraView = await secretAction(mf, "/account/applications/secret/view", mira);
 		assert.equal(miraView.status, 404);
 
 		const withQuery = await mf.dispatchFetch(
 			ORIGIN + "/account/applications/secret/rotate?notice=x", {
 			method: "POST",
 			headers: { origin: ORIGIN, "content-type": "application/x-www-form-urlencoded", cookie: owner },
-			body: new URLSearchParams({ currentPassword: OWNER_PASSWORD }).toString(),
+			body: "",
 		});
 		assert.equal(withQuery.status, 400);
 
 		// A missing/unreadable state table must reject proofs instead of falling
 		// back to the deployment bootstrap secret.
 		await db.prepare("DROP TABLE application_app_secret").run();
-		const unavailable = await mf.dispatchFetch(ORIGIN + "/account/applications",
+		const unavailable = await mf.dispatchFetch(ORIGIN + "/account/applications/current",
 			{ headers: { cookie: owner } });
 		assert.equal(unavailable.status, 200);
 		const unavailableBody = await unavailable.text();
-		assert.match(unavailableBody, /暂时无法读取本实例的 AppSecret 状态/);
+		assert.match(unavailableBody, /AppSecret/);
+		assert.match(unavailableBody, /不可用/);
 		assert.ok(!unavailableBody.includes(secondSecret));
 		assert.equal((await verifyRegistration(mf, secondSecret)).status, 403);
 		assert.equal((await verifyRegistration(mf, APP_SECRET)).status, 403);
